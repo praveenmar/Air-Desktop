@@ -1,0 +1,12 @@
+// Purpose: Standardized code formatting configuration.
+// Prototype Origin: New file for Electron scaffolding.
+// Changes: Defines 2-space indents, single quotes, and trailing commas.
+
+{
+  "semi": true,
+  "trailingComma": "es5",
+  "singleQuote": true,
+  "printWidth": 100,
+  "tabWidth": 2,
+  "endOfLine": "lf"
+}

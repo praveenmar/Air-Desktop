@@ -1,0 +1,16 @@
+// Purpose: TypeScript configuration specific to the Node.js context (Main, Preload, Core).
+// Prototype Origin: New file for Electron scaffolding.
+// Changes: Excludes React/renderer code, targets Node environments.
+
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "types": ["node", "better-sqlite3", "electron"]
+  },
+  "include": [
+    "electron/**/*",
+    "core/**/*",
+    "vite.config.ts"
+  ]
+}

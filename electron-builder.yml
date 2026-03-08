@@ -1,0 +1,30 @@
+# Purpose: Configuration for packaging the application into executables.
+# Prototype Origin: New file for Electron scaffolding.
+# Changes: Sets up NSIS installer for Windows and standard Mac build.
+
+appId: com.air.desktop
+productName: AIR Desktop
+directories:
+  output: dist
+  buildResources: assets
+
+files:
+  - out/**/*
+  - interceptor/**/*
+
+extraResources:
+  - from: interceptor/interceptor.js
+    to: interceptor.js
+
+mac:
+  target: dmg
+  category: public.app-category.developer-tools
+
+win:
+  target: nsis
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true

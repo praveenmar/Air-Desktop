@@ -1,0 +1,14 @@
+// Purpose: TypeScript configuration specific to the Browser context (Renderer).
+// Prototype Origin: New file for Electron scaffolding.
+// Changes: Excludes Node/backend code, includes React DOM environment types.
+
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "types": ["vite/client"]
+  },
+  "include": [
+    "src/**/*"
+  ]
+}

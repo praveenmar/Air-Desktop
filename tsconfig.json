@@ -1,0 +1,29 @@
+// Purpose: Base TypeScript configuration for the entire monorepo-style structure.
+// Prototype Origin: New file for Electron scaffolding.
+// Changes: Enforces strict mode, ES2022, and sets up path aliases.
+
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true,
+    "strict": true,
+    "noImplicitAny": true,
+    "noImplicitReturns": true,
+    "forceConsistentCasingInFileNames": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@core/*": ["core/*"],
+      "@src/*": ["src/*"],
+      "@electron/*": ["electron/*"]
+    }
+  }
+}
