@@ -3,11 +3,11 @@
 // Changes: Adapted to use NodeRepository and StateEngine.
 
 import crypto from 'crypto';
-import { NodeRepository } from '../../db/repositories/node.repository';
 import { DebugLogger } from '../../logger/debug-logger';
 import { StateEngine } from '../state-engine';
 import { AIREvent, ElementFingerprint, PageSnapshot } from '../../types';
 import { IntentDetector } from '../intent-detector';
+import { NodeRepository, NodeUpdate } from '../../db/repositories/node.repository';
 
 export class BaselineHandler {
   constructor(
@@ -63,17 +63,17 @@ export class BaselineHandler {
 
       const existing = this.nodeRepo.findByHash('default', canonicalHash);
 
-      if (existing) {
-        this.nodeRepo.updateObservation(
-          existing.id,
-          event.timestamp,
-          JSON.stringify(metadata),
-          anchors ? 'anchor' : 'html',
-          anchors,
-          resolvedUrl,
-          viewportWidth,
-          viewportHeight
-        );
+     if (existing) {
+        const updates: NodeUpdate = {
+          lastObservedAt: event.timestamp,
+          metadata: JSON.stringify(metadata),
+          stateSource: anchors ? 'anchor' : 'html',
+          anchors: anchors,
+          pageUrl: resolvedUrl,
+        };
+        if (viewportWidth !== null) updates.viewportWidth = viewportWidth;
+        if (viewportHeight !== null) updates.viewportHeight = viewportHeight;
+        this.nodeRepo.updateObservation(existing.id, updates);
         return existing.id;
       }
 
@@ -117,22 +117,7 @@ export class BaselineHandler {
       
       const metadata = { stateSource: 'fingerprint' };
       const existing = this.nodeRepo.findByHash('default', canonicalHash);
-      
-      if (existing) {
-        this.nodeRepo.updateObservation(
-          existing.id,
-          event.timestamp,
-          JSON.stringify(metadata),
-          'fingerprint',
-          null, // no anchors
-          event.pageUrl || null,
-          null, // Keep existing viewport width
-          null  // Keep existing viewport height
-        );
-        return existing.id;
-      }
 
-      const nodeId = crypto.randomUUID();
       let viewportWidth: number | null = null;
       let viewportHeight: number | null = null;
       
@@ -140,6 +125,20 @@ export class BaselineHandler {
         viewportWidth = event.viewport.width;
         viewportHeight = event.viewport.height;
       }
+      
+      if (existing) {
+      const updates: NodeUpdate = {
+        lastObservedAt: event.timestamp,
+        metadata: JSON.stringify(metadata),
+        stateSource: 'fingerprint',
+        pageUrl: event.pageUrl || null,  // always update pageUrl (even if null)
+      };
+        if (viewportWidth !== null) updates.viewportWidth = viewportWidth;
+        if (viewportHeight !== null) updates.viewportHeight = viewportHeight;
+        this.nodeRepo.updateObservation(existing.id, updates);
+      return existing.id;
+      }
+      const nodeId = crypto.randomUUID();
 
       this.nodeRepo.upsert({
         id: nodeId,

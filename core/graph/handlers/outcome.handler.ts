@@ -47,12 +47,21 @@ export class OutcomeHandler {
     
     // Fetch the original trigger event to compare URLs
     const triggerEventRow = this.eventRepo.findById(pendingAction.triggerEventId);
-    
-    if (triggerEventRow?.page_url !== outcomeEvent.meta?.urlAfter) {
-      outcomeType = 'navigation';
-    } else if (fromNodeId === toNodeId) {
-      outcomeType = 'no_change';
-    }
+
+    if (!triggerEventRow) {
+      // Log the issue, then set a safe fallback and skip URL comparison
+      this.logger.log('OutcomeHandler', 'warn', 'Trigger event not found; cannot determine navigation', { traceId: pendingAction.traceId });
+      outcomeType = 'state_refresh'; // or maybe 'no_change'? state_refresh is a safe bet
+    } else {
+      
+    // Normal logic using triggerEventRow
+    if (triggerEventRow.page_url !== outcomeEvent.meta?.urlAfter) {
+    outcomeType = 'navigation';
+  } else if (fromNodeId === toNodeId) {
+    outcomeType = 'no_change';
+  }
+  // else outcomeType remains 'state_refresh'
+}
 
     // This guarantees fpHash is a strict string, never null
     const fpHash = pendingAction.fingerprintHash || 'unknown';
@@ -69,6 +78,7 @@ export class OutcomeHandler {
         toNodeId: existingEdge.toNodeId,
         triggerEventId: existingEdge.triggerEventId,
         fingerprintHash: fpHash, // Overrides the string | null from existingEdge
+       outcomeType: outcomeType,
         lastUpdated: Date.now()
       });
       this.updateOutcomeProbability(existingEdge.id, toNodeId);

@@ -5,6 +5,16 @@
 import { Database } from 'better-sqlite3';
 import { GraphNode } from '../../types';
 
+export interface NodeUpdate {
+  lastObservedAt?: number;
+  metadata?: string | null;
+  stateSource?: string | null;
+  anchors?: string | null;
+  pageUrl?: string | null;
+  viewportWidth?: number | null;
+  viewportHeight?: number | null;
+}
+
 export class NodeRepository {
   constructor(private db: Database) {}
 
@@ -27,18 +37,21 @@ export class NodeRepository {
     const existing = this.findByHash(node.projectId, node.canonicalHash);
 
     if (existing) {
-      this.updateObservation(
-        existing.id,
-        node.lastObservedAt || Date.now(),
-        node.metadata || null,
-        node.stateSource || null,
-        node.anchors || null,
-        node.pageUrl || null,
-        node.viewportWidth || null,
-        node.viewportHeight || null
-      );
-      return existing.id;
-    }
+    const updates: NodeUpdate = {};
+
+    // lastObservedAt defaults to now if not provided
+    updates.lastObservedAt = node.lastObservedAt ?? Date.now();
+
+    if (node.metadata !== undefined) updates.metadata = node.metadata;
+    if (node.stateSource !== undefined) updates.stateSource = node.stateSource;
+    if (node.anchors !== undefined) updates.anchors = node.anchors;
+    if (node.pageUrl !== undefined) updates.pageUrl = node.pageUrl;
+    if (node.viewportWidth !== undefined) updates.viewportWidth = node.viewportWidth;
+    if (node.viewportHeight !== undefined) updates.viewportHeight = node.viewportHeight;
+
+    this.updateObservation(existing.id, updates);
+    return existing.id;
+  }
 
     const stmt = this.db.prepare(`
       INSERT INTO nodes (
@@ -68,24 +81,45 @@ export class NodeRepository {
     return node.id;
   }
 
-  public updateObservation(
-    id: string, 
-    timestamp: number, 
-    metadata: string | null, 
-    stateSource: string | null,
-    anchors: string | null,
-    pageUrl: string | null,
-    viewportWidth: number | null,
-    viewportHeight: number | null
-  ): void {
-    const stmt = this.db.prepare(`
-      UPDATE nodes 
-      SET last_observed_at = ?, observation_count = observation_count + 1, 
-          metadata = ?, state_source = ?, anchors = COALESCE(anchors, ?),
-          page_url = COALESCE(page_url, ?), viewport_width = COALESCE(viewport_width, ?), viewport_height = COALESCE(viewport_height, ?)
-      WHERE id = ?
-    `);
+  public updateObservation(id: string, updates: NodeUpdate): void {
+  const setClauses: string[] = [];
+  const params: any[] = [];
 
-    stmt.run(timestamp, metadata, stateSource, anchors, pageUrl, viewportWidth, viewportHeight, id);
+  // Always increment the observation count
+  setClauses.push('observation_count = observation_count + 1');
+
+  if (updates.lastObservedAt !== undefined) {
+    setClauses.push('last_observed_at = ?');
+    params.push(updates.lastObservedAt);
   }
+  if (updates.metadata !== undefined) {
+    setClauses.push('metadata = ?');
+    params.push(updates.metadata);
+  }
+  if (updates.stateSource !== undefined) {
+    setClauses.push('state_source = ?');
+    params.push(updates.stateSource);
+  }
+  if (updates.anchors !== undefined) {
+    setClauses.push('anchors = ?');
+    params.push(updates.anchors);
+  }
+  if (updates.pageUrl !== undefined) {
+    setClauses.push('page_url = ?');
+    params.push(updates.pageUrl);
+  }
+  if (updates.viewportWidth !== undefined) {
+    setClauses.push('viewport_width = ?');
+    params.push(updates.viewportWidth);
+  }
+  if (updates.viewportHeight !== undefined) {
+    setClauses.push('viewport_height = ?');
+    params.push(updates.viewportHeight);
+  }
+
+  params.push(id);
+  const sql = `UPDATE nodes SET ${setClauses.join(', ')} WHERE id = ?`;
+  const stmt = this.db.prepare(sql);
+  stmt.run(...params);
+}
 }

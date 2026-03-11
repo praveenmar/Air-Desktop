@@ -71,6 +71,8 @@ export class ActionHandler {
         toNodeId: existingEdge.toNodeId,
         triggerEventId: existingEdge.triggerEventId,
         fingerprintHash: fpHash, // Overrides string | null to strict string for TS
+       // To this beautiful, clean version:
+        outcomeType: existingEdge.outcomeType ?? 'immediate_action',
         lastUpdated: Date.now()
       });
       this.outcomeRepo.updateProbability(existingEdge.id, toNodeId);
