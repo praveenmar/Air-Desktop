@@ -39,9 +39,13 @@ export class ActionHandler {
     const fpHash    = this.computeFingerprintHash(event);
     const safeEventId = event.id || crypto.randomUUID();
 
+    const shouldRegisterPending = ['click', 'submit', 'custom-select'].includes(event.type);
+
     // 1. Register PENDING ACTION in DB (for future Outcome to resolve)
-    this.registerPendingAction(traceId, event.sessionId || '', currentNodeId, safeEventId, event.type, fpHash);
-    this.logger.log('ActionHandler', 'info', 'Registered PENDING ACTION in DB', { traceId, type: event.type });
+    if (shouldRegisterPending) {
+      this.registerPendingAction(traceId, event.sessionId || '', currentNodeId, safeEventId, event.type, fpHash);
+      this.logger.log('ActionHandler', 'info', 'Registered PENDING ACTION in DB', { traceId, type: event.type });
+    }
 
     // 2. Self-Loop Fix: Ensure immediate actions still create edges
     if (lastNodeId) {
@@ -98,12 +102,7 @@ export class ActionHandler {
         // Genuine repeat observation -- increment count and recalculate probability.
         // fingerprintHash must be explicit: GraphEdge.fingerprintHash is string | null
         // but upsert() requires string. All other required fields come from the spread.
-        this.edgeRepo.upsert({
-          ...existingEdge,
-          fingerprintHash: fpHash,
-          outcomeType:     existingEdge.outcomeType ?? 'immediate_action',
-          lastUpdated:     Date.now(),
-        });
+        this.edgeRepo.incrementObservation(existingEdge.id);
         this.outcomeRepo.updateProbability(existingEdge.id, toNodeId);
         return existingEdge.id;
       }
@@ -111,13 +110,15 @@ export class ActionHandler {
       const edgeId    = crypto.randomUUID();
       const outcomeId = crypto.randomUUID();
 
-      this.edgeRepo.upsert({
-        id:             edgeId,
+      // REPLACE with:
+      this.edgeRepo.insert({
+        id: edgeId,
         fromNodeId,
         toNodeId,
         triggerEventId: event.id || crypto.randomUUID(),
         fingerprintHash: fpHash,
-        lastUpdated:    Date.now(),
+        outcomeType: 'immediate_action',  // ← Bug A fix
+        lastUpdated: Date.now(),
       });
 
       // FIX (Bug #10c): insert() already sets decayed_count = 1.0 and probability = 1.0.

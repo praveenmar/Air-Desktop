@@ -15,7 +15,7 @@ export class IntentDetector {
       if (nav?.to) {
         // Extract the last meaningful part of the path (e.g., /dashboard -> dashboard)
         const pathSegment = new URL(nav.to, 'http://dummy.com').pathname.split('/').filter(Boolean).pop() || 'page';
-        return `Maps_to_${this.cleanString(pathSegment)}`;
+        return `navigate_to_${this.cleanString(pathSegment)}`;
       }
     }
 

@@ -471,6 +471,12 @@ class AIRInterceptor {
     this.quiescence = new QuiescenceEngine();
     this.quiescence.monitor();
 
+    // Recover any events stashed to localStorage during a previous page navigation.
+    // MUST run before checkPendingOutcome() to guarantee correct event ordering:
+    // stashed click → outcome (from checkPendingOutcome) → edge created correctly.
+    // See _recoverStashedEvents() for full ordering rationale.
+    this._recoverStashedEvents();
+
     // ✅ FIXED: Establish Baseline State on Load
     const hasPending = this.checkPendingOutcome();
     if (!hasPending) {
@@ -1166,44 +1172,193 @@ class AIRInterceptor {
   /**
    * Flush the entire pending queue during page teardown (beforeunload / pagehide).
    *
-   * FIX (ad-blocker): navigator.sendBeacon goes through the PAGE network stack
-   * and is caught by uBlock/AdGuard (ERR_BLOCKED_BY_CLIENT in logs).
-   * window.__air_gmBeacon routes through GM_xmlhttpRequest in the extension
-   * context - completely invisible to page-level request filters.
+   * Strategy (Belt and Suspenders):
+   *   1. STASH  — write full events (including heavy snapshots) to session-scoped
+   *               localStorage so _recoverStashedEvents() can send them lazily on
+   *               the next page load via stable fetch. Zero size limit, full quality.
+   *   2. BEACON — always fire a stripped beacon (no snapshots) immediately regardless
+   *               of stash success. Guarantees the critical tracing data (id, traceId,
+   *               fingerprint, pageUrl) survives even if the user never returns to this
+   *               origin (cross-origin navigation, closed tab, PayPal etc.).
+   *   3. DEDUP  — if both paths succeed, the backend deduplication in processEvent()
+   *               safely ignores the duplicate when the heavy stash arrives.
    *
-   * Priority:
-   *   1. window.__air_gmBeacon  - TM extension context, ad-blocker immune
-   *   2. navigator.sendBeacon   - page context fallback (non-TM environments)
+   * Why strip snapshots from beacon:
+   *   sendBeacon has a 64KB hard limit. A single DOM snapshot is 100KB-500KB.
+   *   One unstripped event silently causes the ENTIRE batch to be rejected,
+   *   losing ALL events. Stripping snapshots keeps the beacon under 10KB.
+   *
+   * Why session-scoped stash key:
+   *   Multiple tabs on the same origin would overwrite each other with a
+   *   global key. Session-scoping isolates each recording session completely.
+   *
+   * Why per-event TTL (not stash-level):
+   *   A stash-level timestamp resets every time new events are merged,
+   *   allowing events to live up to 59 minutes (30+30). Per-event TTL uses
+   *   the event's own timestamp — accurate and tamper-proof.
    */
   _beaconFlushAll() {
     if (this.eventQueue.length === 0) return;
-    try {
-      const payload = JSON.stringify({ events: this.eventQueue });
 
-      // Priority 1: GM beacon bridge (extension context, bypasses ad blocker)
-      if (typeof window.__air_gmBeacon === 'function') {
-        const accepted = window.__air_gmBeacon(this.apiEndpoint, payload);
-        if (accepted) {
-          this.log("GM beacon dispatched " + this.eventQueue.length + " events");
-          this.eventQueue = [];
-          return;
+    const STASH_TTL_MS = 30 * 60 * 1000; // 30 minutes
+    const stashKey = `air_heavy_stash_${this.config.sessionId}`;
+    const now = Date.now();
+
+    // ── STEP 1: Prepare slim events (strip snapshots for beacon) ──────────────
+    // Snapshots are preserved in the stash (Step 2). The beacon carries only
+    // the critical fields needed to create the edge: id, traceId, type,
+    // fingerprint, pageUrl, sessionId, timestamp.
+    const slimEvents = this.eventQueue.map(ev => ({
+      ...ev,
+      pageSnapshot: null,
+      pageState:    null,
+    }));
+
+    // ── STEP 2: Stash full events to localStorage (The Gold Standard) ─────────
+    // Merges with any existing stash for this session (e.g. multiple rapid
+    // navigations). Filters expired events individually using each event's own
+    // timestamp — prevents stale snapshots from being sent after TTL.
+    let stashSuccess = false;
+    try {
+      // Read existing stash for this session (may have events from prior navigation)
+      let existingEvents = [];
+      const raw = localStorage.getItem(stashKey);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed.events)) {
+          // Filter out individually expired events — per-event TTL check
+          existingEvents = parsed.events.filter(
+            ev => ev.timestamp && (now - ev.timestamp) < STASH_TTL_MS
+          );
         }
-        this.log("GM beacon rejected payload - falling back to sendBeacon");
       }
 
-      // Priority 2: native sendBeacon (non-TM fallback, may be ad-blocked)
-      const blob = new Blob([payload], { type: "application/json" });
-      const sent = navigator.sendBeacon(this.apiEndpoint, blob);
-      if (sent) {
-        this.log("sendBeacon dispatched " + this.eventQueue.length + " events");
-        this.eventQueue = [];
+      // Merge: existing non-expired events + current queue events
+      const mergedEvents = [...existingEvents, ...this.eventQueue];
+
+      localStorage.setItem(stashKey, JSON.stringify({
+        events:    mergedEvents,
+        sessionId: this.config.sessionId,
+        // No stash-level timestamp — per-event timestamps used for TTL
+      }));
+
+      stashSuccess = true;
+      this.log(`📦 Stashed ${this.eventQueue.length} events to localStorage (total in stash: ${mergedEvents.length})`);
+    } catch (e) {
+      // localStorage unavailable (Private Browsing, quota exceeded, security policy)
+      // Beacon fallback below is the only delivery path in this case.
+      this.log("⚠️ localStorage stash failed — beacon is sole delivery path", e.message);
+    }
+
+    // ── STEP 3: Always fire stripped beacon (Belt and Suspenders) ─────────────
+    // Fired unconditionally — not just as a stash fallback. Reason: if the user
+    // never returns to this origin, the stash rots. The beacon guarantees the
+    // critical click/action event (id, traceId, fingerprint) is always recorded.
+    // If stash also succeeds and heavy version arrives later, dedup handles it.
+    const lightPayload = JSON.stringify({ events: slimEvents });
+    try {
+      if (typeof window.__air_gmBeacon === 'function') {
+        // GM beacon (Tampermonkey extension context — bypasses ad blockers)
+        window.__air_gmBeacon(this.apiEndpoint, lightPayload);
+        this.log(`🚀 GM stripped beacon dispatched (${slimEvents.length} events)`);
       } else {
-        this.log("sendBeacon rejected (payload > 64 KB)");
+        // Native sendBeacon — slim payload guaranteed under 64KB after snapshot strip
+        const blob = new Blob([lightPayload], { type: "application/json" });
+        const sent = navigator.sendBeacon(this.apiEndpoint, blob);
+        if (sent) {
+          this.log(`🚀 Stripped beacon dispatched (${slimEvents.length} events)`);
+        } else {
+          // Extremely unlikely after stripping — payload would need to be >64KB
+          // of pure event metadata with no snapshots
+          this.log("⚠️ Stripped beacon rejected — payload too large even without snapshots");
+        }
       }
     } catch (e) {
-      this.log("_beaconFlushAll failed", e);
+      this.log("⚠️ Stripped beacon failed", e.message);
     }
+
+    // ── STEP 4: Clear the queue ────────────────────────────────────────────────
+    // Both delivery paths have fired. Queue is cleared regardless of outcome —
+    // events are either in localStorage stash, in-flight via beacon, or both.
+    this.eventQueue = [];
   }
+
+  /**
+   * Recover stashed events from localStorage and prepend them to the front
+   * of the event queue so they are sent before any new events on this page.
+   *
+   * Called at the TOP of init() — before checkPendingOutcome() — to guarantee
+   * correct event ordering:
+   *
+   *   [stash: click_submit] → [outcome: navigation] → edge created ✅
+   *
+   * If called AFTER checkPendingOutcome(), the outcome queues first and the
+   * click arrives after it — pendingRepo.find() returns null → orphaned outcome
+   * → navigation edge never created.
+   *
+   * Why unshift onto queue (not async fetch):
+   *   Async fetch returns immediately. The outcome from checkPendingOutcome()
+   *   would still queue before the fetch completes, breaking ordering.
+   *   Unshifting is synchronous — ordering is guaranteed before any async work.
+   */
+  _recoverStashedEvents() {
+    const STASH_TTL_MS = 30 * 60 * 1000; // 30 minutes — must match _beaconFlushAll
+    const stashKey = `air_heavy_stash_${this.config.sessionId}`;
+    const now = Date.now();
+
+    let recovered = 0;
+    try {
+      const raw = localStorage.getItem(stashKey);
+      if (!raw) return 0; // Nothing stashed for this session
+
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed.events) || parsed.events.length === 0) {
+        localStorage.removeItem(stashKey);
+        return 0;
+      }
+
+      // Filter out individually expired events using per-event timestamp
+      const validEvents = parsed.events.filter(
+        ev => ev.timestamp && (now - ev.timestamp) < STASH_TTL_MS
+      );
+
+      const expiredCount = parsed.events.length - validEvents.length;
+      if (expiredCount > 0) {
+        this.log(`⏰ Discarded ${expiredCount} expired stashed event(s) (TTL exceeded)`);
+      }
+
+      if (validEvents.length === 0) {
+        localStorage.removeItem(stashKey);
+        this.log('🧹 Stash cleared — all events expired');
+        return 0;
+      }
+
+      // Unshift onto FRONT of queue (not append) — critical for ordering.
+      // These events happened BEFORE this page loaded. They must be processed
+      // before the outcome that checkPendingOutcome() is about to queue.
+      this.eventQueue.unshift(...validEvents);
+      recovered = validEvents.length;
+
+      // Clear stash immediately — events are now in queue and will be sent
+      // via normal flushQueue on stable network. If page unloads again before
+      // they flush, _beaconFlushAll will re-stash them.
+      localStorage.removeItem(stashKey);
+
+      this.log(`📬 Recovered ${recovered} stashed event(s) — prepended to queue`, {
+        sessionId: this.config.sessionId,
+        oldestEvent: new Date(validEvents[0].timestamp).toISOString(),
+        newestEvent: new Date(validEvents[validEvents.length - 1].timestamp).toISOString(),
+      });
+
+    } catch (e) {
+      // localStorage unavailable or stash corrupted — safe to ignore,
+      // beacon already sent the slim version of these events
+      this.log('⚠️ Failed to recover stashed events', e.message);
+    }
+
+    return recovered;
+  }
+
   // ============================================================
   // FOCUS — opens an input session when a user enters a field
   // ============================================================
@@ -2844,7 +2999,10 @@ class AIRInterceptor {
             traceId: data.traceId,
             timestamp: Date.now(),
             sessionId: this.config.sessionId,
-            meta: { settleType: "navigation" },
+            meta: { 
+              settleType: "navigation",
+              urlAfter: window.location.href // 🚀 FIX 1: Explicit URL signal added
+            },
             pageSnapshot: snapshot,
             pageState: snapshot,
             pageUrl: window.location.href,
