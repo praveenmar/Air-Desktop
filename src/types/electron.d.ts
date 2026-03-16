@@ -1,6 +1,7 @@
 // Purpose: Global type declarations for the window object in the React Renderer.
 // Prototype Origin: N/A - Added for strict TypeScript support in the UI.
 // Changes: Strongly types the `window.airAPI` exposed by ui.preload.ts.
+// Fix (Bug #7): Added server.getPort() declaration to match the new IPC channel.
 
 import { GraphNode, GraphEdge, GraphStats, Session } from '../../core/types';
 
@@ -19,6 +20,11 @@ export interface AirAPI {
     list: (limit?: number) => Promise<Session[]>;
     getGraph: (sessionId: string) => Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }>;
   };
+  server: {
+    // Returns the real OS-assigned ephemeral port the EventServer is listening on.
+    // Use this anywhere you need the live port — never rely on a hardcoded 3000.
+    getPort: () => Promise<number>;
+  };
   db: {
     reset: () => Promise<{ success: boolean; error?: string }>;
   };
@@ -28,8 +34,8 @@ export interface AirAPI {
 declare global {
   interface Window {
     airAPI: AirAPI;
-    
-    // Optional configuration exposed if running the interceptor inside a managed view
+
+    // Configuration injected into recording target windows via interceptor_preload.ts
     __AIR_CONFIG?: {
       eventServerPort: number;
       sessionId: string;
@@ -37,5 +43,4 @@ declare global {
   }
 }
 
-// Make this a module to ensure it augments the global scope
 export {};

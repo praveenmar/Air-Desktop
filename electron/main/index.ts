@@ -40,6 +40,7 @@ async function bootstrap() {
 
   // 3. Assemble the Core Graph Builder
   const graphBuilder = new GraphBuilder(
+    db,          // Fix (Bug #3): db injected directly to enable db.transaction()
     nodeRepo,
     edgeRepo,
     eventRepo,

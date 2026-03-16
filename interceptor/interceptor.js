@@ -36,7 +36,7 @@ class QuiescenceEngine {
       networkIdleMs: 500,
       ignoredUrlPatterns: [
         /google-analytics\.com/, /hotjar\.com/, /sentry\.io/,
-        /\.websocket\./, /socket\.io/, /\/api\/v\d+\/heartbeat/, /\/api\/v\d+\/ping/
+        /\.websocket\./, /socket\.io/, /\/api\/v\d+\/heartbeat/, /\/api\/v\d+\/ping/ , /\/api\/collect/
       ],
       ignoredMutationSelectors: [
         '.toast', '.notification', '[data-animation]',
@@ -1919,6 +1919,7 @@ class AIRInterceptor {
         traceId: traceId, // <--- LINKS BACK TO ACTION
         timestamp: Date.now(),
         sessionId: this.config.sessionId,
+        pageUrl: window.location.href,
         meta: {
           settleType: settleResult,
           urlAfter: window.location.href,
@@ -2007,7 +2008,7 @@ class AIRInterceptor {
         pageTitle:     document.title,
         sessionId:     self.config.sessionId,
         schemaVersion: 'air:v2',
-        traceId:       self.pendingTraceId || undefined,
+        traceId: self.pendingTraceId || ('baseline-' + self.generateUUID()),
         navigation: {
           from:    lastUrl,
           to:      newUrl,
@@ -2168,11 +2169,17 @@ class AIRInterceptor {
   }
 
   handleSubmit(e) {
+
     const fingerprint = this.generateFingerprint(e.target);
+    const traceId = this.generateUUID(); 
+    // FIX: Assign it to the class property so beforeunload can grab it
+    this.pendingTraceId = traceId;
+
     const baseEvent = {
       id: this.generateUUID(),
-      type: "custom",
+      type: "submit",
       timestamp: Date.now(),
+      traceId: traceId,
       pageUrl: window.location.href,
       pageTitle: document.title,
       viewport: { width: window.innerWidth, height: window.innerHeight },

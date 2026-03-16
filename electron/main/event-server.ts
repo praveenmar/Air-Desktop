@@ -57,17 +57,44 @@ export class EventServer {
     if (req.method === 'POST' && req.url === '/api/events') {
       let body = '';
       req.on('data', chunk => { body += chunk.toString(); });
-      
+
       req.on('end', () => {
         try {
-          const rawEvent = JSON.parse(body);
-          // Validate incoming event shape before passing to the GraphBuilder
-          const parsedEvent = AIREventSchema.parse(rawEvent);
-          
-          const result = this.graphBuilder.processEvent(parsedEvent);
-          
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, result }));
+          const parsed = JSON.parse(body);
+
+          // Fix: _beaconFlushAll() sends { events: [...] } (batch format) while
+          // flushQueue() sends a single event directly. The server must handle both.
+          // A failed event in a batch must NOT block the remaining events —
+          // each is processed independently and results collected separately.
+          const isBatch = parsed && typeof parsed === 'object' && Array.isArray(parsed.events);
+
+          if (isBatch) {
+            // --- BATCH PATH (beacon flush) ---
+            const results: Array<{ success: boolean; eventId?: string; error?: string }> = [];
+
+            for (const rawEvent of parsed.events) {
+              try {
+                const parsedEvent = AIREventSchema.parse(rawEvent);
+                const result = this.graphBuilder.processEvent(parsedEvent);
+                results.push({ success: true, eventId: rawEvent.id });
+              } catch (eventError) {
+                console.error('❌ Failed to process batched event:', (eventError as Error).message);
+                results.push({ success: false, eventId: rawEvent?.id, error: (eventError as Error).message });
+              }
+            }
+
+            const allOk = results.every(r => r.success);
+            res.writeHead(allOk ? 200 : 207, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: allOk, results }));
+
+          } else {
+            // --- SINGLE EVENT PATH (regular flush) ---
+            const parsedEvent = AIREventSchema.parse(parsed);
+            const result = this.graphBuilder.processEvent(parsedEvent);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, result }));
+          }
+
         } catch (error) {
           console.error('❌ Failed to process event:', error);
           res.writeHead(400, { 'Content-Type': 'application/json' });

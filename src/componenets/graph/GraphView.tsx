@@ -85,7 +85,8 @@ export default function GraphView({ sessionId }: { sessionId: string | null }) {
         target: String(e.toNodeId || e.to_node_id),
         type: 'actionEdge',
         data: {
-          actionType: e.actionType || e.action_type || 'click',
+          actionType: e.action_type || e.actionType || 'click',
+          intent: e.intent, // <--- ADD THIS: Capture the semantic intent from the backend
           selector: e.selector || e.fingerprintHash || e.fingerprint_hash || 'Interact',
           outcomeType: e.outcomeType || e.outcome_type,
           sampleSize: e.sampleSize || e.sample_size,

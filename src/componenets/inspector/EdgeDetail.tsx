@@ -8,7 +8,9 @@ export default function EdgeDetail({ edge }: EdgeDetailProps) {
   if (!edge) return null;
 
   const { data } = edge;
-  const actionLabel = (data.actionType || 'interaction').toUpperCase();
+  const actionLabel = (data.intent || data.actionType || 'interaction')
+    .toUpperCase()
+    .replace(/_/g, ' ');
 
   return (
     <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto bg-[#1e1e1e] text-gray-300">

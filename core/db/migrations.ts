@@ -1,6 +1,13 @@
 // Purpose: Schema definition and migration tracking.
 // Prototype Origin: db.js (TABLES array and migrations array)
 // Changes: Extracted into its own typed module.
+// Fix (Bug #9): Added 'nullify_djb2_fp_hashes' migration.
+//   ActionHandler previously used DJB2 to compute fingerprint_hash values stored in
+//   edges and pending_actions. The algorithm has been switched to SHA-256. Any existing
+//   DJB2 hashes in the edges table would never match new SHA-256 hashes, causing
+//   duplicate edges on re-recordings of the same interactions. This migration nullifies
+//   all existing fingerprint_hash values so they get re-deduped cleanly on next recording.
+//   pending_actions are auto-cleaned within 2 minutes so they need no migration.
 
 import { Database } from 'better-sqlite3';
 
@@ -113,17 +120,26 @@ const TABLES: string[] = [
 ];
 
 const MIGRATIONS: Array<{ cmd: string; name: string }> = [
-  { cmd: 'ALTER TABLE events ADD COLUMN intent_raw TEXT', name: 'intent_raw' },
-  { cmd: 'ALTER TABLE nodes ADD COLUMN state_source TEXT', name: 'state_source' },
-  { cmd: 'ALTER TABLE edges ADD COLUMN outcome_type TEXT', name: 'outcome_type' },
-  { cmd: 'ALTER TABLE nodes ADD COLUMN anchors TEXT', name: 'add_anchors_column' },
-  { cmd: 'ALTER TABLE nodes ADD COLUMN page_url TEXT', name: 'nodes_page_url' },
-  { cmd: 'ALTER TABLE nodes ADD COLUMN page_title TEXT', name: 'nodes_page_title' },
+  { cmd: 'ALTER TABLE events ADD COLUMN intent_raw TEXT',      name: 'intent_raw' },
+  { cmd: 'ALTER TABLE nodes ADD COLUMN state_source TEXT',     name: 'state_source' },
+  { cmd: 'ALTER TABLE edges ADD COLUMN outcome_type TEXT',     name: 'outcome_type' },
+  { cmd: 'ALTER TABLE nodes ADD COLUMN anchors TEXT',          name: 'add_anchors_column' },
+  { cmd: 'ALTER TABLE nodes ADD COLUMN page_url TEXT',         name: 'nodes_page_url' },
+  { cmd: 'ALTER TABLE nodes ADD COLUMN page_title TEXT',       name: 'nodes_page_title' },
   { cmd: 'ALTER TABLE nodes ADD COLUMN viewport_width INTEGER', name: 'nodes_viewport_w' },
   { cmd: 'ALTER TABLE nodes ADD COLUMN viewport_height INTEGER', name: 'nodes_viewport_h' },
-  { cmd: 'ALTER TABLE events ADD COLUMN trace_id TEXT', name: 'events_trace_id' },
-  { cmd: 'ALTER TABLE events ADD COLUMN node_id TEXT', name: 'events_node_id' },
-  { cmd: 'ALTER TABLE edges ADD COLUMN fingerprint_hash TEXT', name: 'edges_fp_hash' }
+  { cmd: 'ALTER TABLE events ADD COLUMN trace_id TEXT',        name: 'events_trace_id' },
+  { cmd: 'ALTER TABLE events ADD COLUMN node_id TEXT',         name: 'events_node_id' },
+  { cmd: 'ALTER TABLE edges ADD COLUMN fingerprint_hash TEXT', name: 'edges_fp_hash' },
+
+  // FIX (Bug #9): ActionHandler switched from DJB2 to SHA-256 for fingerprint hashing.
+  // Existing edges carry DJB2 hashes that would never match new SHA-256 hashes, causing
+  // duplicate edges on re-recordings. Nullify them so the dedup index works correctly
+  // on all new recordings. The UPDATE is idempotent — running it twice is harmless.
+  {
+    cmd:  `UPDATE edges SET fingerprint_hash = NULL WHERE fingerprint_hash IS NOT NULL AND length(fingerprint_hash) <= 8`,
+    name: 'nullify_djb2_fp_hashes',
+  },
 ];
 
 export function runMigrations(db: Database): void {
@@ -136,7 +152,7 @@ export function runMigrations(db: Database): void {
     }
   });
 
-  // 2. Apply iterative migrations (fail-safe for duplicates)
+  // 2. Apply iterative migrations (fail-safe for duplicates and already-applied)
   MIGRATIONS.forEach(m => {
     try {
       db.exec(m.cmd);

@@ -1,6 +1,15 @@
 // Purpose: Maps IPC channels to underlying business logic.
 // Prototype Origin: routes.js (REST endpoints converted to IPC).
 // Changes: Exposes UI layer functions bridging to GraphBuilder and Repositories.
+// Fix (Bug #2): session:get-graph maps raw SQLite rows to camelCase before sending to renderer.
+// Fix (Bug #4): session:get-graph uses JOIN/subquery instead of IN spread to avoid SQLite 999-var limit.
+// Fix (Bug #7): Added two missing IPC channels related to the live server port:
+//   - 'get-interceptor-config' (sync): interceptor_preload.ts calls this via sendSync to get
+//     the real ephemeral port. Without this handler the call returned undefined and the
+//     preload always fell back to port 3000, meaning __AIR_CONFIG.eventServerPort was always
+//     wrong and the interceptor pointed at the wrong server.
+//   - 'server:get-port' (async): lets the renderer read the real live port if it needs to
+//     display it in the UI (replaces the stale eventServerPort in settings_store).
 
 import { ipcMain } from 'electron';
 import { WindowManager } from './window-manager';
@@ -10,8 +19,45 @@ import { NodeRepository } from '../../core/db/repositories/node.repository';
 import { EdgeRepository } from '../../core/db/repositories/edge.repository';
 import { SessionRepository } from '../../core/db/repositories/session.repository';
 import { DatabaseService } from '../../core/db/database';
-import { EventServer } from '../main/event-server';
 import { browserManager } from './browser-manager';
+
+// --- Row mappers for the session:get-graph raw SQL path ---
+
+function mapNodeRow(row: any) {
+  if (!row) return null;
+  return {
+    id:               row.id,
+    projectId:        row.project_id,
+    canonicalHash:    row.canonical_hash,
+    pageUrl:          row.page_url,
+    pageTitle:        row.page_title,
+    snapshotHtml:     row.snapshot_html,
+    contextTokens:    row.context_tokens,
+    anchors:          row.anchors,
+    stateSource:      row.state_source,
+    viewportWidth:    row.viewport_width,
+    viewportHeight:   row.viewport_height,
+    createdAt:        row.created_at,
+    lastObservedAt:   row.last_observed_at,
+    observationCount: row.observation_count,
+    metadata:         row.metadata,
+  };
+}
+
+function mapEdgeRow(row: any) {
+  if (!row) return null;
+  return {
+    id:              row.id,
+    fromNodeId:      row.from_node_id,
+    toNodeId:        row.to_node_id,
+    triggerEventId:  row.trigger_event_id,
+    fingerprintHash: row.fingerprint_hash,
+    seekStrategy:    row.seek_strategy || null,
+    sampleSize:      row.sample_size,
+    lastUpdated:     row.last_updated,
+    outcomeType:     row.outcome_type || null,
+  };
+}
 
 export function registerIpcHandlers(
   windowManager: WindowManager,
@@ -21,16 +67,30 @@ export function registerIpcHandlers(
   edgeRepo: EdgeRepository,
   sessionRepo: SessionRepository,
   dbService: DatabaseService,
-  serverPort: number
+  serverPort: number             // the real OS-assigned ephemeral port
 ): void {
-  
- // Start Recording
+
+  // --- SERVER ---
+
+  // FIX (Bug #7a): interceptor_preload.ts calls this synchronously via ipcRenderer.sendSync
+  // to get the live port before injecting the interceptor. Without this handler the call
+  // returned undefined and __AIR_CONFIG.eventServerPort was always 3000 (wrong).
+  ipcMain.on('get-interceptor-config', (event) => {
+    event.returnValue = {
+      eventServerPort: serverPort,
+      sessionId: `session-${Date.now()}`, // Generate a fresh session ID per recording window
+    };
+  });
+
+  // FIX (Bug #7b): Async channel so the renderer can read the real live port if needed
+  // (e.g. to display in a debug panel). Replaces the stale eventServerPort in settings_store.
+  ipcMain.handle('server:get-port', () => serverPort);
+
+  // --- RECORDING ---
+
   ipcMain.handle('recording:start', async (_, url: string) => {
     try {
-      
-      // Launch Playwright! and // Get the live port our local Node server is listening on
       await browserManager.startRecording(url, serverPort);
-      
       return { success: true };
     } catch (error) {
       console.error('Failed to start Playwright recording:', error);
@@ -38,7 +98,6 @@ export function registerIpcHandlers(
     }
   });
 
-  // Stop Recording
   ipcMain.handle('recording:stop', async () => {
     try {
       await browserManager.stopRecording();
@@ -54,6 +113,7 @@ export function registerIpcHandlers(
   });
 
   // --- GRAPH DATA ---
+
   ipcMain.handle('graph:get-stats', () => {
     return graphBuilder.getStats();
   });
@@ -67,67 +127,71 @@ export function registerIpcHandlers(
   });
 
   // --- SESSIONS ---
+
   ipcMain.handle('session:list', (_, limit: number = 20) => {
     return sessionRepo.getAll(limit);
   });
 
- ipcMain.handle('session:get-graph', (_, sessionId: string) => {
+  ipcMain.handle('session:get-graph', (_, sessionId: string) => {
     const db = dbService.getInstance();
-    
-    const nodeIds = db.prepare(`SELECT DISTINCT node_id FROM events WHERE session_id = ? AND node_id IS NOT NULL`)
-      .all(sessionId)
-      .map((r: any) => r.node_id);
 
-    if (nodeIds.length === 0) return { nodes: [], edges: [] };
+    // Nodes: JOIN to events to scope by session — no nodeId array needed.
+    const nodes = db.prepare(`
+      SELECT DISTINCT n.*
+      FROM nodes n
+      INNER JOIN events e ON e.node_id = n.id
+      WHERE e.session_id = ?
+    `).all(sessionId).map(mapNodeRow);
 
-    const placeholders = nodeIds.map(() => '?').join(',');
-    const nodes = db.prepare(`SELECT * FROM nodes WHERE id IN (${placeholders})`).all(...nodeIds);
-    
-    // CHANGED: We now pull ev.payload instead of ev.fingerprint
-    const rawEdges = nodeIds.length > 1 
-      ? db.prepare(`
-          SELECT 
-            e.*, 
-            ev.type as action_type, 
-            ev.payload as raw_payload 
-          FROM edges e
-          LEFT JOIN events ev ON e.trigger_event_id = ev.id
-          WHERE e.from_node_id IN (${placeholders}) AND e.to_node_id IN (${placeholders})
-        `).all(...nodeIds, ...nodeIds)
-      : [];
+    if (nodes.length === 0) return { nodes: [], edges: [] };
+
+    // Edges: correlated subqueries — sessionId bound exactly twice, no variable limit.
+    const rawEdges = db.prepare(`
+      SELECT
+        e.*,
+        ev.type    AS action_type,
+        ev.payload AS raw_payload,
+        ev.intent  AS semantic_intent
+      FROM edges e
+      LEFT JOIN events ev ON e.trigger_event_id = ev.id
+      WHERE e.from_node_id IN (
+              SELECT DISTINCT node_id FROM events
+              WHERE session_id = ? AND node_id IS NOT NULL
+            )
+        AND e.to_node_id IN (
+              SELECT DISTINCT node_id FROM events
+              WHERE session_id = ? AND node_id IS NOT NULL
+            )
+    `).all(sessionId, sessionId) as any[];
 
     const edges = rawEdges.map((e: any) => {
+      const mappedEdge = mapEdgeRow(e);
+
       let extractedFingerprint = null;
-      let selector = e.fingerprint_hash; 
+      let selector   = e.fingerprint_hash;
       let actionType = e.action_type || 'click';
 
-      // Parse the 'payload' column to extract the rich SDET data
       if (e.raw_payload) {
         try {
           const parsedPayload = JSON.parse(e.raw_payload);
-          
-          // Depending on how the interceptor sends it, the fingerprint is usually 
-          // at payload.fingerprint or payload.meta.fingerprint
           extractedFingerprint = parsedPayload.fingerprint || parsedPayload.meta?.fingerprint || {};
-          
           selector = extractedFingerprint.selector || selector;
 
-          // If it's an input action, let's grab the actual text you typed so it shows in the UI!
           if (parsedPayload.type === 'input' && parsedPayload.meta?.value) {
             extractedFingerprint.textExcerpt = parsedPayload.meta.value;
             actionType = 'input';
           }
-
         } catch (err) {
           console.error('Failed to parse payload for edge:', e.id);
         }
       }
 
       return {
-        ...e, 
-        action_type: actionType, 
+        ...mappedEdge,
+        action_type: actionType,
         fingerprint: extractedFingerprint,
-        selector: selector 
+        selector,
+        intent: e.semantic_intent || actionType,
       };
     });
 
@@ -135,10 +199,10 @@ export function registerIpcHandlers(
   });
 
   // --- RESET ---
+
   ipcMain.handle('db:reset', () => {
     const db = dbService.getInstance();
     try {
-      // Order matters: children before parents (FK constraints)
       const tables = ['pending_actions', 'outcomes', 'edges', 'events', 'nodes', 'sessions', 'debug_logs'];
       db.exec('BEGIN TRANSACTION');
       for (const table of tables) {

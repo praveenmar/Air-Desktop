@@ -1,9 +1,27 @@
 // Purpose: Data access layer for User Sessions.
 // Prototype Origin: graph-builder.js (getOrCreateSession, updateSessionPointer)
 // Changes: Extracted into typed methods.
+// Fix: Added mapSessionRow() to translate SQLite snake_case columns to camelCase TypeScript fields.
+//      Without this, session.eventCount, session.startedAt, session.lastNodeId etc. all returned
+//      undefined, including the new-session detection log in SessionManager.
 
 import { Database } from 'better-sqlite3';
 import { Session } from '../../types';
+
+// Translates every snake_case SQLite column to its camelCase TypeScript equivalent.
+function mapSessionRow(row: any): Session | null {
+  if (!row) return null;
+  return {
+    id:           row.id,
+    projectId:    row.project_id,
+    startedAt:    row.started_at,
+    lastEventAt:  row.last_event_at,
+    lastNodeId:   row.last_node_id,
+    eventCount:   row.event_count,
+    status:       row.status,
+    metadata:     row.metadata,
+  };
+}
 
 export class SessionRepository {
   constructor(private db: Database) {}
@@ -12,7 +30,7 @@ export class SessionRepository {
     if (!sessionId) return null;
 
     const stmt = this.db.prepare('SELECT * FROM sessions WHERE id = ?');
-    const existing = stmt.get(sessionId) as Session | undefined;
+    const existing = mapSessionRow(stmt.get(sessionId));
 
     if (existing) return existing;
 
@@ -20,11 +38,12 @@ export class SessionRepository {
       INSERT INTO sessions (id, project_id, started_at, last_event_at, event_count, status)
       VALUES (?, 'default', ?, ?, 0, 'active')
     `);
-    
+
     const now = Date.now();
     insertStmt.run(sessionId, now, now);
 
-    return stmt.get(sessionId) as Session;
+    // Re-fetch through the mapper so the returned object is correctly shaped
+    return mapSessionRow(stmt.get(sessionId));
   }
 
   public updatePointer(sessionId: string, nodeId: string): void {
@@ -42,6 +61,6 @@ export class SessionRepository {
 
   public getAll(limit: number = 20): Session[] {
     const stmt = this.db.prepare('SELECT * FROM sessions ORDER BY last_event_at DESC LIMIT ?');
-    return stmt.all(limit) as Session[];
+    return (stmt.all(limit) as any[]).map(mapSessionRow) as Session[];
   }
 }

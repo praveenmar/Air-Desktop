@@ -63,6 +63,13 @@ export const InputEventSchema = BaseEventSchema.extend({
   viewport: ViewportSchema.optional(),
   fingerprint: ElementFingerprintSchema.nullable().optional(),
   inputValueMasked: z.string().optional(),
+  // Fix (Bug #3): these three fields were sent by the interceptor but stripped by Zod.
+  // trigger distinguishes a committed value (blur/change) from a mid-typing heartbeat
+  // (input:progress). graph-builder uses it to gate Branch A. Optional so events
+  // sent before this fix (no trigger field) still parse — treated as committed.
+  trigger: z.enum(['blur', 'change', 'input:progress']).optional(),
+  inputLength: z.number().optional(),       // length of typed value — safe analytics signal
+  selectedLabel: z.string().optional(),     // chosen <option> text for native <select>
 });
 
 /** Action Event: Submit */

@@ -1,7 +1,13 @@
 // Purpose: Core debugging and execution trace logger.
 // Prototype Origin: logger.js (and routes.js for getRecent/clear)
-// Changes: Converted to a class-based service with Dependency Injection for the database. 
-// Added getRecent and clear methods as requested by Prompt 4 specifications.
+// Changes: Converted to a class-based service with Dependency Injection for the database.
+// Fix (Bug #8a — Orphaned UUIDs): Previously, any log call without a traceId argument
+//   generated a fresh crypto.randomUUID() as the stored trace_id. Since only 1 of 22
+//   call sites passes a real traceId, nearly every row in debug_logs had a random UUID
+//   that linked to nothing — making trace_id useless for filtering. Now defaults to null.
+// Fix (Bug #8b — Unbounded growth): debug_logs had no TTL or row cap and grew forever.
+//   Added pruneOldLogs(maxAgeMs) which GraphBuilder.startCleanupService() calls on its
+//   existing 15-second tick, keeping the last 24 hours of logs by default.
 
 import crypto from 'crypto';
 import { Database } from 'better-sqlite3';
@@ -13,8 +19,8 @@ export interface DebugLog {
   level: 'info' | 'warn' | 'error' | 'decision';
   message: string;
   data: Record<string, unknown>;
-  sessionId: string;
-  traceId: string;
+  sessionId: string | null;   // nullable — not every log belongs to a session
+  traceId: string | null;     // nullable — not every log belongs to a trace
 }
 
 export class DebugLogger {
@@ -29,36 +35,33 @@ export class DebugLogger {
     message: string,
     data: Record<string, unknown> = {},
     sessionId: string | null = null,
-    traceId: string | null = null
+    traceId: string | null = null    // FIX: null stored as-is — no random UUID fallback
   ): DebugLog {
-    const logId = crypto.randomUUID();
+    const logId    = crypto.randomUUID();
     const timestamp = Date.now();
-    const resolvedTraceId = traceId || crypto.randomUUID();
-    
-    const colors: Record<string, string> = { 
-      info: '🔵', 
-      warn: '🟡', 
-      error: '🔴', 
-      decision: '🟢' 
+
+    const colors: Record<string, string> = {
+      info:     '🔵',
+      warn:     '🟡',
+      error:    '🔴',
+      decision: '🟢',
     };
-    
+
     console.log(`${colors[level] || '⚪'} [${component}] ${message}`, data);
-    
+
     try {
-      const stmt = this.db.prepare(`
+      this.db.prepare(`
         INSERT INTO debug_logs (id, timestamp, component, level, message, data, session_id, trace_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      
-      stmt.run(
-        logId, 
-        timestamp, 
-        component, 
-        level, 
-        message, 
-        JSON.stringify(data), 
-        sessionId, 
-        resolvedTraceId
+      `).run(
+        logId,
+        timestamp,
+        component,
+        level,
+        message,
+        JSON.stringify(data),
+        sessionId,
+        traceId      // FIX: stored as null when not provided — not as a random UUID
       );
     } catch (err) {
       console.error('Failed to save debug log:', err);
@@ -71,8 +74,8 @@ export class DebugLogger {
       level,
       message,
       data,
-      sessionId: sessionId || '',
-      traceId: resolvedTraceId
+      sessionId,
+      traceId,
     };
   }
 
@@ -81,18 +84,19 @@ export class DebugLogger {
    */
   public getRecent(limit: number = 100): DebugLog[] {
     try {
-      const stmt = this.db.prepare('SELECT * FROM debug_logs ORDER BY timestamp DESC LIMIT ?');
-      const rows = stmt.all(limit) as any[];
-      
+      const rows = this.db.prepare(
+        'SELECT * FROM debug_logs ORDER BY timestamp DESC LIMIT ?'
+      ).all(limit) as any[];
+
       return rows.map(row => ({
-        id: row.id,
+        id:        row.id,
         timestamp: row.timestamp,
         component: row.component,
-        level: row.level as 'info' | 'warn' | 'error' | 'decision',
-        message: row.message,
-        data: row.data ? JSON.parse(row.data) : {},
+        level:     row.level as DebugLog['level'],
+        message:   row.message,
+        data:      row.data ? JSON.parse(row.data) : {},
         sessionId: row.session_id,
-        traceId: row.trace_id
+        traceId:   row.trace_id,
       }));
     } catch (err) {
       console.error('Failed to retrieve debug logs:', err);
@@ -101,7 +105,27 @@ export class DebugLogger {
   }
 
   /**
-   * Clears all debug logs from the database.
+   * Deletes log entries older than maxAgeMs milliseconds.
+   * Called by GraphBuilder.startCleanupService() on its 15-second tick.
+   * Default retention: 24 hours (86_400_000 ms).
+   *
+   * @returns number of rows deleted
+   */
+  public pruneOldLogs(maxAgeMs: number = 86_400_000): number {
+    try {
+      const cutoff = Date.now() - maxAgeMs;
+      const result = this.db.prepare(
+        'DELETE FROM debug_logs WHERE timestamp < ?'
+      ).run(cutoff);
+      return result.changes;
+    } catch (err) {
+      console.error('Failed to prune debug logs:', err);
+      return 0;
+    }
+  }
+
+  /**
+   * Clears ALL debug logs from the database (used by the UI reset action).
    */
   public clear(): void {
     try {

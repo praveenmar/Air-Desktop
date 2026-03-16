@@ -48,6 +48,7 @@ export const GraphEdgeSchema = z.object({
   sampleSize: z.number().default(1),
   lastUpdated: z.number(),
   outcomeType: OutcomeTypeSchema.nullable(),
+  intent: z.string().nullable().optional(),
 });
 export type GraphEdge = z.infer<typeof GraphEdgeSchema>;
 
