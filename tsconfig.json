@@ -23,7 +23,8 @@
     "paths": {
       "@core/*": ["core/*"],
       "@src/*": ["src/*"],
-      "@electron/*": ["electron/*"]
+      "@electron/*": ["electron/*"],
+      "@air/codegen/*": ["./packages/codegen/src/index.ts"]
     }
   }
 }

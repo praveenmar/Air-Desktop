@@ -4,7 +4,12 @@
   "description": "AIR - Automated Intelligence Recorder",
   "main": "./out/main/index.js",
   "author": "AIR Team",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
+    "postinstall": "electron-builder install-app-deps",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "pack": "electron-builder --dir",
