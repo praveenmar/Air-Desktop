@@ -143,9 +143,17 @@ export class OutcomeHandler {
       const outcomeId = crypto.randomUUID();
       this.outcomeRepo.insert(outcomeId, edgeId, toNodeId, Date.now());
 
+      // FIX (Bug #10c — OutcomeHandler path): Do NOT call updateProbability() here.
+      // insert() already sets decayed_count = 1.0 and probability = 1.0 for a brand-new
+      // edge. Calling updateProbability() immediately after increments decayed_count to
+      // 2.0 before any real second observation has occurred. This corrupts the Laplace
+      // smoothing denominator for the entire lifetime of the edge:
+      //   - On re-observation (K=1): looks like 3 total observations instead of 2
+      //   - On multi-outcome edges (K>1): inflates the denominator, skewing all path
+      //     probabilities upward — the AI sees falsely high confidence on navigation steps.
+      // updateProbability() is reserved for genuine re-observations on the existing-edge
+      // path in ActionHandler.createEdge(), which is the only correct call site.
       this.logger.log('OutcomeHandler', 'decision', 'Created new EXPLICIT edge', { edgeId, outcomeType, fpHash, from: fromNodeId, to: toNodeId });
-      
-      this.updateOutcomeProbability(edgeId, toNodeId);
     } catch (e) {
       this.logger.log('OutcomeHandler', 'error', 'Failed to create explicit edge', { error: (e as Error).message });
     }

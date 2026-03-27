@@ -1,21 +1,28 @@
 {
-    "name": "@air/codegen",
-    "version": "0.1.0",
-    "description": "AIR semantic timeline compressor and code generation service",
-    "main": "dist/index.js",
-    "types": "dist/index.d.ts",
-    "scripts": {
-      "build": "tsc",
-      "dev": "tsc --watch"
-    },
-    "dependencies": {
-      "better-sqlite3": "^11.7.0"
-    },
-    "devDependencies": {
-      "@types/better-sqlite3": "^7.6.11",
-      "typescript": "^5.6.3"
-    },
-    "peerDependencies": {
-      "better-sqlite3": ">=9.0.0"
-    }
+  "name": "@air/codegen",
+  "version": "0.1.0",
+  "description": "AIR semantic timeline compressor and code generation service",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "air": "dist/bin/air-review.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "review": "ts-node bin/air-review.ts",
+    "review:list": "ts-node bin/air-review.ts --list"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.6.3"
+  },
+  "peerDependencies": {
+    "better-sqlite3": ">=9.0.0"
   }
+}

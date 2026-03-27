@@ -54,6 +54,11 @@ async function bootstrap() {
   // Start background tasks
   graphBuilder.startCleanupService();
 
+  app.on('before-quit', () => {
+    graphBuilder.close();  // stop the cleanup interval
+    dbService.close();     // then close the SQLite connection
+  });
+
   // 4. Start Local Event Server for Interceptor
   const eventServer = new EventServer(graphBuilder);
   const serverPort = await eventServer.start();

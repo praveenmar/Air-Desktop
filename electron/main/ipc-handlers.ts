@@ -69,6 +69,12 @@ export function registerIpcHandlers(
   dbService: DatabaseService,
   serverPort: number             // the real OS-assigned ephemeral port
 ): void {
+  
+  // Fix: hoist currentSessionId into the registerIpcHandlers closure (same pattern as
+  // serverPort). Birth it exactly once in 'recording:start' (user-initiated, single-fire).
+  // Return the SAME value from every 'get-interceptor-config' call for that recording.
+  // Clear it in 'recording:stop' so the next recording gets a fresh ID.
+  let currentSessionId: string | null = null;
 
   // --- SERVER ---
 
@@ -78,7 +84,11 @@ export function registerIpcHandlers(
   ipcMain.on('get-interceptor-config', (event) => {
     event.returnValue = {
       eventServerPort: serverPort,
-      sessionId: `session-${Date.now()}`, // Generate a fresh session ID per recording window
+      // Return the stable session ID birthed in recording:start.
+      // Fallback generates a one-off ID only if the preload fires before recording:start
+      // (e.g. a cold window open) — those orphaned events will carry a consistent ID
+      // at least within that preload execution cycle.
+      sessionId: currentSessionId ?? `session-fallback-${Date.now()}`,
     };
   });
 
@@ -90,10 +100,17 @@ export function registerIpcHandlers(
 
   ipcMain.handle('recording:start', async (_, url: string) => {
     try {
+      // Birth the session ID here — once per recording, before the browser opens.
+      // This ID is returned by every subsequent 'get-interceptor-config' call
+      // for the duration of this recording, keeping all interceptor events in one
+      // DB session regardless of how many times the preload script re-executes.
+      currentSessionId = `session-${Date.now()}`;
+
       await browserManager.startRecording(url, serverPort);
-      return { success: true };
+      return { success: true, sessionId: currentSessionId };
     } catch (error) {
       console.error('Failed to start Playwright recording:', error);
+      currentSessionId = null; // don't leave a stale ID if launch failed
       return { success: false, error: (error as Error).message };
     }
   });
@@ -101,7 +118,9 @@ export function registerIpcHandlers(
   ipcMain.handle('recording:stop', async () => {
     try {
       await browserManager.stopRecording();
-      return { success: true };
+      const completedSessionId = currentSessionId;
+      currentSessionId = null; // clear so the next recording gets a fresh ID
+      return { success: true, sessionId: completedSessionId };
     } catch (error) {
       return { success: false, error: (error as Error).message };
     }

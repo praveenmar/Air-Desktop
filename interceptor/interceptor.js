@@ -580,87 +580,31 @@ class AIRInterceptor {
     return [...new Set(anchors)].sort();
   }
 
-  /** Wait briefly for SPA to render (e.g. Vue/React hydration). */
   /** * Wait for SPA to render and stabilize (Hydration Check)
-   * VERSION: 6.0 (Login Awareness)
+   * VERSION: 7.0 (Quiescence Engine Integration)
    */
   waitForSPAContent(timeoutMs = 5000) {
-    return new Promise((resolve) => {
+    return new Promise(async (resolve) => {
       const { app } = this.detectSPA();
       if (!app) {
-        resolve();
-        return;
+        return resolve(); // Not an SPA, proceed immediately
       }
 
-      const start = Date.now();
-      const deadline = start + timeoutMs;
-      let stabilityStart = null;
+      this.log("⏳ SPA detected. Waiting for hydration/quiescence...");
 
-      const check = () => {
-        const now = Date.now();
-        if (now > deadline) {
-          this.log("⚠️ SPA hydration timeout! Capturing whatever we have.");
-          resolve();
-          return;
-        }
+      // Trust the elite QuiescenceEngine. It perfectly handles the 
+      // "loading spinner" trap by ensuring all API network calls are finished.
+      if (this.quiescence) {
+        await this.quiescence.waitForSettle(timeoutMs);
+        this.log("✅ SPA Hydrated (Network & DOM quiescent)");
+        return resolve();
+      }
 
-        const hasBasicContent =
-          app.children.length > 0 ||
-          (app.textContent && app.textContent.trim().length > 0);
-
-        // 🕵️‍♂️ NEW: Check if this is likely a login page
-        const isLoginPage =
-          window.location.href.includes("login") ||
-          window.location.href.includes("auth") ||
-          window.location.href.includes("signin");
-
-        let isHollow = false;
-
-        if (hasBasicContent) {
-          const formWrapper = document.querySelector(
-            'form, .orangehrm-login-form, .login-container, [role="form"]',
-          );
-
-          if (formWrapper) {
-            // Case A: Form exists, checking for inputs...
-            // Ignore hidden inputs (CSRF) and buttons
-            const inputs = formWrapper.querySelectorAll(
-              'input:not([type="hidden"]), select, textarea',
-            );
-
-            if (inputs.length === 0) {
-              isHollow = true; // Form is there, but empty.
-            } else {
-              // Check visibility
-              if (inputs[0].offsetParent === null) isHollow = true;
-            }
-          } else if (isLoginPage) {
-            // 🚨 Case B: NO FORM YET (The Shell Trap Fix)
-            // We are on a login URL, but we don't see a form.
-            // We MUST NOT settle for just the logo.
-            isHollow = true;
-            // Optional: this.log('⏳ Login URL detected, waiting for Form...');
-          }
-        }
-
-        // STABILITY TIMER
-        if (hasBasicContent && !isHollow) {
-          if (!stabilityStart) {
-            stabilityStart = now;
-          } else if (now - stabilityStart > 500) {
-            // FIX: Reduced to 500ms for better performance
-            this.log("✅ SPA Ready: Form & Inputs stable.");
-            resolve();
-            return;
-          }
-        } else {
-          stabilityStart = null;
-        }
-
-        requestAnimationFrame(check);
-      };
-
-      requestAnimationFrame(check);
+      // Failsafe if QuiescenceEngine failed to initialize
+      setTimeout(() => {
+        this.log("⚠️ SPA Hydration fallback timeout reached");
+        resolve();
+      }, 2000);
     });
   }
 
@@ -2036,16 +1980,22 @@ class AIRInterceptor {
 
     const isLikelyNavigation = isSubmit || isLink || isRoleLink;
 
+    // FIX (Full-Page Nav Detection): Capture the return value of waitForUrlChange.
+    // Previously this was discarded — `await this.waitForUrlChange(...)` with no assignment.
+    // urlChanged=true  → SPA-style nav or fast redirect (URL flipped on same page)
+    // urlChanged=false → full-page POST navigation (old page is about to unload)
+    //                    OR AJAX form (page stays alive, JS handles the response)
+    // We need to distinguish these two false cases — see isFullPageNav branch below.
+    let urlChanged = false;
     if (isLikelyNavigation) {
       this.log("⏳ Potential Navigation detected. Waiting for URL change...");
-      // Wait up to 3s for URL flip. If it happens sooner, we proceed immediately.
-      await this.waitForUrlChange(startUrl, 3000);
+      urlChanged = await this.waitForUrlChange(startUrl, 3000);
+      this.log(urlChanged ? "✅ URL changed on same page (SPA/redirect)" : "⏳ URL did not change — full-page nav or AJAX form");
     }
 
-    // Always settle network/DOM regardless (handles AJAX navigation)
-    if (this.quiescence) {
-      await this.quiescence.waitForSettle(2000);
-    }
+    // Hoist isFullPageNav above the try block so the finally clause can read it.
+    // const/let inside try{} are block-scoped and invisible to finally{}.
+    const isFullPageNav = isLikelyNavigation && !urlChanged;
 
     // 5. WAIT for Quiescence (Network/DOM Settle)
     try {
@@ -2067,30 +2017,86 @@ class AIRInterceptor {
         }
       }
 
-      // 7. Send OUTCOME Event (The Result)
-      const outcomeEvent = {
-        id: this.generateUUID(),
-        type: "outcome", // <--- EXPLICIT OUTCOME TYPE
-        traceId: traceId, // <--- LINKS BACK TO ACTION
-        timestamp: Date.now(),
-        sessionId: this.config.sessionId,
-        pageUrl: window.location.href,
-        meta: {
-          settleType: settleResult,
-          urlAfter: window.location.href,
-          titleAfter: document.title,
-        },
-        pageSnapshot: finalSnapshot, // State B
-        pageState: finalSnapshot, // Used by DB to identify "To Node"
-      };
+    // 7. Build OUTCOME Event (The Result)
+    const outcomeEvent = {
+      id: this.generateUUID(),
+      type: "outcome",
+      traceId: traceId,
+      timestamp: Date.now(),
+      sessionId: this.config.sessionId,
+      pageUrl: window.location.href,
+      meta: {
+        settleType: settleResult,
+        urlAfter: window.location.href,
+        titleAfter: document.title,
+      },
+      pageSnapshot: finalSnapshot, // State B
+      pageState: finalSnapshot,    // Used by DB to identify "To Node"
+    };
 
+
+    if (isFullPageNav) {
+    this.log("🚀 Full-page nav suspected — deferring outcome to next page via checkPendingOutcome()");
+
+    // Track whether pagehide fires (case A) vs. quiescence re-settles (case B).
+    // pageUnloaded prevents a double-send if both signals somehow race.
+    let pageUnloaded = false;
+
+    window.addEventListener("pagehide", () => {
+      pageUnloaded = true;
+      // Page is confirmed navigating away. pendingTraceId is still set.
+      // beforeunload has already (or is about to) save it to sessionStorage.
+      this.log("📦 pagehide confirmed — pendingTraceId preserved for next page");
+    }, { once: true, capture: true });
+
+    // AJAX fallback: QuiescenceEngine re-monitors DOM+network.
+    // When the AJAX response renders, quiescence will settle naturally —
+    // no fixed timer, driven entirely by network activity and DOM mutations.
+    if (this.quiescence) {
+      this.quiescence.waitForSettle(8000).then(() => {
+        if (!pageUnloaded && this.pendingTraceId === traceId) {
+          this.log("↩️ Quiescence settled without pagehide — AJAX form confirmed, sending outcome now");
+          this.queueEvent(outcomeEvent);
+          this.flushQueue();
+          this.pendingTraceId = null;
+        }
+        
+        // If pageUnloaded=true, beforeunload already handled it — do nothing.
+      }).catch(() => {
+        if (!pageUnloaded && this.pendingTraceId === traceId) {
+          this.log("⚠️ Quiescence timed out — sending outcome as last resort");
+          this.queueEvent(outcomeEvent);
+          this.flushQueue();
+          this.pendingTraceId = null;
+        }
+      });
+    } else {
+      // FAILSAFE: QuiescenceEngine is null (strict CSP, iframe boundary, init failure).
+      // Cannot use the event-driven path. Fall back to setTimeout as last resort.
+      // This is the ONLY acceptable timer in this file — only reachable when
+      // QuiescenceEngine itself failed to initialise, which is abnormal.
+      setTimeout(() => {
+        if (!pageUnloaded && this.pendingTraceId === traceId) {
+          this.log("⚠️ Quiescence unavailable — setTimeout fallback sending outcome");
+          this.queueEvent(outcomeEvent);
+          this.flushQueue();
+          this.pendingTraceId = null;
+        }
+      }, 8000);
+    }
+
+    } else {
+      // Normal case: SPA nav (urlChanged=true) or non-navigation click.
+      // Outcome URL is correct. Send immediately.
       this.queueEvent(outcomeEvent);
+    }
+
     } catch (err) {
       this.log("Error in click flow", err);
     } finally {
-      // NEW: If we reached this line, we finished successfully on THIS page.
-      // Clear the pending flag so we don't fire a duplicate outcome on reload.
-      if (this.pendingTraceId === traceId) {
+      // Only null pendingTraceId here for the normal (non-full-page-nav) path.
+      // For isFullPageNav, the pagehide listener or quiescence callback owns the cleanup.
+      if (this.pendingTraceId === traceId && !isFullPageNav) {
         this.pendingTraceId = null;
       }
     }
@@ -2543,21 +2549,32 @@ class AIRInterceptor {
 
     const classes = Array.from(element.classList);
 
-    // Sort for consistency
-    classes.sort();
+    // 1. Filter out known utility/generic classes that cause Playwright collisions
+    const BANNED_PATTERNS = [
+      /\d{4,}/,                   // Long numbers
+      /^css-/, /^sc-/,            // CSS-in-JS hashes (Emotion, Styled Components)
+      /^oxd-input$/,              // OrangeHRM generic inputs
+      /^oxd-select-text-input$/,  // OrangeHRM generic selects
+      /^el-input__inner$/,        // Element UI generics
+      /^ant-input$/,              // Ant Design generics
+      /^MuiInputBase-input$/      // Material UI generics
+    ];
 
-    // Define a scoring system for stability
-    const stableClasses = classes.filter(
-      (cls) =>
-        !/\d{5,}/.test(cls) &&
-        !cls.startsWith("css-") &&
-        !cls.startsWith("sc-"),
-    );
+    const stableClasses = classes.filter(cls => !BANNED_PATTERNS.some(regex => regex.test(cls)));
 
-    if (stableClasses.length === 0) {
-      // If no "stable" classes, pick the first sorted one
-      return classes[0];
-    }
+    // 2. If all classes were banned, return null. This forces generateOptimalSelector 
+    // to safely drop to Priority 8.5 (Multi-attribute) or Priority 9 (Path).
+    if (stableClasses.length === 0) return null;
+
+    // 3. Prioritize semantically meaningful classes (e.g., 'username-field' over 'mt-4')
+    const utilityPrefixes = ['mt-', 'mb-', 'pt-', 'pb-', 'flex', 'text-', 'bg-'];
+    stableClasses.sort((a, b) => {
+      const aIsUtility = utilityPrefixes.some(p => a.startsWith(p));
+      const bIsUtility = utilityPrefixes.some(p => b.startsWith(p));
+      if (aIsUtility && !bIsUtility) return 1;
+      if (!aIsUtility && bIsUtility) return -1;
+      return 0;
+    });
 
     return stableClasses[0];
   }
@@ -2763,7 +2780,8 @@ class AIRInterceptor {
       const isNavigation =
         options.navigation === true ||
         (currentEvent.type === "outcome" &&
-          currentEvent.meta?.settleType === "navigation");
+          currentEvent.meta?.settleType === "navigation" &&
+          !currentEvent.meta?.isRecovery); // 🚀 NEW: Skip beacon-stripping for recovery
 
       if (isNavigation) {
         const lightEvent = { ...currentEvent, pageSnapshot: null, pageState: null };
@@ -2799,7 +2817,8 @@ class AIRInterceptor {
 
       // Size guard — browser keepalive cap is ~64 KB
       const payloadSize = new Blob([payload]).size;
-      if (payloadSize > 60_000 && currentEvent.pageSnapshot) {
+      // 🚀 NEW: Bypass size guard for recovery events (page is stable, no size limits)
+      if (payloadSize > 60_000 && currentEvent.pageSnapshot && !currentEvent.meta?.isRecovery) {
         this.log(
           `⚠️ Payload too big (${payloadSize} bytes). Stripping snapshot to ensure delivery.`,
         );
@@ -2834,7 +2853,7 @@ class AIRInterceptor {
             headers:   { "Content-Type": "application/json" },
             body:      payload,
             mode:      "cors",
-            keepalive: true,
+            keepalive: !currentEvent.meta?.isRecovery,
             [_AIR_INTERNAL]: true,   // Symbol — non-enumerable, stripped before native fetch
           });
         }
@@ -3001,7 +3020,8 @@ class AIRInterceptor {
             sessionId: this.config.sessionId,
             meta: { 
               settleType: "navigation",
-              urlAfter: window.location.href // 🚀 FIX 1: Explicit URL signal added
+              urlAfter: window.location.href,
+              isRecovery: true // 🚀 NEW: Tells flushQueue NOT to strip this snapshot
             },
             pageSnapshot: snapshot,
             pageState: snapshot,

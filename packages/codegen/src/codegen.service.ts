@@ -14,6 +14,8 @@
  *   - Hover events (excluded by default)
  *   - Input heartbeats (trigger=input:progress — already filtered at DB level)
  *   - Duplicate edges (deduped by fingerprint hash)
+ *   - Pre-navigation UI setup clicks (hamburger expands, container taps)   ← Fix B
+ *   - Assertions shared across 2+ destination pages (layout chrome)        ← Fix C
  *
  * What gets preserved:
  *   - Selectors + selector priority (how to find the element)
@@ -48,6 +50,14 @@ import {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const ACTIONABLE_TYPES = new Set(['click', 'input', 'submit', 'custom-select']);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX B — FRAGILE SELECTOR PRIORITIES
+// Steps with these priorities AND immediate_action outcome are candidates for
+// pre-navigation setup suppression (hamburger expands, container taps, etc.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const FRAGILE_PRIORITIES = new Set<string>(['class', 'path', 'xpath']);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ANCHOR PARSING
@@ -105,7 +115,6 @@ function parseAnchorsToAssertions(
 
     switch (attrType) {
       case 'text':
-        // Playwright: getByText() or getByRole() with name
         selector       = `${tag}:has-text("${attrVal}")`;
         assertionType  = 'element_visible';
         break;
@@ -135,7 +144,7 @@ function parseAnchorsToAssertions(
       value:      attrVal,
       selector,
       source:     'anchor',
-      confidence: confidence * 0.9, // Slightly lower than URL confidence
+      confidence: confidence * 0.9,
     });
   }
 
@@ -177,17 +186,12 @@ function extractValue(payloadJson: string | null, eventType: string): string | u
   try {
     const payload = JSON.parse(payloadJson);
 
-    // custom-select: use the selection label
     if (eventType === 'custom-select' && payload.selection?.label) {
       return payload.selection.label;
     }
 
-    // input: use masked value or length hint
     if (eventType === 'input') {
       if (payload.inputValueMasked) {
-        // Fix (Hallucination Trap): [REDACTED] means sensitive field (password, SSN etc).
-        // Returning it literally causes AI to emit: .fill('[REDACTED]') which breaks tests.
-        // Signal the AI to generate appropriate mock data instead.
         if (payload.inputValueMasked === '[REDACTED]') {
           return '<LLM_GENERATE_MOCK_DATA>';
         }
@@ -202,15 +206,163 @@ function extractValue(payloadJson: string | null, eventType: string): string | u
   }
 }
 
-function computeFpHash(fp: FingerprintData, eventType: string): string {
-    const raw = [
-      fp.selector       || '',
-      fp.textExcerpt    || '',
-      fp.attributesHash || '',
-      eventType
-    ].join('|');
-    return crypto.createHash('sha256').update(raw).digest('hex');
+function computeFpHash(fp: FingerprintData | null, eventType: string): string {
+  const raw = [
+    fp?.selector       || '',
+    fp?.textExcerpt    || '',
+    fp?.attributesHash || '',
+    eventType,
+  ].join('|');
+  return crypto.createHash('sha256').update(raw).digest('hex');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX A — INTENT FROM textExcerpt
+//
+// Previously intent was synthesised entirely from the selector string:
+//   click_.oxd_main_menu_item  (same for Admin, PIM and Leave links)
+//
+// The textExcerpt in the fingerprint holds the visible label the user clicked
+// ("Admin", "PIM", "Leave"). Using it makes intents unique and human-readable,
+// which also produces better selector guidance for the AI code generator.
+//
+// Priority order:
+//   1. textExcerpt (visible label — most meaningful)
+//   2. aria-label attribute (accessibility label)
+//   3. name attribute (form field names)
+//   4. selector string (last resort)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function buildIntent(eventType: string, fp: FingerprintData): string {
+  const candidates = [
+    fp.textExcerpt,
+    fp.attributes?.['ariaLabel'],
+    fp.attributes?.['aria-label'],
+    fp.attributes?.['name'],
+  ];
+
+  const label = candidates.find(c => typeof c === 'string' && c.trim().length > 1);
+  const source = label ?? fp.selector ?? '';
+
+  const safeName = source
+    .trim()
+    .replace(/[^a-zA-Z0-9]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .substring(0, 30);
+
+  return safeName ? `${eventType}_${safeName}` : eventType;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX B — PRE-NAVIGATION SETUP CLICK SUPPRESSION
+//
+// SPA sidebar navigation produces noise clicks before the real nav trigger:
+//   8.  click .oxd-icon            (immediate_action, fragile class selector)
+//   9.  click div > div:nth-of-type  (immediate_action, fragile path selector)
+//   10. click .oxd-main-menu-item   (navigation)  ← the only step that matters
+//
+// A step is suppressed when ALL three conditions hold:
+//   1. outcomeType is 'immediate_action' (explicitly did not change page state)
+//   2. selectorPriority is fragile (class / path / xpath)
+//   3. Within the next LOOKAHEAD_WINDOW steps on the same page URL, there is a
+//      navigation step — OR there are no further steps on this page at all
+//      (trailing setup clicks with no completion are equally useless).
+//
+// Steps that do NOT meet all three conditions are always kept, so legitimate
+// class-selector clicks that actually change state (e.g. toggling a tab that
+// stays on the same page with state_refresh outcome) are never suppressed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const LOOKAHEAD_WINDOW = 4; // scan up to 4 steps ahead for a navigation trigger
+
+function suppressPreNavSetupClicks(steps: CodegenStep[]): CodegenStep[] {
+  const suppress = new Set<number>(); // indices to remove
+
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+
+    // Condition 1: must be immediate_action
+    if (step.outcomeType !== 'immediate_action') continue;
+
+    // Condition 2: must have a fragile selector
+    if (!FRAGILE_PRIORITIES.has(step.selectorPriority)) continue;
+
+    // Condition 3a: look ahead within the window on the same page
+    let foundNavAhead = false;
+    let foundAnyStepOnSamePage = false;
+
+    for (let j = i + 1; j < steps.length && j <= i + LOOKAHEAD_WINDOW; j++) {
+      if (steps[j].pageUrl !== step.pageUrl) break; // left the page
+
+      foundAnyStepOnSamePage = true;
+
+      if (steps[j].outcomeType === 'navigation') {
+        foundNavAhead = true;
+        break;
+      }
+    }
+
+    // Condition 3b: also suppress if this is the last meaningful step on the
+    // page (no further steps exist on this URL — trailing noise).
+    const isTrailing = !foundAnyStepOnSamePage ||
+      steps.slice(i + 1).every(s => s.pageUrl !== step.pageUrl);
+
+    if (foundNavAhead || isTrailing) {
+      suppress.add(i);
+    }
   }
+
+  return steps.filter((_, i) => !suppress.has(i));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX C — SHARED ASSERTION DEDUPLICATION
+//
+// scanPageAnchors() captures global nav/sidebar elements (Add, Reset, Search,
+// Upgrade, checkbox, text input) that appear identically on every page of the
+// app. These produce the same assertion set on every navigation step, making
+// them useless as page-specific checks.
+//
+// Strategy: count how many distinct destination pages each anchor assertion
+// selector appears on. Any selector present on 2+ destination pages is layout
+// chrome — strip it. URL assertions are always unique so they are never
+// touched. The result: each nav step keeps only the assertions that are
+// genuinely specific to its destination page.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function deduplicateSharedAssertions(steps: CodegenStep[]): CodegenStep[] {
+  // Count how many NAV steps each anchor selector appears in
+  const selectorPageCount = new Map<string, number>();
+
+  for (const step of steps) {
+    if (step.outcomeType !== 'navigation') continue;
+
+    // Use a Set so one step with the same selector twice doesn't double-count
+    const seen = new Set<string>();
+    for (const assertion of step.assertions) {
+      if (assertion.source !== 'anchor') continue;
+      if (!assertion.selector) continue;
+      if (!seen.has(assertion.selector)) {
+        seen.add(assertion.selector);
+        selectorPageCount.set(
+          assertion.selector,
+          (selectorPageCount.get(assertion.selector) ?? 0) + 1,
+        );
+      }
+    }
+  }
+
+  // Strip selectors that appear on more than one destination page
+  return steps.map(step => ({
+    ...step,
+    assertions: step.assertions.filter(assertion => {
+      if (assertion.source !== 'anchor') return true; // always keep URL assertions
+      if (!assertion.selector) return true;
+      return (selectorPageCount.get(assertion.selector) ?? 0) < 2;
+    }),
+  }));
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MAIN SERVICE
@@ -272,7 +424,6 @@ export class CodegenService {
     }
 
     // ── 2. Load ordered events for this session ─────────────────────────────
-    // Only actionable types — skip network, outcome, scroll (default), hover (default)
     const includeTypes = ['click', 'input', 'submit', 'custom-select'];
     if (this.options.includeScrollSteps) includeTypes.push('scroll');
     if (this.options.includeHoverSteps)  includeTypes.push('hover');
@@ -299,23 +450,18 @@ export class CodegenService {
     // resolveOutcome() on the EXISTING edge (first session created it).
     // That edge's trigger_event_id points to a DIFFERENT session's event,
     // making it invisible if we filter by current session's event IDs.
-    // Fix: extract fingerprint hashes from session events in JS, then query
-    // edges by those hashes — correctly finds edges across all sessions.
 
-    // Extract all fingerprint hashes from session event payloads
     const sessionFpHashes = new Set<string>();
     const sessionEventIds = new Set<string>();
     for (const ev of events) {
       if (ev.eventId) sessionEventIds.add(ev.eventId);
       const fp = extractFingerprint(ev.payload);
-      const recomputed = computeFpHash(fp, ev.eventType);
-      sessionFpHashes.add(recomputed);
+      sessionFpHashes.add(computeFpHash(fp, ev.eventType));
     }
 
     const fpHashList  = Array.from(sessionFpHashes);
     const eventIdList = Array.from(sessionEventIds);
 
-    // Query edges by fingerprint_hash OR trigger_event_id (belt and suspenders)
     const allEdgeRows: any[] = [];
     if (fpHashList.length > 0) {
       const fpPlaceholders = fpHashList.map(() => '?').join(', ');
@@ -354,44 +500,35 @@ export class CodegenService {
       allEdgeRows.push(...byEvent);
     }
 
-    // Deduplicate edges and key by fingerprint_hash
-    // Keep the highest-confidence (navigation > others) edge per fingerprint
+    // Deduplicate edges — keep highest-confidence outcome per fingerprint
+    const edgeByEventId       = new Map<string, any>();
+    const edgeByFingerprint   = new Map<string, any>();
 
-    // Build TWO lookup maps in a single pass
-    const edgeByEventId = new Map<string, any>();
-    const edgeByFingerprint = new Map<string, any>();
-    
     const outcomeTypePriority: Record<string, number> = {
-      navigation: 3, state_refresh: 2, no_change: 1, immediate_action: 0
+      navigation: 3, state_refresh: 2, no_change: 1, immediate_action: 0,
     };
 
     for (const edge of allEdgeRows) {
       const newPriority = outcomeTypePriority[edge.outcomeType] ?? -1;
 
-      // Map 1: By exact Event ID (Current Session)
       if (edge.triggerEventId) {
-        const existingEvent = edgeByEventId.get(edge.triggerEventId);
-        const oldEventPriority = outcomeTypePriority[existingEvent?.outcomeType] ?? -1;
-        if (!existingEvent || newPriority > oldEventPriority) {
+        const existing = edgeByEventId.get(edge.triggerEventId);
+        if (!existing || newPriority > (outcomeTypePriority[existing.outcomeType] ?? -1)) {
           edgeByEventId.set(edge.triggerEventId, edge);
         }
       }
-
-      // Map 2: By Fingerprint Hash (Historical Sessions)
       if (edge.fingerprintHash) {
-        const existingFp = edgeByFingerprint.get(edge.fingerprintHash);
-        const oldFpPriority = outcomeTypePriority[existingFp?.outcomeType] ?? -1;
-        if (!existingFp || newPriority > oldFpPriority) {
+        const existing = edgeByFingerprint.get(edge.fingerprintHash);
+        if (!existing || newPriority > (outcomeTypePriority[existing.outcomeType] ?? -1)) {
           edgeByFingerprint.set(edge.fingerprintHash, edge);
         }
       }
     }
-    
-    // Extract unique edges for graph calculations (keeps flowConfidence accurate)
+
     const edgeRows = Array.from(edgeByFingerprint.values());
 
     // ── 4. Load destination nodes for navigation edges ──────────────────────
-    const navEdges = edgeRows.filter(e => e.outcomeType === 'navigation');
+    const navEdges  = edgeRows.filter(e => e.outcomeType === 'navigation');
     const toNodeIds = Array.from(new Set(navEdges.map(e => e.toNodeId).filter(Boolean)));
 
     const nodeMap = new Map<string, any>();
@@ -402,13 +539,11 @@ export class CodegenService {
         FROM nodes
         WHERE id IN (${nodePlaceholders})
       `).all(...toNodeIds) as any[];
-      for (const node of nodes) {
-        nodeMap.set(node.id, node);
-      }
+      for (const node of nodes) nodeMap.set(node.id, node);
     }
 
-    // ── 5. Build steps ───────────────────────────────────────────────────────
-    const steps: CodegenStep[] = [];
+    // ── 5. Build raw steps ───────────────────────────────────────────────────
+    const rawSteps: CodegenStep[] = [];
     let stepNum = 0;
     const minConfidence = this.options.minConfidence ?? 0.0;
 
@@ -418,93 +553,82 @@ export class CodegenService {
       const fingerprint = extractFingerprint(ev.payload);
       if (!fingerprint?.selector) continue;
 
-      // Look up edge by fingerprint attributesHash — works across all sessions
       const recomputedHash = computeFpHash(fingerprint, ev.eventType);
-      const edge = edgeByEventId.get(ev.eventId) || edgeByFingerprint.get(recomputedHash);
+      const edge      = edgeByEventId.get(ev.eventId) || edgeByFingerprint.get(recomputedHash);
       const confidence = edge?.probability ?? 1.0;
 
       if (confidence < minConfidence) continue;
 
       stepNum++;
 
-      // Fix 1: strip double underscores from intent
-      // Caused by old intent detector producing _username → click__username
-      // Synthesize intent directly from the selector and action type
-      const safeSelectorName = fingerprint.selector.replace(/[^a-zA-Z0-9]/g, '_').replace(/_+/g, '_').substring(0, 20);
-      const rawIntent = `${ev.eventType}_${safeSelectorName}`.replace(/_$/, '');
+      // FIX A: intent now prefers textExcerpt over the raw selector string.
+      // "click_Admin", "click_PIM", "click_Leave" instead of
+      // "click__oxd_main_menu_item" for all three navigation steps.
+      const intent = buildIntent(ev.eventType, fingerprint);
 
       const step: CodegenStep = {
         step:             stepNum,
-        intent:           rawIntent,
+        intent,
         action:           ev.eventType as ActionType,
         selector:         fingerprint.selector,
         selectorPriority: normalizeSelectorPriority(fingerprint.selectorPriority),
         pageUrl:          ev.pageUrl || '',
         confidence,
         sampleSize:       edge?.sampleSize ?? 1,
-        assertions:       [],   // populated below if outcomeType=navigation
-        userAssertions:   [],   // stub — Phase 2
+        assertions:       [],
+        userAssertions:   [],
       };
 
-      // Value for input/select actions
       const value = extractValue(ev.payload, ev.eventType);
       if (value) step.value = value;
 
-      // Outcome information + step-level assertions
       if (edge) {
         step.outcomeType = edge.outcomeType;
 
         if (edge.outcomeType === 'navigation' && edge.toNodeId) {
           const destNode = nodeMap.get(edge.toNodeId);
-          if (destNode?.page_url) {
-            step.navigatesTo = destNode.page_url;
-          }
+          if (destNode?.page_url) step.navigatesTo = destNode.page_url;
 
-          // Fix (Regression): Assertions belong on the step where navigation
-          // occurs, not at the session root. This ensures multi-step flows
-          // like Login → Dashboard → Settings emit mid-flow assertions at each
-          // navigation boundary, not just a single assertion at the very end.
           if (destNode) {
             step.assertions = parseAnchorsToAssertions(
               destNode.anchors,
               destNode.page_url,
-              edge.probability ?? 1.0
+              edge.probability ?? 1.0,
             );
           }
 
-          // User-defined assertions for this step (stub — Phase 2)
           step.userAssertions = hasUserAssertionSupport(this.db)
             ? getUserDefinedAssertions(sessionId, this.db)
             : [];
         }
       }
 
-      // Fix 2: Consecutive duplicate filter
-      // Same selector + action consecutively = user re-focused or stash/beacon
-      // sent same event twice with different IDs. Keep the last one — it
-      // carries the final committed value (correction wins over original typo).
-      const prevStep = steps[steps.length - 1];
-      if (
-        prevStep &&
-        prevStep.selector === step.selector &&
-        prevStep.action   === step.action
-      ) {
-        // Replace previous step with current — current is the authoritative one
-        // Re-number to keep step numbers consistent
-        step.step = prevStep.step;
-        steps[steps.length - 1] = step;
-        stepNum--; // don't advance step counter
+      // Consecutive duplicate filter — keep last (carries final committed value)
+      const prev = rawSteps[rawSteps.length - 1];
+      if (prev && prev.selector === step.selector && prev.action === step.action) {
+        step.step = prev.step;
+        rawSteps[rawSteps.length - 1] = step;
+        stepNum--;
       } else {
-        steps.push(step);
+        rawSteps.push(step);
       }
     }
 
-    // ── 6. (No root-level assertions — they live on steps now) ───────────────
-    // Each navigation step carries its own assertions derived from the
-    // destination node's anchor fingerprints. This correctly models
-    // multi-step flows where assertions are needed at each page transition.
+    // ── 6. FIX B: suppress pre-navigation setup clicks ──────────────────────
+    // Removes hamburger-expand and container-tap noise clicks that precede
+    // every SPA sidebar navigation (e.g. .oxd-icon and div > div:nth-of-type).
+    const afterSetupFilter = suppressPreNavSetupClicks(rawSteps);
 
-    // ── 8. Flow confidence — average probability of navigation edges ─────────
+    // ── 7. FIX C: strip assertions shared across multiple destination pages ──
+    // Removes global layout elements (Add, Reset, Search buttons) that appear
+    // identically in the anchor set of every page, leaving only page-specific
+    // assertions. URL assertions are never stripped.
+    const finalSteps = deduplicateSharedAssertions(afterSetupFilter);
+
+    // Re-number steps sequentially after filtering
+    finalSteps.forEach((s, i) => { s.step = i + 1; });
+
+    // ── 8. Flow confidence ───────────────────────────────────────────────────
     const navProbabilities = edgeRows
       .filter(e => e.outcomeType === 'navigation' && e.probability != null)
       .map(e => e.probability as number);
@@ -534,8 +658,8 @@ export class CodegenService {
       url:            startUrl,
       title:          startTitle,
       recordedAt:     new Date(session.started_at).toISOString(),
-      stepCount:      steps.length,
-      steps,
+      stepCount:      finalSteps.length,
+      steps:          finalSteps,
       flowConfidence,
       nodeCount:      visitedNodes.size,
     };

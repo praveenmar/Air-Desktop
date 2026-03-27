@@ -228,4 +228,26 @@ export class GraphBuilder {
       }
     }, 15000);
   }
+
+  /**
+   * Tears down the cleanup interval before the database connection is closed.
+   *
+   * MUST be called before DatabaseService.close() on app exit or DB reset.
+   * If the interval fires after db.close(), every pending_actions and debug_logs
+   * query inside the tick throws "The database connection is not open" — an
+   * unhandled error on a background timer that Node cannot surface cleanly.
+   *
+   * Wiring (Electron main entry):
+   *   app.on('before-quit', () => {
+   *     graphBuilder.close();   // ← stop interval first
+   *     dbService.close();      // ← then close the connection
+   *   });
+   */
+  public close(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+      this.logger.log('GraphBuilder', 'info', 'Cleanup service stopped');
+    }
+  }
 }
