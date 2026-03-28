@@ -210,6 +210,31 @@ const AIR_CFG = {
   debugMode: true
 };
 
+const SELECTOR_RANK_MAP = {
+  'data-testid': 1,
+  id: 2,
+  attribute: 3,
+  class: 7,
+  text: 8,
+  path: 10,
+  xpath: 10,
+  other: 10,
+  chained: 10,
+};
+
+function escapeCssString(value) {
+  return String(value)
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\A ')
+    .replace(/\r/g, '\\D ')
+    .replace(/\t/g, '\\9 ');
+}
+
+function rankForPriority(priority) {
+  return SELECTOR_RANK_MAP[priority] ?? 10;
+}
+
 // Cache for DOM indexing
 const _rootIndexCache = new WeakMap();
 
@@ -2286,12 +2311,14 @@ class AIRInterceptor {
         const containerInfo = scrollTarget === window
           ? { tag: "window", selector: "window" }
           : {
-              tag:      scrollTarget.tagName?.toLowerCase() || "unknown",
+              tag: scrollTarget.tagName?.toLowerCase() || "unknown",
               selector: scrollTarget.id
-                ? `#${scrollTarget.id}`
+                ? `#${CSS.escape(scrollTarget.id)}`
                 : (scrollTarget.getAttribute("data-testid")
-                    ? `[data-testid="${scrollTarget.getAttribute("data-testid")}"]`
-                    : scrollTarget.className?.split(" ")[0] || "unknown"),
+                    ? `[data-testid="${escapeCssString(scrollTarget.getAttribute("data-testid"))}"]`
+                    : scrollTarget.className?.split(" ")[0] 
+                        ? `.${CSS.escape(scrollTarget.className.split(" ")[0])}`
+                        : "unknown"),
             };
 
         this.queueEvent({
@@ -2399,6 +2426,7 @@ class AIRInterceptor {
     return {
       selector: selectorResult.selector,
       selectorPriority: selectorResult.priority,
+      selectorRank: selectorResult.rank,
       textExcerpt,
       context,
       attributes,
@@ -2407,12 +2435,15 @@ class AIRInterceptor {
   }
 
   generateOptimalSelector(element) {
+    const tagName = element.tagName.toLowerCase();
+
     // Priority 1: data-testid (most stable)
     if (element.hasAttribute("data-testid")) {
       const testId = element.getAttribute("data-testid");
       return {
-        selector: `[data-testid="${testId}"]`,
+        selector: `[data-testid="${escapeCssString(testId)}"]`,
         priority: "data-testid",
+        rank: rankForPriority("data-testid"),
       };
     }
 
@@ -2435,66 +2466,68 @@ class AIRInterceptor {
         /^(?:css|sc)-[a-zA-Z0-9]+$/.test(id)        // CSS-in-JS hash
       );
       if (!isDynamic) {
-        return { selector: `#${CSS.escape(id)}`, priority: "id" };
+        return {
+          selector: `#${CSS.escape(id)}`,
+          priority: "id",
+          rank: rankForPriority("id"),
+        };
       }
     }
 
     // Priority 3: name attribute
     if (element.name) {
       return {
-        selector: `${element.tagName.toLowerCase()}[name="${element.name}"]`,
+        selector: `${tagName}[name="${escapeCssString(element.name)}"]`,
         priority: "attribute",
+        rank: rankForPriority("attribute"),
       };
     }
 
     // Priority 4: aria-label (very stable for buttons/links)
     if (element.getAttribute("aria-label")) {
       return {
-        selector: `${element.tagName.toLowerCase()}[aria-label="${element.getAttribute("aria-label")}"]`,
+        selector: `${tagName}[aria-label="${escapeCssString(element.getAttribute("aria-label"))}"]`,
         priority: "attribute",
+        rank: rankForPriority("attribute"),
       };
     }
 
     // Priority 5: role attribute
     if (element.getAttribute("role")) {
       return {
-        selector: `[role="${element.getAttribute("role")}"]`,
+        selector: `[role="${escapeCssString(element.getAttribute("role"))}"]`,
         priority: "attribute",
+        rank: rankForPriority("attribute"),
       };
     }
 
     // Priority 6: type attribute (for inputs/buttons)
-    if (element.type && ["submit", "button", "reset"].includes(element.type)) {
-      const text = this.extractText(element);
-      if (text && text.length > 0 && text.length < 30) {
-        // Use text content for buttons if unique
-        return {
-          selector: `${element.tagName.toLowerCase()}[type="${element.type}"]:has-text("${text}")`,
-          priority: "attribute",
-          fallback: `${element.tagName.toLowerCase()}[type="${element.type}"]`,
-        };
-      }
+    if (element.type && ["submit", "button", "reset", "checkbox", "radio"].includes(element.type)) {
       return {
-        selector: `${element.tagName.toLowerCase()}[type="${element.type}"]`,
+        selector: `${tagName}[type="${escapeCssString(element.type)}"]`,
         priority: "attribute",
+        rank: rankForPriority("attribute"),
       };
     }
 
     // Priority 7: Stable class
     const stableClass = this.findStableClass(element);
     if (stableClass) {
-      return { selector: `.${CSS.escape(stableClass)}`, priority: "class" };
+      return {
+        selector: `.${CSS.escape(stableClass)}`,
+        priority: "class",
+        rank: rankForPriority("class"),
+      };
     }
 
     // Priority 8: Compound selector (tag + text for buttons/links)
-    const tagName = element.tagName.toLowerCase();
     if (["button", "a", "submit"].includes(tagName)) {
       const text = this.extractText(element);
       if (text && text.length > 0 && text.length < 50) {
         return {
-          selector: `${tagName}:has-text("${text}")`,
-          priority: "attribute",
-          text: text,
+          selector: `${tagName}:has-text("${escapeCssString(text)}")`,
+          priority: "text",
+          rank: rankForPriority("text"),
         };
       }
     }
@@ -2504,19 +2537,17 @@ class AIRInterceptor {
     // a highly specific but still resilient selector. This covers the common
     // case where generated IDs are unstable but name+type+placeholder are stable.
     {
-      const tagName = element.tagName.toLowerCase();
-      const parts   = [];
-      if (element.name)                           parts.push(`[name="${element.name}"]`);
-      if (element.getAttribute("aria-label"))     parts.push(`[aria-label="${element.getAttribute("aria-label")}"]`);
-      if (element.type && !["text", "button"].includes(element.type))
-                                                  parts.push(`[type="${element.type}"]`);
-      if (element.placeholder)                    parts.push(`[placeholder="${element.placeholder}"]`);
-      if (element.getAttribute("data-cy"))        parts.push(`[data-cy="${element.getAttribute("data-cy")}"]`);
+      const parts = [];
+      if (element.name) parts.push(`[name="${escapeCssString(element.name)}"]`);
+      if (element.getAttribute("aria-label")) parts.push(`[aria-label="${escapeCssString(element.getAttribute("aria-label"))}"]`);
+      if (element.type && !["text", "button"].includes(element.type)) parts.push(`[type="${escapeCssString(element.type)}"]`);
+      if (element.placeholder) parts.push(`[placeholder="${escapeCssString(element.placeholder)}"]`);
 
       if (parts.length >= 2) {
         return {
           selector: `${tagName}${parts.join("")}`,
-          priority: "multi-attribute",
+          priority: "attribute",
+          rank: rankForPriority("attribute"),
         };
       }
     }
@@ -2529,19 +2560,24 @@ class AIRInterceptor {
       );
       if (siblings.length > 0) {
         const index = siblings.indexOf(element);
-        const parentSelector = parent.id
+        const parentSelector = parent.id && !/^\d/.test(parent.id)
           ? `#${CSS.escape(parent.id)}`
           : parent.tagName.toLowerCase();
 
         return {
           selector: `${parentSelector} > ${tagName}:nth-of-type(${index + 1})`,
           priority: "path",
+          rank: rankForPriority("path"),
         };
       }
     }
 
     // Priority 10: XPath (last resort)
-    return { selector: this.generateXPath(element), priority: "path" };
+    return {
+      selector: this.generateXPath(element),
+      priority: "xpath",
+      rank: rankForPriority("xpath"),
+    };
   }
 
   findStableClass(element) {
@@ -3068,6 +3104,16 @@ class AIRInterceptor {
       this.quiescence.observer.disconnect();
     }
   }
+}
+
+// Node/Vitest test access (no effect in browser injection runtime)
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    AIRInterceptor,
+    SELECTOR_RANK_MAP,
+    escapeCssString,
+    rankForPriority,
+  };
 }
 
 // Auto-initialize if not in module context

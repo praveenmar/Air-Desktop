@@ -29,6 +29,7 @@ export type FingerprintContext = z.infer<typeof FingerprintContextSchema>;
 export const ElementFingerprintSchema = z.object({
   selector: z.string(),
   selectorPriority: SelectorPrioritySchema,
+  selectorRank: z.number().int().min(1).max(10).optional(),
   textExcerpt: z.string().nullable(),
   context: FingerprintContextSchema,
   attributes: z.record(z.string(), z.string().optional()),

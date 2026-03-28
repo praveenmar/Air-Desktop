@@ -43,6 +43,8 @@ export type SelectorPriority =
   | 'path'
   | 'text'
   | 'xpath'
+  | 'other'
+  | 'chained'
   | 'unknown';
 
 export interface CodegenStep {
@@ -68,6 +70,9 @@ export interface CodegenStep {
    * data-testid → getByTestId(), aria-label → getByRole(), etc.
    */
   selectorPriority: SelectorPriority;
+
+  /** Optional selector quality rank (1 = most stable, 10 = most fragile). */
+  selectorRank?: number;
 
   /**
    * Input value for 'input' and 'custom-select' actions.

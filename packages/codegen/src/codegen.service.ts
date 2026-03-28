@@ -45,6 +45,32 @@ import {
   hasUserAssertionSupport,
 } from './assertion.stub';
 
+export const SELECTOR_RANK_MAP: Record<string, number> = {
+  'data-testid': 1,
+  id: 2,
+  attribute: 3,
+  class: 7,
+  text: 8,
+  path: 10,
+  xpath: 10,
+  other: 10,
+  chained: 10,
+  unknown: 10,
+};
+
+function escapeCssString(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\A ')
+    .replace(/\r/g, '\\D ')
+    .replace(/\t/g, '\\9 ');
+}
+
+export function rankFromPriority(priority: SelectorPriority): number {
+  return SELECTOR_RANK_MAP[priority] ?? 10;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ACTION TYPES THAT PRODUCE MEANINGFUL TEST STEPS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -100,50 +126,49 @@ function parseAnchorsToAssertions(
     const colonIdx = anchor.indexOf(':');
     if (colonIdx === -1) continue;
 
-    const tag    = anchor.slice(0, colonIdx).toLowerCase();
-    const rest   = anchor.slice(colonIdx + 1);
-    const eqIdx  = rest.indexOf('=');
+    const tag = anchor.slice(0, colonIdx).toLowerCase();
+    const rest = anchor.slice(colonIdx + 1);
+    const eqIdx = rest.indexOf('=');
     if (eqIdx === -1) continue;
 
-    const attrType = rest.slice(0, eqIdx);   // "text", "id", "name", "role"
-    const attrVal  = rest.slice(eqIdx + 1);  // "Log out", "submit", etc.
+    const attrType = rest.slice(0, eqIdx);
+    const attrVal = rest.slice(eqIdx + 1);
 
     if (!attrVal || attrVal.length < 2) continue;
 
     let assertionType: AssertionType = 'element_visible';
     let selector = '';
+    const safeVal = escapeCssString(attrVal);
 
     switch (attrType) {
       case 'text':
-        selector       = `${tag}:has-text("${attrVal}")`;
-        assertionType  = 'element_visible';
+        selector = `${tag}:has-text("${safeVal}")`;
         break;
       case 'testid':
-        selector      = `[data-testid="${attrVal}"]`;
-        assertionType = 'element_visible';
+        selector = `[data-testid="${safeVal}"]`;
         break;
-      case 'id':
-        selector      = `#${attrVal}`;
-        assertionType = 'element_visible';
+      case 'id': {
+        const safeId = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+          ? CSS.escape(attrVal)
+          : escapeCssString(attrVal);
+        selector = `#${safeId}`;
         break;
+      }
       case 'name':
-        selector      = `[name="${attrVal}"]`;
-        assertionType = 'element_visible';
+        selector = `[name="${safeVal}"]`;
         break;
       case 'role':
-        selector      = `[role="${attrVal}"]`;
-        assertionType = 'element_visible';
+        selector = `[role="${safeVal}"]`;
         break;
       default:
-        selector      = `${tag}[${attrType}="${attrVal}"]`;
-        assertionType = 'element_visible';
+        selector = `${tag}[${attrType}="${safeVal}"]`;
     }
 
     assertions.push({
-      type:       assertionType,
-      value:      attrVal,
+      type: assertionType,
+      value: attrVal,
       selector,
-      source:     'anchor',
+      source: 'anchor',
       confidence: confidence * 0.9,
     });
   }
@@ -159,6 +184,7 @@ function parseAnchorsToAssertions(
 interface FingerprintData {
   selector?: string;
   selectorPriority?: string;
+  selectorRank?: number;
   textExcerpt?: string | null;
   attributes?: Record<string, string>;
   attributesHash?: string;
@@ -174,9 +200,9 @@ function extractFingerprint(payloadJson: string | null): FingerprintData | null 
   }
 }
 
-function normalizeSelectorPriority(raw: string | undefined): SelectorPriority {
+export function normalizeSelectorPriority(raw: string | undefined): SelectorPriority {
   const valid: SelectorPriority[] = [
-    'data-testid', 'id', 'attribute', 'class', 'path', 'text', 'xpath',
+    'data-testid', 'id', 'attribute', 'class', 'path', 'text', 'xpath', 'chained', 'other',
   ];
   return (valid.includes(raw as SelectorPriority) ? raw : 'unknown') as SelectorPriority;
 }
@@ -276,7 +302,7 @@ function buildIntent(eventType: string, fp: FingerprintData): string {
 
 const LOOKAHEAD_WINDOW = 4; // scan up to 4 steps ahead for a navigation trigger
 
-function suppressPreNavSetupClicks(steps: CodegenStep[]): CodegenStep[] {
+export function suppressPreNavSetupClicks(steps: CodegenStep[]): CodegenStep[] {
   const suppress = new Set<number>(); // indices to remove
 
   for (let i = 0; i < steps.length; i++) {
@@ -331,7 +357,7 @@ function suppressPreNavSetupClicks(steps: CodegenStep[]): CodegenStep[] {
 // genuinely specific to its destination page.
 // ─────────────────────────────────────────────────────────────────────────────
 
-function deduplicateSharedAssertions(steps: CodegenStep[]): CodegenStep[] {
+export function deduplicateSharedAssertions(steps: CodegenStep[]): CodegenStep[] {
   // Count how many NAV steps each anchor selector appears in
   const selectorPageCount = new Map<string, number>();
 
@@ -565,13 +591,16 @@ export class CodegenService {
       // "click_Admin", "click_PIM", "click_Leave" instead of
       // "click__oxd_main_menu_item" for all three navigation steps.
       const intent = buildIntent(ev.eventType, fingerprint);
+      const selectorPriority = normalizeSelectorPriority(fingerprint.selectorPriority);
+      const selectorRank = fingerprint.selectorRank ?? rankFromPriority(selectorPriority);
 
       const step: CodegenStep = {
         step:             stepNum,
         intent,
         action:           ev.eventType as ActionType,
         selector:         fingerprint.selector,
-        selectorPriority: normalizeSelectorPriority(fingerprint.selectorPriority),
+        selectorPriority,
+        selectorRank,
         pageUrl:          ev.pageUrl || '',
         confidence,
         sampleSize:       edge?.sampleSize ?? 1,
