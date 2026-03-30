@@ -20,6 +20,7 @@ import { EdgeRepository } from '../../core/db/repositories/edge.repository';
 import { SessionRepository } from '../../core/db/repositories/session.repository';
 import { DatabaseService } from '../../core/db/database';
 import { browserManager } from './browser-manager';
+import crypto from 'crypto';
 
 // --- Row mappers for the session:get-graph raw SQL path ---
 
@@ -78,18 +79,11 @@ export function registerIpcHandlers(
 
   // --- SERVER ---
 
-  // FIX (Bug #7a): interceptor_preload.ts calls this synchronously via ipcRenderer.sendSync
-  // to get the live port before injecting the interceptor. Without this handler the call
-  // returned undefined and __AIR_CONFIG.eventServerPort was always 3000 (wrong).
-  ipcMain.on('get-interceptor-config', (event) => {
-    event.returnValue = {
-      eventServerPort: serverPort,
-      // Return the stable session ID birthed in recording:start.
-      // Fallback generates a one-off ID only if the preload fires before recording:start
-      // (e.g. a cold window open) — those orphaned events will carry a consistent ID
-      // at least within that preload execution cycle.
-      sessionId: currentSessionId ?? `session-fallback-${Date.now()}`,
-    };
+  ipcMain.handle('get-interceptor-config', async () => {
+    if (!currentSessionId) {
+      throw new Error('No active recording session');
+    }
+  return { eventServerPort: serverPort, sessionId: currentSessionId };
   });
 
   // FIX (Bug #7b): Async channel so the renderer can read the real live port if needed
@@ -104,10 +98,9 @@ export function registerIpcHandlers(
       // This ID is returned by every subsequent 'get-interceptor-config' call
       // for the duration of this recording, keeping all interceptor events in one
       // DB session regardless of how many times the preload script re-executes.
-      currentSessionId = `session-${Date.now()}`;
-
-      await browserManager.startRecording(url, serverPort);
-      return { success: true, sessionId: currentSessionId };
+      currentSessionId = `session-${crypto.randomUUID()}`;
+      await browserManager.startRecording(url, serverPort, currentSessionId);
+      return { success: true, sessionId: currentSessionId }; 
     } catch (error) {
       console.error('Failed to start Playwright recording:', error);
       currentSessionId = null; // don't leave a stale ID if launch failed

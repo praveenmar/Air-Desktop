@@ -21,35 +21,46 @@ export class CDPBridge {
     }
   }
 
-  public async injectInterceptor(serverPort: number): Promise<void> {
-    if (!this.currentWebContents) {
-      throw new Error('Cannot inject interceptor: No active WebContents debugger.');
-    }
-
-    try {
-      const isDev = !app.isPackaged;
-      // Resolve path dynamically based on dev vs. production build
-      const interceptorPath = isDev 
-        ? path.join(__dirname, '../../interceptor/interceptor.js')
-        : path.join(process.resourcesPath, 'interceptor.js');
-
-      const scriptContent = fs.readFileSync(interceptorPath, 'utf-8');
-      
-      // Dynamically point the interceptor to our random localized port
-      const modifiedScript = scriptContent.replace(
-        /http:\/\/localhost:3000/g,
-        `http://localhost:${serverPort}`
-      );
-
-      await this.currentWebContents.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
-        source: modifiedScript,
-      });
-
-      console.log(`💉 Interceptor injected. Pointed to http://localhost:${serverPort}`);
-    } catch (error) {
-      console.error('❌ Failed to inject interceptor script:', error);
-    }
+  public async injectInterceptor(serverPort: number, sessionId: string): Promise<void> {
+  if (!this.currentWebContents) {
+    throw new Error('Cannot inject interceptor: No active WebContents debugger.');
   }
+
+  try {
+    const isDev = !app.isPackaged;
+    const interceptorPath = isDev 
+      ? path.join(__dirname, '../../interceptor/interceptor.js')
+      : path.join(process.resourcesPath, 'interceptor.js');
+
+    let interceptorCode = fs.readFileSync(interceptorPath, 'utf-8');
+    
+    // Replace the server URL placeholder
+    interceptorCode = interceptorCode.replace(
+      /http:\/\/localhost:3000/g,
+      `http://localhost:${serverPort}`
+    );
+
+    // Build the config injection script
+    const configScript = `
+      window.__AIR_CONFIG__ = {
+        sessionId: "${sessionId}",
+        serverUrl: "http://localhost:${serverPort}",
+        strictMode: true
+      };
+    `;
+
+    // Combine config + interceptor
+    const fullScript = configScript + interceptorCode;
+
+    await this.currentWebContents.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
+      source: fullScript,
+    });
+
+    console.log(`💉 Interceptor injected with session ${sessionId} pointing to http://localhost:${serverPort}`);
+  } catch (error) {
+    console.error('❌ Failed to inject interceptor script:', error);
+  }
+}
 
   public disconnect(): void {
     if (this.currentWebContents) {

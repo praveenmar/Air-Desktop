@@ -290,20 +290,36 @@ function isUniqueCandidate(candidate, element, root) {
 class AIRInterceptor {
   constructor(config = {}) {
     // ------------------------------------------------------------
-    // 1. SESSION PERSISTENCE (The New Fix)
+    // 1. SESSION PERSISTENCE (Hardened strict-mode flow)
     // ------------------------------------------------------------
+    this.disabled = false;
     let currentSessionId = config.sessionId;
+    let strictMode = false;
+    let configServerUrl = null;
 
-    // Check storage if not provided
-    if (!currentSessionId && typeof sessionStorage !== "undefined") {
+    // Read injected runtime config first (set by main process).
+    if (typeof window !== "undefined" && window.__AIR_CONFIG__) {
+      const cfg = window.__AIR_CONFIG__;
+      currentSessionId = cfg.sessionId || currentSessionId;
+      strictMode = cfg.strictMode === true;
+      configServerUrl = cfg.serverUrl || null;
+    }
+
+    // Non-strict only: allow sessionStorage fallback.
+    if (!currentSessionId && !strictMode && typeof sessionStorage !== "undefined") {
       try {
         currentSessionId = sessionStorage.getItem("AIR_SESSION_ID");
       } catch (e) {}
     }
 
-    // Generate & Save if strictly new
+    if (strictMode && !currentSessionId) {
+      console.error("[AIR] Session ID required in strict mode - disabling interceptor");
+      this.disabled = true;
+      return;
+    }
+
+    // Generate and persist only for non-strict fallback mode.
     if (!currentSessionId) {
-      // Browser-safe UUID v4
       currentSessionId = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(
         /[xy]/g,
         (c) => {
@@ -312,17 +328,15 @@ class AIRInterceptor {
         },
       );
 
-      if (typeof sessionStorage !== "undefined") {
+      if (!strictMode && typeof sessionStorage !== "undefined") {
         try {
           sessionStorage.setItem("AIR_SESSION_ID", currentSessionId);
-          console.log(
-            "[AIR] 💾 New Session Created & Saved:",
-            currentSessionId,
-          );
         } catch (e) {}
       }
-    } else {
-      console.log("[AIR] 🔄 Session Recovered:", currentSessionId);
+    } else if (!strictMode && typeof sessionStorage !== "undefined") {
+      try {
+        sessionStorage.setItem("AIR_SESSION_ID", currentSessionId);
+      } catch (e) {}
     }
 
     // ------------------------------------------------------------
@@ -339,7 +353,7 @@ class AIRInterceptor {
       snapshotCaptureReactAttrs: config.snapshotCaptureReactAttrs ?? true,
       snapshotWaitForSPA: config.snapshotWaitForSPA ?? true,
       debugEnabled: config.debugMode || false,
-      serverUrl: config.serverUrl || "http://localhost:3000",
+      serverUrl: configServerUrl || config.serverUrl || "http://localhost:3000",
       sessionId: currentSessionId, // <--- CRITICAL: Use the resolved ID
       projectId: config.projectId || "default",
       maxTextLength: config.maxTextLength || 50,
@@ -485,6 +499,7 @@ class AIRInterceptor {
   }
 
   init() {
+    if (this.disabled) return;
     this.log("🚀 AIR Interceptor initializing...", {
       sessionId: this.config.sessionId,
     });
@@ -877,6 +892,7 @@ class AIRInterceptor {
   // ============================================================
 
   monitorNetwork() {
+    if (this.disabled) return;
     this._patchFetch();
     this._patchXHR();
   }
@@ -1041,6 +1057,7 @@ class AIRInterceptor {
   // ============================================================
 
   attachEventListeners() {
+    if (this.disabled) return;
     // --- Explicit bound references stored on instance so they can be removed ---
     this._boundHandleClick  = this.handleClick.bind(this);
     this._boundHandleInput  = this.handleInput.bind(this);
@@ -1332,6 +1349,7 @@ class AIRInterceptor {
   // FOCUS — opens an input session when a user enters a field
   // ============================================================
   handleFocus(e) {
+    if (this.disabled) return;
     // Item 2.5: composedPath()[0] pierces Shadow DOM — e.target stops at the shadow host.
     const target = (e.composedPath && e.composedPath()[0]) || e.target;
     if (!target || !["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
@@ -1352,6 +1370,7 @@ class AIRInterceptor {
   // BLUR — commits the final field value as a single event
   // ============================================================
   handleBlur(e) {
+    if (this.disabled) return;
     const target = (e.composedPath && e.composedPath()[0]) || e.target;
     if (!target || !["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
 
@@ -1385,6 +1404,7 @@ class AIRInterceptor {
   // We do NOT call handleInput here to avoid duplicate events.
   // ============================================================
   handleChange(e) {
+    if (this.disabled) return;
     const target = (e.composedPath && e.composedPath()[0]) || e.target;
     if (!target) return;
 
@@ -1406,6 +1426,7 @@ class AIRInterceptor {
   // handleBlur will emit the single authoritative event on exit.
   // ============================================================
   handleInput(e) {
+    if (this.disabled) return;
     const target = (e.composedPath && e.composedPath()[0]) || e.target;
     if (!target || !["INPUT", "TEXTAREA"].includes(target.tagName)) return;
 
@@ -1875,6 +1896,7 @@ class AIRInterceptor {
   // CLICK HANDLER
   // ─────────────────────────────────────────────────────────────
   async handleClick(e) {
+    if (this.disabled) return;
     // Item 2.5: Resolve the TRUE click target through Shadow DOM boundaries.
     // e.target is retargeted to the shadow host; composedPath()[0] is the real element.
     const clickTarget = (e.composedPath && e.composedPath()[0]) || e.target;
@@ -2261,6 +2283,7 @@ class AIRInterceptor {
    *   - Debounce: 250 ms per target (fast enough to not miss intent).
    */
   handleScroll(e) {
+    if (this.disabled) return;
     // Resolve the scrolling element and its current position
     const scrollTarget = (e.target === document || e.target === window)
       ? window
@@ -2357,6 +2380,7 @@ class AIRInterceptor {
   }
 
   handleSubmit(e) {
+    if (this.disabled) return;
 
     const fingerprint = this.generateFingerprint(e.target);
     const traceId = this.generateUUID(); 
@@ -2774,6 +2798,7 @@ class AIRInterceptor {
   // ============================================================
 
   queueEvent(event) {
+    if (this.disabled) return;
     this.eventQueue.push(event);
 
     const debugInfo = {
@@ -2791,6 +2816,7 @@ class AIRInterceptor {
   }
 
   startBatchProcessor() {
+    if (this.disabled) return;
     this.batchTimer = setInterval(() => {
       if (this.eventQueue.length > 0) {
         this.flushQueue();
@@ -2799,6 +2825,7 @@ class AIRInterceptor {
   }
 
   async flushQueue(options = {}) {
+    if (this.disabled) return;
     // ── Concurrency guard ─────────────────────────────────────────────────
     // Prevents the batchInterval timer, the batchSize trigger, and the
     // fast-forward setTimeout from all racing to send the same head event.
@@ -2985,6 +3012,9 @@ class AIRInterceptor {
   // ============================================================
 
   getStatus() {
+    if (this.disabled) {
+      return { disabled: true, eventsQueued: 0 };
+    }
     return {
       sessionId: this.config.sessionId,
       eventsQueued: this.eventQueue.length,
@@ -2999,6 +3029,7 @@ class AIRInterceptor {
 
   // Simple backend health check for real-site testing
   async checkBackendHealth() {
+    if (this.disabled) return { ok: false, error: "Interceptor disabled" };
     const healthUrl = this.apiEndpoint.replace(/\/api\/events$/, "/api/health");
     try {
       this.log("🩺 Checking backend health at", healthUrl);
@@ -3032,10 +3063,12 @@ class AIRInterceptor {
   }
 
   dispatchEvent(name, detail) {
+    if (this.disabled) return;
     window.dispatchEvent(new CustomEvent(name, { detail }));
   }
 
   checkPendingOutcome() {
+    if (this.disabled) return false;
     const pending = sessionStorage.getItem("air_pending_trace");
     if (pending) {
       const data = JSON.parse(pending);
@@ -3071,6 +3104,7 @@ class AIRInterceptor {
   }
 
   captureBaseline() {
+    if (this.disabled) return;
     // ✅ NEW: Fresh start? Capture the page so we have a node to anchor input events to.
     this.capturePageSnapshot(this.config.snapshotDepth, false).then(
       (snapshot) => {
@@ -3090,12 +3124,14 @@ class AIRInterceptor {
   }
 
   log(...args) {
+    if (this.disabled || !this.config) return;
     if (this.config.debugMode) {
       console.log("[AIR]", ...args);
     }
   }
 
   destroy() {
+    if (this.disabled) return;
     clearInterval(this.batchTimer);
     this.flushQueue();
     // FIX: Clean up QuiescenceWatcher resources

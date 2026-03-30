@@ -88,17 +88,12 @@ export class GraphBuilder {
     // --- NORMALISATION (no DB calls) ---
     const safeEventId  = event.id        || crypto.randomUUID();
     const traceId      = event.traceId   || crypto.randomUUID();
-    const safeSessionId = event.sessionId || 'unknown';
+    const sessionId  = event.sessionId;
 
-    // Reassign so all downstream code within this call uses the same values
-    event.id        = safeEventId;
-    event.traceId   = traceId;
-    event.sessionId = safeSessionId;
-
-    this.logger.log('GraphBuilder', 'info', 'Processing event',
-      { type: event.type, sessionId: safeSessionId, traceId },
-      safeSessionId, traceId
-    );
+    if (!sessionId) {
+    this.logger.log('GraphBuilder', 'error', 'Missing sessionId', { eventId: safeEventId });
+    return { success: false, error: 'Missing sessionId' };
+  }
 
     // --- DEDUPLICATION (pure read — intentionally outside the transaction) ---
     try {
@@ -202,7 +197,7 @@ export class GraphBuilder {
       // The transaction has already been rolled back at this point by better-sqlite3.
       this.logger.log('GraphBuilder', 'error', 'Transaction failed — all writes rolled back',
         { error: (error as Error).message, eventId: safeEventId, traceId },
-        safeSessionId, traceId
+        sessionId, traceId
       );
       return { success: false, error: (error as Error).message };
     }

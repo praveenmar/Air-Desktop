@@ -21,7 +21,7 @@ export class EventRepository {
       event.id,
       event.type,
       event.timestamp,
-      event.sessionId || null,
+      event.sessionId,
       event.traceId,
       event.pageUrl,
       payloadStr,

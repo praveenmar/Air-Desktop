@@ -60,7 +60,8 @@ async function bootstrap() {
   });
 
   // 4. Start Local Event Server for Interceptor
-  const eventServer = new EventServer(graphBuilder);
+  let currentSessionId: string | null = null;
+  const eventServer = new EventServer(graphBuilder, () => currentSessionId);
   const serverPort = await eventServer.start();
 
   // 5. Initialize Electron Window & CDP Management

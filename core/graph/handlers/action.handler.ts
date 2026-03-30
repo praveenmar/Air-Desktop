@@ -43,7 +43,7 @@ export class ActionHandler {
 
     // 1. Register PENDING ACTION in DB (for future Outcome to resolve)
     if (shouldRegisterPending) {
-      this.registerPendingAction(traceId, event.sessionId || '', currentNodeId, safeEventId, event.type, fpHash);
+      this.registerPendingAction(traceId, event.sessionId, currentNodeId, safeEventId, event.type, fpHash);
       this.logger.log('ActionHandler', 'info', 'Registered PENDING ACTION in DB', { traceId, type: event.type });
     }
 

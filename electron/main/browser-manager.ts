@@ -55,7 +55,7 @@ export class BrowserManager {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
 
-  public async startRecording(url: string, serverPort: number): Promise<void> {
+  public async startRecording(url: string, serverPort: number, sessionId: string): Promise<void> {
     // Validate before doing anything — throws a clear error the IPC handler will surface
     validateUrl(url);
 
@@ -76,14 +76,18 @@ export class BrowserManager {
     const interceptorPath = resolveInterceptorPath();
     let interceptorCode = fs.readFileSync(interceptorPath, 'utf-8');
 
-    // 4. Dynamically point the interceptor to our live EventServer port
-    interceptorCode = interceptorCode.replace(
-      /http:\/\/localhost:3000/g,
-      `http://localhost:${serverPort}`
-    );
+     // Inject config object before the interceptor code 
+     // 4. Dynamically point the interceptor to our live EventServer port
+    const configScript = `
+    window.__AIR_CONFIG__ = {
+      sessionId: "${sessionId}", 
+      serverUrl: "http://localhost:${serverPort}",
+      strictMode: true
+    };
+    `;
 
     // 5. Playwright injects this into EVERY page before any page JS runs
-    await this.context.addInitScript({ content: interceptorCode });
+    await this.context.addInitScript({ content: configScript + interceptorCode });
 
     // 6. Navigate to the target URL
     const page = await this.context.newPage();

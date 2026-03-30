@@ -9,8 +9,13 @@ import { AIREventSchema } from '../../core/types';
 export class EventServer {
   private server: http.Server;
   private port: number = 0;
+  private activeSessionIdGetter: () => string | null;
 
-  constructor(private graphBuilder: GraphBuilder) {
+  constructor(
+    private graphBuilder: GraphBuilder,
+    activeSessionIdGetter: () => string | null
+  ) {
+    this.activeSessionIdGetter = activeSessionIdGetter;
     this.server = http.createServer(this.handleRequest.bind(this));
   }
 
@@ -21,7 +26,7 @@ export class EventServer {
         const address = this.server.address();
         if (address && typeof address !== 'string') {
           this.port = address.port;
-          console.log(`🚀 AIR Event Server listening on http://127.0.0.1:${this.port}`);
+          console.log(`AIR Event Server listening on http://127.0.0.1:${this.port}`);
           resolve(this.port);
         } else {
           reject(new Error('Failed to bind to a port.'));
@@ -32,7 +37,10 @@ export class EventServer {
 
   private handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
     // Dynamic CORS for the interceptor: echo origin and allow credentials when present
-    const origin = req.headers && (req.headers.origin as string | undefined);
+    const originHeader: unknown = req.headers?.origin;
+    const origin = Array.isArray(originHeader)
+      ? (typeof originHeader[0] === 'string' ? originHeader[0] : undefined)
+      : (typeof originHeader === 'string' ? originHeader : undefined);
     if (origin) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -56,55 +64,92 @@ export class EventServer {
 
     if (req.method === 'POST' && req.url === '/api/events') {
       let body = '';
-      req.on('data', chunk => { body += chunk.toString(); });
+      req.on('data', (chunk: Buffer) => {
+        body += chunk.toString();
+      });
 
       req.on('end', () => {
         try {
-          const parsed = JSON.parse(body);
-
-          // Fix: _beaconFlushAll() sends { events: [...] } (batch format) while
-          // flushQueue() sends a single event directly. The server must handle both.
-          // A failed event in a batch must NOT block the remaining events —
-          // each is processed independently and results collected separately.
-          const isBatch = parsed && typeof parsed === 'object' && Array.isArray(parsed.events);
+          const parsed: unknown = JSON.parse(body);
+          const isBatch =
+            typeof parsed === 'object' &&
+            parsed !== null &&
+            'events' in parsed &&
+            Array.isArray((parsed as { events?: unknown }).events);
 
           if (isBatch) {
-            // --- BATCH PATH (beacon flush) ---
-            const results: Array<{ success: boolean; eventId?: string; error?: string }> = [];
+            const activeSessionId = this.activeSessionIdGetter();
+            if (!activeSessionId) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: false, error: 'No active recording session' }));
+              return;
+            }
 
-            for (const rawEvent of parsed.events) {
+            const results = [];
+            let anyInvalid = false;
+            const batchEvents = (parsed as { events: unknown[] }).events;
+
+            const getEventId = (rawEvent: unknown): string | undefined => {
+              if (!rawEvent || typeof rawEvent !== 'object' || !('id' in rawEvent)) return undefined;
+              const idValue = (rawEvent as { id?: unknown }).id;
+              return typeof idValue === 'string' ? idValue : undefined;
+            };
+
+            for (const rawEvent of batchEvents) {
               try {
                 const parsedEvent = AIREventSchema.parse(rawEvent);
+
+                if (parsedEvent.sessionId !== activeSessionId) {
+                  results.push({ success: false, eventId: parsedEvent.id, error: 'Session mismatch' });
+                  anyInvalid = true;
+                  continue;
+                }
+
                 const result = this.graphBuilder.processEvent(parsedEvent);
-                results.push({ success: true, eventId: rawEvent.id });
+                if (result.success) {
+                  results.push({ success: true, eventId: parsedEvent.id });
+                } else {
+                  results.push({ success: false, eventId: parsedEvent.id, error: result.error || 'Event processing failed' });
+                  anyInvalid = true;
+                }
               } catch (eventError) {
-                console.error('❌ Failed to process batched event:', (eventError as Error).message);
-                results.push({ success: false, eventId: rawEvent?.id, error: (eventError as Error).message });
+                results.push({ success: false, eventId: getEventId(rawEvent), error: (eventError as Error).message });
+                anyInvalid = true;
               }
             }
 
-            const allOk = results.every(r => r.success);
-            res.writeHead(allOk ? 200 : 207, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: allOk, results }));
-
-          } else {
-            // --- SINGLE EVENT PATH (regular flush) ---
-            const parsedEvent = AIREventSchema.parse(parsed);
-            const result = this.graphBuilder.processEvent(parsedEvent);
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: true, result }));
+            res.writeHead(anyInvalid ? 207 : 200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: !anyInvalid, results }));
+            return;
           }
 
+          const parsedEvent = AIREventSchema.parse(parsed);
+          const activeSessionId = this.activeSessionIdGetter();
+          if (!activeSessionId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'No active recording session' }));
+            return;
+          }
+
+          if (parsedEvent.sessionId !== activeSessionId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'Session mismatch' }));
+            return;
+          }
+
+          const result = this.graphBuilder.processEvent(parsedEvent);
+          if (result.success) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, result }));
+          } else {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: result.error }));
+          }
         } catch (error) {
-          console.error('❌ Failed to process event:', error);
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false, error: (error as Error).message }));
         }
       });
-      return;
     }
-
-    res.writeHead(404);
-    res.end();
   }
 }

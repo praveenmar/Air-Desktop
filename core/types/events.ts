@@ -40,7 +40,9 @@ const BaseEventSchema = z.object({
   id: z.string().uuid().optional().catch(() => crypto.randomUUID()), // Safe fallback if ID is stripped
   timestamp: z.number(),
   traceId: z.string().optional(),
-  sessionId: z.string().optional(),
+  sessionId: z.string()
+    .min(1, 'Session ID required')
+    .regex(/^session-[a-f0-9-]+$/, 'Invalid session ID format'),
   pageUrl: z.string().optional(), // Strictly optional to fix the Zod missing url error
   schemaVersion: z.string().optional(),
 });
