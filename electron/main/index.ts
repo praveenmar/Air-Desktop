@@ -77,7 +77,11 @@ async function bootstrap() {
     edgeRepo,
     sessionRepo,
     dbService,
-    serverPort
+    serverPort,
+    {
+    getSessionId: () => currentSessionId,
+    setSessionId: (id: string | null) => { currentSessionId = id; }
+    }
   );
 
   // 7. Load Renderer UI

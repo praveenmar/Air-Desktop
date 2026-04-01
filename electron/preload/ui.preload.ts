@@ -29,6 +29,10 @@ contextBridge.exposeInMainWorld('airAPI', {
   session: {
     list: (limit: number = 20): Promise<unknown[]> =>
       ipcRenderer.invoke('session:list', limit),
+    getNodes: (sessionId: string): Promise<unknown[]> =>
+      ipcRenderer.invoke('session:get-nodes', sessionId),
+    getEdges: (sessionId: string): Promise<unknown[]> =>
+      ipcRenderer.invoke('session:get-edges', sessionId),
     getGraph: (sessionId: string): Promise<{ nodes: unknown[]; edges: unknown[] }> =>
       ipcRenderer.invoke('session:get-graph', sessionId),
   },

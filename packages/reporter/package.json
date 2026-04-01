@@ -1,0 +1,11 @@
+{
+  "name": "@air/reporter",
+  "version": "1.0.0",
+  "description": "AIR Playwright Reporter and Runtime Base Classes",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "dependencies": {
+    "@playwright/test": "^1.42.0",
+    "@google/generative-ai":"^0.24.1"
+  }
+}

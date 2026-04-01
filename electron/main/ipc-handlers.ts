@@ -60,6 +60,68 @@ function mapEdgeRow(row: any) {
   };
 }
 
+function getSessionNodes(db: ReturnType<DatabaseService['getInstance']>, sessionId: string) {
+  return db.prepare(`
+      SELECT DISTINCT n.*
+      FROM nodes n
+      INNER JOIN events e ON e.node_id = n.id
+      WHERE e.session_id = ?
+    `).all(sessionId).map(mapNodeRow);
+}
+
+function getSessionEdges(db: ReturnType<DatabaseService['getInstance']>, sessionId: string) {
+  const rawEdges = db.prepare(`
+      SELECT
+        e.*,
+        ev.type    AS action_type,
+        ev.payload AS raw_payload,
+        ev.intent  AS semantic_intent
+      FROM edges e
+      LEFT JOIN events ev ON e.trigger_event_id = ev.id
+      WHERE e.from_node_id IN (
+              SELECT DISTINCT node_id FROM events
+              WHERE session_id = ? AND node_id IS NOT NULL
+            )
+        AND e.to_node_id IN (
+              SELECT DISTINCT node_id FROM events
+              WHERE session_id = ? AND node_id IS NOT NULL
+            )
+    `).all(sessionId, sessionId) as any[];
+
+  const edges = rawEdges.map((e: any) => {
+    const mappedEdge = mapEdgeRow(e);
+
+    let extractedFingerprint = null;
+    let selector   = e.fingerprint_hash;
+    let actionType = e.action_type || 'click';
+
+    if (e.raw_payload) {
+      try {
+        const parsedPayload = JSON.parse(e.raw_payload);
+        extractedFingerprint = parsedPayload.fingerprint || parsedPayload.meta?.fingerprint || {};
+        selector = extractedFingerprint.selector || selector;
+
+        if (parsedPayload.type === 'input' && parsedPayload.meta?.value) {
+          extractedFingerprint.textExcerpt = parsedPayload.meta.value;
+          actionType = 'input';
+        }
+      } catch (err) {
+        console.error('Failed to parse payload for edge:', e.id);
+      }
+    }
+
+    return {
+      ...mappedEdge,
+      action_type: actionType,
+      fingerprint: extractedFingerprint,
+      selector,
+      intent: e.semantic_intent || actionType,
+    };
+  });
+
+  return edges;
+}
+
 export function registerIpcHandlers(
   windowManager: WindowManager,
   cdpBridge: CDPBridge,
@@ -68,7 +130,8 @@ export function registerIpcHandlers(
   edgeRepo: EdgeRepository,
   sessionRepo: SessionRepository,
   dbService: DatabaseService,
-  serverPort: number             // the real OS-assigned ephemeral port
+  serverPort: number,             // the real OS-assigned ephemeral port
+  sessionState: { getSessionId: () => string | null; setSessionId: (id: string | null) => void }
 ): void {
   
   // Fix: hoist currentSessionId into the registerIpcHandlers closure (same pattern as
@@ -80,10 +143,11 @@ export function registerIpcHandlers(
   // --- SERVER ---
 
   ipcMain.handle('get-interceptor-config', async () => {
+    const currentSessionId = sessionState.getSessionId();
     if (!currentSessionId) {
       throw new Error('No active recording session');
     }
-  return { eventServerPort: serverPort, sessionId: currentSessionId };
+    return { eventServerPort: serverPort, sessionId: currentSessionId };
   });
 
   // FIX (Bug #7b): Async channel so the renderer can read the real live port if needed
@@ -94,16 +158,13 @@ export function registerIpcHandlers(
 
   ipcMain.handle('recording:start', async (_, url: string) => {
     try {
-      // Birth the session ID here — once per recording, before the browser opens.
-      // This ID is returned by every subsequent 'get-interceptor-config' call
-      // for the duration of this recording, keeping all interceptor events in one
-      // DB session regardless of how many times the preload script re-executes.
-      currentSessionId = `session-${crypto.randomUUID()}`;
-      await browserManager.startRecording(url, serverPort, currentSessionId);
-      return { success: true, sessionId: currentSessionId }; 
+      const newSessionId = `session-${crypto.randomUUID()}`;
+      sessionState.setSessionId(newSessionId);
+      await browserManager.startRecording(url, serverPort, newSessionId);
+      return { success: true, sessionId: newSessionId };
     } catch (error) {
       console.error('Failed to start Playwright recording:', error);
-      currentSessionId = null; // don't leave a stale ID if launch failed
+      sessionState.setSessionId(null);
       return { success: false, error: (error as Error).message };
     }
   });
@@ -111,8 +172,8 @@ export function registerIpcHandlers(
   ipcMain.handle('recording:stop', async () => {
     try {
       await browserManager.stopRecording();
-      const completedSessionId = currentSessionId;
-      currentSessionId = null; // clear so the next recording gets a fresh ID
+      const completedSessionId = sessionState.getSessionId();
+      sessionState.setSessionId(null);
       return { success: true, sessionId: completedSessionId };
     } catch (error) {
       return { success: false, error: (error as Error).message };
@@ -144,68 +205,27 @@ export function registerIpcHandlers(
     return sessionRepo.getAll(limit);
   });
 
+  // Temporary debug channels: fetch session-scoped graph slices independently.
+  ipcMain.handle('session:get-nodes', (_, sessionId: string) => {
+    const db = dbService.getInstance();
+    return getSessionNodes(db, sessionId);
+  });
+
+  ipcMain.handle('session:get-edges', (_, sessionId: string) => {
+    const db = dbService.getInstance();
+    return getSessionEdges(db, sessionId);
+  });
+
   ipcMain.handle('session:get-graph', (_, sessionId: string) => {
     const db = dbService.getInstance();
 
     // Nodes: JOIN to events to scope by session — no nodeId array needed.
-    const nodes = db.prepare(`
-      SELECT DISTINCT n.*
-      FROM nodes n
-      INNER JOIN events e ON e.node_id = n.id
-      WHERE e.session_id = ?
-    `).all(sessionId).map(mapNodeRow);
+    const nodes = getSessionNodes(db, sessionId);
 
     if (nodes.length === 0) return { nodes: [], edges: [] };
 
     // Edges: correlated subqueries — sessionId bound exactly twice, no variable limit.
-    const rawEdges = db.prepare(`
-      SELECT
-        e.*,
-        ev.type    AS action_type,
-        ev.payload AS raw_payload,
-        ev.intent  AS semantic_intent
-      FROM edges e
-      LEFT JOIN events ev ON e.trigger_event_id = ev.id
-      WHERE e.from_node_id IN (
-              SELECT DISTINCT node_id FROM events
-              WHERE session_id = ? AND node_id IS NOT NULL
-            )
-        AND e.to_node_id IN (
-              SELECT DISTINCT node_id FROM events
-              WHERE session_id = ? AND node_id IS NOT NULL
-            )
-    `).all(sessionId, sessionId) as any[];
-
-    const edges = rawEdges.map((e: any) => {
-      const mappedEdge = mapEdgeRow(e);
-
-      let extractedFingerprint = null;
-      let selector   = e.fingerprint_hash;
-      let actionType = e.action_type || 'click';
-
-      if (e.raw_payload) {
-        try {
-          const parsedPayload = JSON.parse(e.raw_payload);
-          extractedFingerprint = parsedPayload.fingerprint || parsedPayload.meta?.fingerprint || {};
-          selector = extractedFingerprint.selector || selector;
-
-          if (parsedPayload.type === 'input' && parsedPayload.meta?.value) {
-            extractedFingerprint.textExcerpt = parsedPayload.meta.value;
-            actionType = 'input';
-          }
-        } catch (err) {
-          console.error('Failed to parse payload for edge:', e.id);
-        }
-      }
-
-      return {
-        ...mappedEdge,
-        action_type: actionType,
-        fingerprint: extractedFingerprint,
-        selector,
-        intent: e.semantic_intent || actionType,
-      };
-    });
+    const edges = getSessionEdges(db, sessionId);
 
     return { nodes, edges };
   });

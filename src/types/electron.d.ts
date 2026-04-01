@@ -18,6 +18,8 @@ export interface AirAPI {
   };
   session: {
     list: (limit?: number) => Promise<Session[]>;
+    getNodes: (sessionId: string) => Promise<GraphNode[]>;
+    getEdges: (sessionId: string) => Promise<GraphEdge[]>;
     getGraph: (sessionId: string) => Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }>;
   };
   server: {
