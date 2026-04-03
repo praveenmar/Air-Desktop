@@ -28,6 +28,7 @@ export type Viewport = z.infer<typeof ViewportSchema>;
 export const PageSnapshotSchema = z.object({
   html: z.string(),
   anchors: z.array(z.string()).optional(),
+  controlSignature: z.string().nullable().optional(),
   viewport: ViewportSchema.optional(),
   url: z.string().optional(),
   timestamp: z.number().optional(),

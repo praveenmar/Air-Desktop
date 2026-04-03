@@ -72,6 +72,48 @@ export class BrowserManager {
       viewport: { width: 1280, height: 800 },
     });
 
+    // CSP-safe transport bridge:
+    // Some production sites block page-context fetch/XHR to localhost via CSP
+    // (`connect-src` / `default-src`). Expose a Playwright binding so interceptor
+    // can post events through Node (outside page CSP).
+    const eventEndpoint = `http://localhost:${serverPort}/api/events`;
+    await this.context.exposeBinding('__air_nodeSend', async (_source, targetUrl: unknown, payload: unknown) => {
+      if (targetUrl !== eventEndpoint) {
+        return { ok: false, status: 400, statusText: 'Blocked URL' };
+      }
+      if (typeof payload !== 'string') {
+        return { ok: false, status: 400, statusText: 'Invalid payload' };
+      }
+
+      try {
+        const response = await fetch(eventEndpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: payload,
+        });
+
+        let body: unknown = null;
+        try {
+          body = await response.json();
+        } catch {
+          // Non-JSON response is fine for the transport contract.
+        }
+
+        return {
+          ok: response.ok,
+          status: response.status,
+          statusText: response.statusText,
+          body,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          status: 0,
+          statusText: (error as Error).message || 'Network error',
+        };
+      }
+    });
+
     // 3. Load the Interceptor script from the correct path for this environment
     const interceptorPath = resolveInterceptorPath();
     let interceptorCode = fs.readFileSync(interceptorPath, 'utf-8');
@@ -83,6 +125,22 @@ export class BrowserManager {
       sessionId: "${sessionId}", 
       serverUrl: "http://localhost:${serverPort}",
       strictMode: true
+    };
+    // CSP-safe bridge adapters consumed by interceptor.js
+    window.__air_gmSend = (url, payload) => {
+      if (typeof window.__air_nodeSend !== 'function') {
+        return Promise.resolve({ ok: false, status: 0, statusText: 'Bridge unavailable' });
+      }
+      return window.__air_nodeSend(url, payload);
+    };
+    window.__air_gmBeacon = (url, payload) => {
+      try {
+        if (typeof window.__air_nodeSend === 'function') {
+          window.__air_nodeSend(url, payload).catch(() => {});
+          return true;
+        }
+      } catch (_) {}
+      return false;
     };
     `;
 

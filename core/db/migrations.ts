@@ -25,11 +25,13 @@ const TABLES: string[] = [
     project_id TEXT DEFAULT 'default',
     canonical_hash TEXT NOT NULL,
     page_url TEXT,
+    normalized_url TEXT,
     page_title TEXT,
     snapshot_html TEXT,
     context_tokens TEXT,
     anchors TEXT,
     state_source TEXT,
+    control_signature TEXT,
     viewport_width INTEGER,
     viewport_height INTEGER,
     created_at INTEGER NOT NULL,
@@ -133,6 +135,8 @@ const MIGRATIONS: Array<{ cmd: string; name: string }> = [
   { cmd: 'ALTER TABLE nodes ADD COLUMN page_title TEXT', name: 'nodes_page_title' },
   { cmd: 'ALTER TABLE nodes ADD COLUMN viewport_width INTEGER', name: 'nodes_viewport_w' },
   { cmd: 'ALTER TABLE nodes ADD COLUMN viewport_height INTEGER', name: 'nodes_viewport_h' },
+  { cmd: 'ALTER TABLE nodes ADD COLUMN control_signature TEXT', name: 'add_control_signature' },
+  { cmd: 'ALTER TABLE nodes ADD COLUMN normalized_url TEXT', name: 'add_normalized_url' },
   { cmd: 'ALTER TABLE events ADD COLUMN trace_id TEXT', name: 'events_trace_id' },
   { cmd: 'ALTER TABLE events ADD COLUMN node_id TEXT', name: 'events_node_id' },
   { cmd: 'ALTER TABLE edges ADD COLUMN fingerprint_hash TEXT', name: 'edges_fp_hash' },
@@ -210,17 +214,16 @@ export function runMigrations(db: Database): void {
 
   MIGRATIONS.forEach((migration) => {
     if (appliedMigrations.has(migration.name)) return;
-
-    const columns = db.prepare("PRAGMA table_info(events)").all() as Array<{
-      name: string;
-      notnull: number;
-    }>;
-
-    const sessionColumn = columns.find(col => col.name === 'session_id');
-
-    if (sessionColumn?.notnull === 1) {
-      markMigrationApplied(migration.name);
-      return;
+    if (migration.name === 'enforce_session_id_not_null') {
+      const columns = db.prepare("PRAGMA table_info(events)").all() as Array<{
+        name: string;
+        notnull: number;
+      }>;
+      const sessionColumn = columns.find(col => col.name === 'session_id');
+      if (sessionColumn?.notnull === 1) {
+        markMigrationApplied(migration.name);
+        return;
+      }
     }
 
     try {
@@ -228,7 +231,13 @@ export function runMigrations(db: Database): void {
       console.log(`Applied migration: ${migration.name}`);
       markMigrationApplied(migration.name);
     } catch (error) {
-      console.error(`Migration ${migration.name} failed:`, (error as Error).message);
+      const message = (error as Error).message || '';
+      const lowered = message.toLowerCase();
+      if (lowered.includes('duplicate column name') || lowered.includes('already exists')) {
+        markMigrationApplied(migration.name);
+        return;
+      }
+      console.error(`Migration ${migration.name} failed:`, message);
     }
   });
 }

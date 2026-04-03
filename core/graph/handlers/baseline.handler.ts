@@ -9,6 +9,16 @@ import { AIREvent, ElementFingerprint, PageSnapshot } from '../../types';
 import { IntentDetector } from '../intent-detector';
 import { NodeRepository, NodeUpdate } from '../../db/repositories/node.repository';
 
+function normalizeUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const path = (parsed.pathname.toLowerCase().replace(/\/$/, '') || '/');
+    return `${parsed.origin}${path}`;
+  } catch {
+    return url;
+  }
+}
+
 export class BaselineHandler {
   constructor(
     private nodeRepo: NodeRepository,
@@ -55,11 +65,28 @@ export class BaselineHandler {
       }
 
       const resolvedUrl = event.pageUrl || snapshot.url || 'unknown';
+      const normalizedUrl = normalizeUrl(resolvedUrl);
       
       const metadata = {
         stateSource: anchors ? 'anchor' : 'html',
         lastInteraction: fingerprint ? { selector: fingerprint.selector, intent: IntentDetector.detectIntent(event) } : null,
       };
+
+      // Phase 1 minimal identity pass: exact match on control signature + normalized URL.
+      if (snapshot.controlSignature && normalizedUrl) {
+        const matchedByControlSig = this.nodeRepo.findByControlSigAndUrl(snapshot.controlSignature, normalizedUrl);
+        if (matchedByControlSig) {
+          this.nodeRepo.updateObservation(matchedByControlSig.id, {
+            lastObservedAt: event.timestamp
+          });
+          this.logger.log('BaselineHandler', 'info', 'Reused node via controlSignature', {
+            nodeId: matchedByControlSig.id,
+            controlSignature: snapshot.controlSignature,
+            url: normalizedUrl
+          });
+          return matchedByControlSig.id;
+        }
+      }
 
       const existing = this.nodeRepo.findByHash('default', canonicalHash);
 
@@ -70,6 +97,8 @@ export class BaselineHandler {
           stateSource: anchors ? 'anchor' : 'html',
           anchors: anchors,
           pageUrl: resolvedUrl,
+          normalizedUrl,
+          controlSignature: snapshot.controlSignature || null,
         };
         if (viewportWidth !== null) updates.viewportWidth = viewportWidth;
         if (viewportHeight !== null) updates.viewportHeight = viewportHeight;
@@ -83,6 +112,7 @@ export class BaselineHandler {
         projectId: 'default',
         canonicalHash,
         pageUrl: resolvedUrl,
+        normalizedUrl,
         pageTitle: 'pageTitle' in event ? event.pageTitle : null,
         contextTokens: JSON.stringify(contextTokens),
         snapshotHtml: htmlContent.slice(0, 500000),
@@ -91,6 +121,7 @@ export class BaselineHandler {
         createdAt: event.timestamp,
         lastObservedAt: event.timestamp,
         stateSource: anchors ? 'anchor' : 'html',
+        controlSignature: snapshot.controlSignature || null,
         viewportWidth,
         viewportHeight
       });
@@ -117,6 +148,8 @@ export class BaselineHandler {
       
       const metadata = { stateSource: 'fingerprint' };
       const existing = this.nodeRepo.findByHash('default', canonicalHash);
+      const resolvedUrl = event.pageUrl || 'unknown';
+      const normalizedUrl = normalizeUrl(resolvedUrl);
 
       let viewportWidth: number | null = null;
       let viewportHeight: number | null = null;
@@ -132,6 +165,7 @@ export class BaselineHandler {
         metadata: JSON.stringify(metadata),
         stateSource: 'fingerprint',
         pageUrl: event.pageUrl || null,  // always update pageUrl (even if null)
+        normalizedUrl,
       };
         if (viewportWidth !== null) updates.viewportWidth = viewportWidth;
         if (viewportHeight !== null) updates.viewportHeight = viewportHeight;
@@ -145,6 +179,7 @@ export class BaselineHandler {
         projectId: 'default',
         canonicalHash,
         pageUrl: event.pageUrl || null,
+        normalizedUrl,
         contextTokens: JSON.stringify(contextTokens),
         snapshotHtml,
         anchors: null,

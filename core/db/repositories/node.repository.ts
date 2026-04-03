@@ -14,6 +14,8 @@ export interface NodeUpdate {
   stateSource?: string | null;
   anchors?: string | null;
   pageUrl?: string | null;
+  normalizedUrl?: string | null;
+  controlSignature?: string | null;
   viewportWidth?: number | null;
   viewportHeight?: number | null;
 }
@@ -27,11 +29,13 @@ function mapNodeRow(row: any): GraphNode | null {
     projectId:        row.project_id,
     canonicalHash:    row.canonical_hash,
     pageUrl:          row.page_url,
+    normalizedUrl:    row.normalized_url ?? null,
     pageTitle:        row.page_title,
     snapshotHtml:     row.snapshot_html,
     contextTokens:    row.context_tokens,
     anchors:          row.anchors,
     stateSource:      row.state_source,
+    controlSignature: row.control_signature ?? null,
     viewportWidth:    row.viewport_width,
     viewportHeight:   row.viewport_height,
     createdAt:        row.created_at,
@@ -54,6 +58,15 @@ export class NodeRepository {
     return mapNodeRow(stmt.get(projectId, canonicalHash));
   }
 
+  public findByControlSigAndUrl(controlSignature: string, normalizedUrl: string): GraphNode | null {
+    const stmt = this.db.prepare(`
+      SELECT * FROM nodes
+      WHERE control_signature = ? AND normalized_url = ?
+      LIMIT 1
+    `);
+    return mapNodeRow(stmt.get(controlSignature, normalizedUrl));
+  }
+
   public getAll(limit: number = 100): GraphNode[] {
     const stmt = this.db.prepare('SELECT * FROM nodes ORDER BY last_observed_at DESC LIMIT ?');
     return (stmt.all(limit) as any[]).map(mapNodeRow) as GraphNode[];
@@ -72,6 +85,8 @@ export class NodeRepository {
       if (node.stateSource !== undefined)   updates.stateSource   = node.stateSource;
       if (node.anchors !== undefined)       updates.anchors       = node.anchors;
       if (node.pageUrl !== undefined)       updates.pageUrl       = node.pageUrl;
+      if (node.normalizedUrl !== undefined) updates.normalizedUrl = node.normalizedUrl;
+      if (node.controlSignature !== undefined) updates.controlSignature = node.controlSignature;
       if (node.viewportWidth !== undefined) updates.viewportWidth = node.viewportWidth;
       if (node.viewportHeight !== undefined) updates.viewportHeight = node.viewportHeight;
 
@@ -81,10 +96,10 @@ export class NodeRepository {
 
     const stmt = this.db.prepare(`
       INSERT INTO nodes (
-        id, project_id, canonical_hash, page_url, page_title, context_tokens, 
+        id, project_id, canonical_hash, page_url, normalized_url, page_title, context_tokens, 
         snapshot_html, anchors, metadata, created_at, last_observed_at, 
-        state_source, viewport_width, viewport_height
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        state_source, control_signature, viewport_width, viewport_height
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -92,6 +107,7 @@ export class NodeRepository {
       node.projectId,
       node.canonicalHash,
       node.pageUrl        || null,
+      node.normalizedUrl  || null,
       node.pageTitle      || null,
       node.contextTokens  || null,
       node.snapshotHtml   || null,
@@ -100,6 +116,7 @@ export class NodeRepository {
       node.createdAt      || Date.now(),
       node.lastObservedAt || Date.now(),
       node.stateSource    || null,
+      node.controlSignature || null,
       node.viewportWidth  || null,
       node.viewportHeight || null
     );
@@ -133,6 +150,14 @@ export class NodeRepository {
     if (updates.pageUrl !== undefined) {
       setClauses.push('page_url = ?');
       params.push(updates.pageUrl);
+    }
+    if (updates.normalizedUrl !== undefined) {
+      setClauses.push('normalized_url = ?');
+      params.push(updates.normalizedUrl);
+    }
+    if (updates.controlSignature !== undefined) {
+      setClauses.push('control_signature = ?');
+      params.push(updates.controlSignature);
     }
     if (updates.viewportWidth !== undefined) {
       setClauses.push('viewport_width = ?');

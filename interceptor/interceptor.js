@@ -579,6 +579,62 @@ class AIRInterceptor {
     return { hasVue, hasReact, isEmptyRoot, app };
   }
 
+  normalizeAnchor(text) {
+    if (!text) return "";
+    return String(text)
+      .replace(/\(\s*\d+\s*\)/g, "") // "Inbox (5)" -> "Inbox"
+      .replace(/\b\d+\s*(new|items?|results?|unread)\b/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  getPrimaryHeading(root = document) {
+    const h1 = root.querySelector?.("h1");
+    if (!h1) return null;
+    const text = this.normalizeAnchor(h1.textContent || "").slice(0, 50);
+    return text || null;
+  }
+
+  computeControlSignature(root = document) {
+    const scope = root && root.querySelectorAll ? root : document;
+    const forms = scope.querySelectorAll("form").length;
+
+    const inputs = new Set();
+    scope.querySelectorAll("input, select, textarea").forEach((el) => {
+      const name =
+        el.getAttribute("name") ||
+        el.getAttribute("aria-label") ||
+        el.getAttribute("placeholder") ||
+        el.getAttribute("type") ||
+        "unnamed";
+      const normalized = this.normalizeAnchor(name).toLowerCase();
+      if (normalized) inputs.add(normalized);
+    });
+
+    const buttons = new Set();
+    scope
+      .querySelectorAll("button, [role='button'], input[type='submit'], input[type='button']")
+      .forEach((el) => {
+        const label =
+          (el.textContent || "").trim() ||
+          el.getAttribute("aria-label") ||
+          el.getAttribute("value") ||
+          "unlabeled";
+        const normalized = this.normalizeAnchor(label).toLowerCase().slice(0, 40);
+        if (normalized) buttons.add(normalized);
+      });
+
+    const links = new Set();
+    scope.querySelectorAll("a[href]").forEach((el) => {
+      const label = this.normalizeAnchor((el.textContent || "").trim()).toLowerCase().slice(0, 40);
+      if (label) links.add(label);
+    });
+    const topLinks = [...links].sort().slice(0, 10);
+
+    const raw = `forms:${forms}|inputs:${[...inputs].sort().join(",")}|buttons:${[...buttons].sort().join(",")}|links:${topLinks.join(",")}`;
+    return raw.length > 0 ? this.simpleHash(raw) : null;
+  }
+
   scanPageAnchors() {
     const anchors = [];
     // 1. URL Path (Strongest Anchor)
@@ -598,21 +654,26 @@ class AIRInterceptor {
       // Prioritize Stable Attributes
       // Logic: ID > Name > TestID > Role > Text (if short)
       if (el.getAttribute("data-testid")) {
-        anchors.push(`${tag}:testid=${el.getAttribute("data-testid")}`);
+        const normalizedTestId = this.normalizeAnchor(el.getAttribute("data-testid"));
+        if (normalizedTestId.length > 1) anchors.push(`${tag}:testid=${normalizedTestId}`);
       } else if (el.id && !/\d{5,}/.test(el.id)) {
         // Ignore IDs with long numbers
-        anchors.push(`${tag}:id=${el.id}`);
+        const normalizedId = this.normalizeAnchor(el.id);
+        if (normalizedId.length > 1) anchors.push(`${tag}:id=${normalizedId}`);
       } else if (el.name) {
-        anchors.push(`${tag}:name=${el.name}`);
+        const normalizedName = this.normalizeAnchor(el.name);
+        if (normalizedName.length > 1) anchors.push(`${tag}:name=${normalizedName}`);
       } else if (el.getAttribute("role")) {
-        anchors.push(`${tag}:role=${el.getAttribute("role")}`);
+        const normalizedRole = this.normalizeAnchor(el.getAttribute("role"));
+        if (normalizedRole.length > 1) anchors.push(`${tag}:role=${normalizedRole}`);
       } else if (tag === "BUTTON" || tag === "H1" || tag === "H2") {
-        const text = (el.innerText || "").trim();
+        const text = this.normalizeAnchor(el.innerText || "");
         if (text.length > 2 && text.length < 30) {
           anchors.push(`${tag}:text=${text}`);
         }
       } else if (tag === "INPUT") {
-        anchors.push(`${tag}:type=${el.type || "text"}`);
+        const inputType = this.normalizeAnchor(el.type || "text").toLowerCase();
+        if (inputType.length > 1) anchors.push(`${tag}:type=${inputType}`);
       }
     });
 
@@ -824,10 +885,12 @@ class AIRInterceptor {
 
               // 🌟 NEW: Calculate Anchors along with snapshot
               const anchors = this.scanPageAnchors();
+              const controlSignature = this.computeControlSignature(document);
 
               return {
                 html: result.html || "",
                 anchors: anchors, // <--- Added Anchors
+                controlSignature,
                 viewport: {
                   width: window.innerWidth,
                   height: window.innerHeight,
@@ -852,10 +915,12 @@ class AIRInterceptor {
         }
 
         const anchors = this.scanPageAnchors();
+        const controlSignature = this.computeControlSignature(document);
 
         return Promise.resolve({
           html: result?.html || "",
           anchors: anchors, // <--- Added Anchors
+          controlSignature,
           viewport: { width: window.innerWidth, height: window.innerHeight },
           url: window.location.href,
           timestamp: Date.now(),
@@ -2065,6 +2130,8 @@ class AIRInterceptor {
       }
 
     // 7. Build OUTCOME Event (The Result)
+    const controlSignature = this.computeControlSignature(document);
+    const primaryHeading   = this.getPrimaryHeading(document);
     const outcomeEvent = {
       id: this.generateUUID(),
       type: "outcome",
@@ -2076,6 +2143,8 @@ class AIRInterceptor {
         settleType: settleResult,
         urlAfter: window.location.href,
         titleAfter: document.title,
+        controlSignature,
+        primaryHeading,
       },
       pageSnapshot: finalSnapshot, // State B
       pageState: finalSnapshot,    // Used by DB to identify "To Node"
@@ -2200,6 +2269,8 @@ class AIRInterceptor {
       const addedAnchors   = newAnchors.filter(a => !lastAnchors.includes(a));
       const removedAnchors = lastAnchors.filter(a => !newAnchors.includes(a));
       const domChanged     = addedAnchors.length > 0 || removedAnchors.length > 0;
+      const controlSignature = self.computeControlSignature(document);
+      const primaryHeading   = self.getPrimaryHeading(document);
 
       self.log(`🗺️ SPA route change [${changeType}]`, { from: lastUrl, to: newUrl, domChanged });
 
@@ -2220,7 +2291,13 @@ class AIRInterceptor {
         navigation: {
           from:    lastUrl,
           to:      newUrl,
-          domDiff: { added: addedAnchors, removed: removedAnchors, changed: domChanged },
+          domDiff: {
+            added: addedAnchors,
+            removed: removedAnchors,
+            changed: domChanged,
+            controlSignature,
+            primaryHeading,
+          },
         },
         pageSnapshot: snapshot,
         pageState:    snapshot,
@@ -3081,6 +3158,8 @@ class AIRInterceptor {
       // Send the 'outcome' event immediately for the previous action.
       this.capturePageSnapshot(this.config.snapshotDepth, false).then(
         (snapshot) => {
+          const controlSignature = this.computeControlSignature(document);
+          const primaryHeading   = this.getPrimaryHeading(document);
           this.queueEvent({
             id: this.generateUUID(),
             type: "outcome",
@@ -3090,6 +3169,8 @@ class AIRInterceptor {
             meta: { 
               settleType: "navigation",
               urlAfter: window.location.href,
+              controlSignature,
+              primaryHeading,
               isRecovery: true // 🚀 NEW: Tells flushQueue NOT to strip this snapshot
             },
             pageSnapshot: snapshot,
@@ -3108,13 +3189,15 @@ class AIRInterceptor {
     // ✅ NEW: Fresh start? Capture the page so we have a node to anchor input events to.
     this.capturePageSnapshot(this.config.snapshotDepth, false).then(
       (snapshot) => {
+        const controlSignature = this.computeControlSignature(document);
+        const primaryHeading   = this.getPrimaryHeading(document);
         this.queueEvent({
           id: this.generateUUID(),
           type: "outcome",
           traceId: "baseline-" + this.generateUUID(),
           timestamp: Date.now(),
           sessionId: this.config.sessionId,
-          meta: { settleType: "baseline" },
+          meta: { settleType: "baseline", controlSignature, primaryHeading },
           pageSnapshot: snapshot,
           pageState: snapshot,
           pageUrl: window.location.href,
