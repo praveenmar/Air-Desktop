@@ -91,15 +91,21 @@ export class GraphBuilder {
     const sessionId  = event.sessionId;
 
     if (!sessionId) {
-    this.logger.log('GraphBuilder', 'error', 'Missing sessionId', { eventId: safeEventId });
-    return { success: false, error: 'Missing sessionId' };
-  }
+      this.logger.log('GraphBuilder', 'error', 'Event stage: missing session - rejected before persistence', {
+        eventId: safeEventId,
+        type: event.type,
+      });
+      return { success: false, error: 'Missing sessionId' };
+    }
 
     // --- DEDUPLICATION (pure read — intentionally outside the transaction) ---
     try {
       const existing = this.eventRepo.findById(safeEventId);
       if (existing) {
-        this.logger.log('GraphBuilder', 'warn', 'Duplicate event detected', { eventId: safeEventId });
+        this.logger.log('GraphBuilder', 'warn', 'Event stage: duplicate event ID detected - skipping graph work', {
+          eventId: safeEventId,
+          type: event.type,
+        });
         return { success: true, eventId: safeEventId, duplicate: true };
       }
     } catch (error) {
@@ -155,6 +161,12 @@ export class GraphBuilder {
           if (['click', 'input', 'submit', 'custom-select'].includes(ev.type) && !isHeartbeat) {
             this.actionHandler.handleAction(ev, traceId, currentNodeId, lastNodeId);
             this.sessionManager.updatePointer(ev.sessionId, currentNodeId);
+            this.logger.log('GraphBuilder', 'info', 'Event stage: action recorded, pending action registered', {
+              eventId: safeEventId,
+              type: ev.type,
+              nodeId: currentNodeId,
+              traceId,
+            });
             return { success: true, stage: 'action_recorded', nodeId: currentNodeId, traceId };
           }
 
@@ -163,6 +175,12 @@ export class GraphBuilder {
             const parsedOutcome = OutcomeEventSchema.parse(ev);
             this.outcomeHandler.handleOutcome(parsedOutcome, traceId, currentNodeId);
             this.sessionManager.updatePointer(ev.sessionId, currentNodeId);
+            this.logger.log('GraphBuilder', 'info', 'Event stage: outcome processed, edge created or updated', {
+              eventId: safeEventId,
+              type: ev.type,
+              nodeId: currentNodeId,
+              traceId,
+            });
             return { success: true, stage: 'edge_finalized', nodeId: currentNodeId, traceId };
           }
           if (ev.type === 'spa-route-change') {
@@ -182,12 +200,28 @@ export class GraphBuilder {
             }
             
             this.sessionManager.updatePointer(ev.sessionId!, currentNodeId);
+            this.logger.log('GraphBuilder', 'info', 'Event stage: SPA route transition processed as synthetic outcome', {
+              eventId: safeEventId,
+              type: ev.type,
+              nodeId: currentNodeId,
+              traceId,
+            });
             return { success: true, stage: 'spa_navigation_recorded', nodeId: currentNodeId, traceId };
           }
         }
 
-        this.logger.log('GraphBuilder', 'info', 'Event processed (No graph update)',
-          { eventId: safeEventId, nodeId: currentNodeId }
+        let stage = 'event processed but no graph change';
+        if (isHeartbeat) stage = 'ignored input heartbeat';
+        else if (!currentNodeId) stage = 'no node resolved - event not linked';
+        else if (!ev.sessionId) stage = 'missing session - rejected';
+
+        this.logger.log('GraphBuilder', 'info', `Event stage: ${stage}`,
+          {
+            eventId: safeEventId,
+            nodeId: currentNodeId,
+            type: ev.type,
+            traceId,
+          }
         );
         return { success: true, eventId: safeEventId, nodeId: currentNodeId, traceId };
 

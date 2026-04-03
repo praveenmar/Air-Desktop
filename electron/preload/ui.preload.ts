@@ -35,6 +35,8 @@ contextBridge.exposeInMainWorld('airAPI', {
       ipcRenderer.invoke('session:get-edges', sessionId),
     getGraph: (sessionId: string): Promise<{ nodes: unknown[]; edges: unknown[] }> =>
       ipcRenderer.invoke('session:get-graph', sessionId),
+    getDebugLogs: (sessionId: string, limit: number = 200): Promise<unknown[]> =>
+      ipcRenderer.invoke('session:get-debug-logs', sessionId, limit),
   },
 
   server: {

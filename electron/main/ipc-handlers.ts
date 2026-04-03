@@ -31,11 +31,13 @@ function mapNodeRow(row: any) {
     projectId:        row.project_id,
     canonicalHash:    row.canonical_hash,
     pageUrl:          row.page_url,
+    normalizedUrl:    row.normalized_url ?? null,
     pageTitle:        row.page_title,
     snapshotHtml:     row.snapshot_html,
     contextTokens:    row.context_tokens,
     anchors:          row.anchors,
     stateSource:      row.state_source,
+    controlSignature: row.control_signature ?? null,
     viewportWidth:    row.viewport_width,
     viewportHeight:   row.viewport_height,
     createdAt:        row.created_at,
@@ -120,6 +122,45 @@ function getSessionEdges(db: ReturnType<DatabaseService['getInstance']>, session
   });
 
   return edges;
+}
+
+function mapDebugLogRow(row: any) {
+  if (!row) return null;
+
+  let parsedData: Record<string, unknown> = {};
+  if (row.data) {
+    try {
+      parsedData = JSON.parse(row.data);
+    } catch {
+      parsedData = { raw: row.data };
+    }
+  }
+
+  return {
+    id: row.id,
+    timestamp: row.timestamp,
+    component: row.component,
+    level: row.level,
+    message: row.message,
+    data: parsedData,
+    sessionId: row.session_id ?? null,
+    traceId: row.trace_id ?? null,
+  };
+}
+
+function getSessionDebugLogs(
+  db: ReturnType<DatabaseService['getInstance']>,
+  sessionId: string,
+  limit: number = 200
+) {
+  const safeLimit = Math.max(1, Math.min(limit, 1000));
+  return db.prepare(`
+      SELECT *
+      FROM debug_logs
+      WHERE session_id = ?
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `).all(sessionId, safeLimit).map(mapDebugLogRow);
 }
 
 export function registerIpcHandlers(
@@ -228,6 +269,11 @@ export function registerIpcHandlers(
     const edges = getSessionEdges(db, sessionId);
 
     return { nodes, edges };
+  });
+
+  ipcMain.handle('session:get-debug-logs', (_, sessionId: string, limit: number = 200) => {
+    const db = dbService.getInstance();
+    return getSessionDebugLogs(db, sessionId, limit);
   });
 
   // --- RESET ---

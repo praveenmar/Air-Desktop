@@ -2903,9 +2903,8 @@ class AIRInterceptor {
 
   async flushQueue(options = {}) {
     if (this.disabled) return;
-    // ── Concurrency guard ─────────────────────────────────────────────────
-    // Prevents the batchInterval timer, the batchSize trigger, and the
-    // fast-forward setTimeout from all racing to send the same head event.
+    // Concurrency guard:
+    // Prevents timer, batch-size trigger, and fast-forward retries from racing the same head event.
     if (this._isFlushing) return;
     if (this.eventQueue.length === 0) return;
 
@@ -2913,128 +2912,138 @@ class AIRInterceptor {
 
     try {
       const currentEvent = this.eventQueue[0];
+      const traceLabel =
+        currentEvent.traceId && typeof currentEvent.traceId === "string"
+          ? `trace:${currentEvent.traceId.slice(0, 8)}`
+          : "trace:none";
 
-      // Navigation-resilience path (FIX: GM beacon instead of sendBeacon)
-      // Outcome events before a page load need fire-and-forget delivery.
-      // sendBeacon is intercepted by ad blockers; __air_gmBeacon is not.
+      // Navigation-resilience path: fire-and-forget for pre-navigation outcome events.
       const isNavigation =
         options.navigation === true ||
         (currentEvent.type === "outcome" &&
           currentEvent.meta?.settleType === "navigation" &&
-          !currentEvent.meta?.isRecovery); // 🚀 NEW: Skip beacon-stripping for recovery
+          !currentEvent.meta?.isRecovery);
 
       if (isNavigation) {
         const lightEvent = { ...currentEvent, pageSnapshot: null, pageState: null };
         const navPayload = JSON.stringify(lightEvent);
 
         // Priority 1: GM beacon (extension context, ad-blocker immune)
-        if (typeof window.__air_gmBeacon === 'function') {
+        if (typeof window.__air_gmBeacon === "function") {
           const accepted = window.__air_gmBeacon(this.apiEndpoint, navPayload);
           if (accepted) {
             this._retryState.delete(currentEvent.id);
             this.eventQueue.shift();
-            this.log("GM beacon: navigation event dispatched");
+            this.log(`[NAV] Dispatched via GM beacon (${traceLabel})`);
             if (this.eventQueue.length > 0) setTimeout(() => this.flushQueue(), 10);
             return;
           }
+          this.log(`[NAV] GM beacon rejected event; falling back to sendBeacon (${traceLabel})`);
+        } else {
+          this.log(`[NAV] GM beacon unavailable; trying native sendBeacon (${traceLabel})`);
         }
 
-        // Priority 2: native sendBeacon (non-TM fallback)
+        // Priority 2: native sendBeacon (fallback)
         const blob = new Blob([navPayload], { type: "application/json" });
         const sent = navigator.sendBeacon(this.apiEndpoint, blob);
         if (sent) {
           this._retryState.delete(currentEvent.id);
           this.eventQueue.shift();
-          this.log("sendBeacon: navigation event dispatched");
+          this.log(`[NAV] Dispatched via sendBeacon (${traceLabel})`);
           if (this.eventQueue.length > 0) setTimeout(() => this.flushQueue(), 10);
           return;
         }
-        this.log("sendBeacon declined (payload too large) - falling back to fetch");
+        this.log(`[NAV] sendBeacon rejected event (likely payload/capacity); falling back to fetch (${traceLabel})`);
       }
-      // ─────────────────────────────────────────────────────────────────
 
       let payload = JSON.stringify(currentEvent);
 
-      // Size guard — browser keepalive cap is ~64 KB
+      // Size guard: browser keepalive cap is ~64KB
       const payloadSize = new Blob([payload]).size;
-      // 🚀 NEW: Bypass size guard for recovery events (page is stable, no size limits)
+      // Recovery events run on stable page context; do not strip snapshots there.
       if (payloadSize > 60_000 && currentEvent.pageSnapshot && !currentEvent.meta?.isRecovery) {
-        this.log(
-          `⚠️ Payload too big (${payloadSize} bytes). Stripping snapshot to ensure delivery.`,
-        );
+        this.log(`[FLUSH] Payload too big (${payloadSize} bytes). Stripping snapshot to ensure delivery.`);
         currentEvent.pageSnapshot = null;
         currentEvent.pageState = null;
         payload = JSON.stringify(currentEvent);
       }
 
       this.log(
-        `📤 Sending event: ${currentEvent.type} (${new Blob([payload]).size} bytes)`,
+        `[FLUSH] Sending ${currentEvent.type} via ${this._gmSend ? "GM transport" : "fetch"} (${new Blob([payload]).size} bytes) - ${traceLabel}`,
       );
 
-        // ── Send via GM transport (no CORS) or _rawFetch ──────────────────────────
-      // Priority 1: _gmSend uses GM_xmlhttpRequest (extension context).
-      //   • Runs outside the page’s CORS policy entirely.
-      //   • No preflight, no Access-Control-Allow-Headers checks.
-      //   • Not intercepted by any page-level fetch wrapper.
-      //
-      // Priority 2: _rawFetch (pre-captured native fetch).
-      //   • Does NOT increment quiescence.networkCount (no waitForSettle race).
-      //   • Does NOT increment activeRequests (checkQuiescence stays accurate).
-      //   • Symbol sentinel [_AIR_INTERNAL] is non-enumerable + non-serializable.
+      // Send via GM transport (no CORS) or native raw fetch.
       let response;
       try {
         if (this._gmSend) {
-          // GM transport path — Tampermonkey extension context, zero CORS friction
           response = await this._gmSend(this.apiEndpoint, payload);
         } else {
-          // Raw fetch path — direct <script> injection without Tampermonkey
           response = await this._rawFetch(this.apiEndpoint, {
-            method:    "POST",
-            headers:   { "Content-Type": "application/json" },
-            body:      payload,
-            mode:      "cors",
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: payload,
+            mode: "cors",
             keepalive: !currentEvent.meta?.isRecovery,
-            [_AIR_INTERNAL]: true,   // Symbol — non-enumerable, stripped before native fetch
+            [_AIR_INTERNAL]: true,
           });
         }
       } catch (networkErr) {
-        // TypeError: Failed to fetch — network abort, navigation, or server unreachable.
+        this.log(`[FLUSH] Transport failure (${traceLabel}) - scheduling retry`, {
+          type: currentEvent.type,
+          id: currentEvent.id,
+          error: networkErr?.message || String(networkErr),
+        });
         this._scheduleRetry(currentEvent, networkErr, "network");
         return;
       }
 
-      // ── HTTP-level error handling ──────────────────────────────────────
+      // HTTP-level error handling.
       if (!response.ok) {
+        let rejectionReason = response.statusText || "";
+        if (!rejectionReason && typeof response.text === "function") {
+          try {
+            const responseText = await response.clone().text();
+            if (responseText) rejectionReason = responseText.slice(0, 240);
+          } catch (_) {}
+        } else if (!rejectionReason && response.body !== undefined) {
+          try {
+            const bodyText = typeof response.body === "string"
+              ? response.body
+              : JSON.stringify(response.body);
+            if (bodyText) rejectionReason = bodyText.slice(0, 240);
+          } catch (_) {}
+        }
+        if (!rejectionReason) rejectionReason = "No response body";
+
         if (response.status >= 500) {
-          // Server-side fault — transient, retry with backoff
+          this.log(
+            `[FLUSH] Server rejected ${currentEvent.type} (HTTP ${response.status}) - ${rejectionReason}. Retrying (${traceLabel})`,
+            { type: currentEvent.type, id: currentEvent.id, status: response.status },
+          );
           this._scheduleRetry(
             currentEvent,
-            new Error(`HTTP ${response.status}`),
+            new Error(`HTTP ${response.status}: ${rejectionReason}`),
             "server",
           );
         } else {
-          // 4xx — client/payload error, permanent. Drop the event so it
-          // doesn't block the queue forever, but log clearly.
           this.log(
-            `🚫 Event dropped (HTTP ${response.status} — permanent error)`,
-            { type: currentEvent.type, id: currentEvent.id },
+            `[FLUSH] Event dropped (HTTP ${response.status} - permanent rejection: ${rejectionReason}) (${traceLabel})`,
+            { type: currentEvent.type, id: currentEvent.id, status: response.status },
           );
           this._retryState.delete(currentEvent.id);
           this.eventQueue.shift();
-          if (this.eventQueue.length > 0)
-            setTimeout(() => this.flushQueue(), 10);
+          if (this.eventQueue.length > 0) setTimeout(() => this.flushQueue(), 10);
         }
         return;
       }
 
-      // ── Success ────────────────────────────────────────────────────────
       this._retryState.delete(currentEvent.id);
       this.eventQueue.shift();
-      this.log(`✅ Event sent successfully`);
+      this.log(`[FLUSH] Event sent successfully (${traceLabel})`);
 
       if (this.eventQueue.length > 0) setTimeout(() => this.flushQueue(), 10);
     } finally {
-      // Always release the lock, even if an unexpected exception escapes
+      // Always release the lock, even if an unexpected exception escapes.
       this._isFlushing = false;
     }
   }
@@ -3250,3 +3259,5 @@ if (typeof window !== "undefined" && !window._airInterceptor) {
   window.AIR_checkBackend = () => window._airInterceptor.checkBackendHealth();
   console.log("🎯 AIR Interceptor loaded and active");
 }
+
+

@@ -16,7 +16,7 @@ export interface DebugLog {
   id: string;
   timestamp: number;
   component: string;
-  level: 'info' | 'warn' | 'error' | 'decision';
+  level: 'debug' | 'info' | 'warn' | 'error' | 'decision';
   message: string;
   data: Record<string, unknown>;
   sessionId: string | null;   // nullable — not every log belongs to a session
@@ -31,7 +31,7 @@ export class DebugLogger {
    */
   public log(
     component: string,
-    level: 'info' | 'warn' | 'error' | 'decision',
+    level: 'debug' | 'info' | 'warn' | 'error' | 'decision',
     message: string,
     data: Record<string, unknown> = {},
     sessionId: string | null = null,
@@ -41,6 +41,7 @@ export class DebugLogger {
     const timestamp = Date.now();
 
     const colors: Record<string, string> = {
+      debug:    '[debug]',
       info:     '🔵',
       warn:     '🟡',
       error:    '🔴',
@@ -135,3 +136,4 @@ export class DebugLogger {
     }
   }
 }
+

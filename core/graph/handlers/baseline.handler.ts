@@ -79,7 +79,7 @@ export class BaselineHandler {
           this.nodeRepo.updateObservation(matchedByControlSig.id, {
             lastObservedAt: event.timestamp
           });
-          this.logger.log('BaselineHandler', 'info', 'Reused node via controlSignature', {
+          this.logger.log('BaselineHandler', 'info', 'Reused node via controlSignature (exact controls + normalized URL match)', {
             nodeId: matchedByControlSig.id,
             controlSignature: snapshot.controlSignature,
             url: normalizedUrl
@@ -90,7 +90,7 @@ export class BaselineHandler {
 
       const existing = this.nodeRepo.findByHash('default', canonicalHash);
 
-     if (existing) {
+      if (existing) {
         const updates: NodeUpdate = {
           lastObservedAt: event.timestamp,
           metadata: JSON.stringify(metadata),
@@ -103,8 +103,19 @@ export class BaselineHandler {
         if (viewportWidth !== null) updates.viewportWidth = viewportWidth;
         if (viewportHeight !== null) updates.viewportHeight = viewportHeight;
         this.nodeRepo.updateObservation(existing.id, updates);
+        this.logger.log('BaselineHandler', 'info', 'Reused node via canonical hash (anchor/html fingerprint fallback)', {
+          nodeId: existing.id,
+          hash: canonicalHash.substring(0, 8),
+          url: normalizedUrl,
+        });
         return existing.id;
       }
+
+      this.logger.log('BaselineHandler', 'info', 'New node - no control-signature or canonical-hash match found', {
+        controlSignature: snapshot.controlSignature || null,
+        hash: canonicalHash.substring(0, 8),
+        url: normalizedUrl,
+      });
 
       const nodeId = crypto.randomUUID();
       this.nodeRepo.upsert({

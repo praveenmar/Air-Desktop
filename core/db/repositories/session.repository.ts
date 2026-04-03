@@ -26,6 +26,12 @@ function mapSessionRow(row: any): Session | null {
 export class SessionRepository {
   constructor(private db: Database) {}
 
+  public findById(sessionId: string): Session | null {
+    if (!sessionId) return null;
+    const stmt = this.db.prepare('SELECT * FROM sessions WHERE id = ?');
+    return mapSessionRow(stmt.get(sessionId));
+  }
+
   public getOrCreate(sessionId: string): Session | null {
     if (!sessionId) return null;
 

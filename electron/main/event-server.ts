@@ -80,6 +80,8 @@ export class EventServer {
           if (isBatch) {
             const activeSessionId = this.activeSessionIdGetter();
             if (!activeSessionId) {
+              const batchSize = (parsed as { events: unknown[] }).events.length;
+              console.warn(`[EventServer] Rejected batch - no active recording session (events: ${batchSize})`);
               res.writeHead(400, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ success: false, error: 'No active recording session' }));
               return;
@@ -100,6 +102,9 @@ export class EventServer {
                 const parsedEvent = AIREventSchema.parse(rawEvent);
 
                 if (parsedEvent.sessionId !== activeSessionId) {
+                  console.warn(
+                    `[EventServer] Session mismatch in batch - incoming: ${parsedEvent.sessionId}, active: ${activeSessionId}, eventId: ${parsedEvent.id}`
+                  );
                   results.push({ success: false, eventId: parsedEvent.id, error: 'Session mismatch' });
                   anyInvalid = true;
                   continue;
@@ -109,10 +114,17 @@ export class EventServer {
                 if (result.success) {
                   results.push({ success: true, eventId: parsedEvent.id });
                 } else {
+                  console.warn(
+                    `[EventServer] Event rejected during graph processing - eventId: ${parsedEvent.id}, error: ${result.error || 'Event processing failed'}`
+                  );
                   results.push({ success: false, eventId: parsedEvent.id, error: result.error || 'Event processing failed' });
                   anyInvalid = true;
                 }
               } catch (eventError) {
+                const eventId = getEventId(rawEvent);
+                console.warn(
+                  `[EventServer] Invalid batch event payload - eventId: ${eventId || 'unknown'}, error: ${(eventError as Error).message}`
+                );
                 results.push({ success: false, eventId: getEventId(rawEvent), error: (eventError as Error).message });
                 anyInvalid = true;
               }
@@ -126,12 +138,14 @@ export class EventServer {
           const parsedEvent = AIREventSchema.parse(parsed);
           const activeSessionId = this.activeSessionIdGetter();
           if (!activeSessionId) {
+            console.warn(`[EventServer] Rejected event - no active recording session (incoming session: ${parsedEvent.sessionId})`);
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: false, error: 'No active recording session' }));
             return;
           }
 
           if (parsedEvent.sessionId !== activeSessionId) {
+            console.warn(`[EventServer] Session mismatch - incoming: ${parsedEvent.sessionId}, active: ${activeSessionId}, eventId: ${parsedEvent.id}`);
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: false, error: 'Session mismatch' }));
             return;
@@ -142,10 +156,14 @@ export class EventServer {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, result }));
           } else {
+            console.warn(
+              `[EventServer] Event rejected during graph processing - eventId: ${parsedEvent.id}, error: ${result.error || 'Event processing failed'}`
+            );
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: false, error: result.error }));
           }
         } catch (error) {
+          console.warn(`[EventServer] Invalid request payload - ${(error as Error).message}`);
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false, error: (error as Error).message }));
         }

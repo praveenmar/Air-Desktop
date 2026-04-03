@@ -89,26 +89,30 @@ export class OutcomeHandler {
     //   would cause the Playwright code generator to emit waitForURL() that never fires.
     //
     let outcomeType: OutcomeType = 'state_refresh';
+    let outcomeReason = 'state refresh (URL unchanged while node changed)';
 
     // Fetch the original trigger event for URL comparison (Tier 2)
     const triggerEventRow = this.eventRepo.findById(pendingAction.triggerEventId);
+    const normalizedTriggerUrl = triggerEventRow ? normalizeUrl(triggerEventRow.page_url) : null;
+    const normalizedOutcomeUrl = normalizeUrl(outcomeEvent.meta?.urlAfter);
 
     if (outcomeEvent.meta?.settleType === 'navigation') {
       // Tier 1: Explicit navigation signal from interceptor — trust it unconditionally
       outcomeType = 'navigation';
+      outcomeReason = 'explicit navigation settleType from interceptor';
     } else if (triggerEventRow) {
       // Tier 2: Calculate from normalised URL comparison
-      const normalizedTriggerUrl = normalizeUrl(triggerEventRow.page_url);
-      const normalizedOutcomeUrl = normalizeUrl(outcomeEvent.meta?.urlAfter);
-
       if (normalizedOutcomeUrl && normalizedTriggerUrl !== normalizedOutcomeUrl) {
         outcomeType = 'navigation';
+        outcomeReason = 'normalized URL changed between trigger and outcome';
       } else if (fromNodeId === toNodeId) {
         outcomeType = 'no_change';
+        outcomeReason = 'resolved to same node and same URL';
       }
       // else: URLs match, nodes differ (modal/drawer/SPA state change) → state_refresh
     } else {
       // Tier 3: No trigger event AND no explicit signal — safe default
+      outcomeReason = 'trigger event missing; defaulting to state_refresh';
       this.logger.log('OutcomeHandler', 'warn',
         'Trigger event missing and no explicit settleType — defaulting to state_refresh to prevent false Playwright navigation waits',
         { traceId: pendingAction.traceId }
@@ -124,7 +128,14 @@ export class OutcomeHandler {
     if (existingEdge) {
       // Stamp the resolved outcomeType — does NOT touch sample_size or decayed_count
       this.edgeRepo.resolveOutcome(existingEdge.id, outcomeType);
-      this.logger.log('OutcomeHandler', 'decision', 'Resolved existing edge outcome', { edgeId: existingEdge.id, fpHash });
+      this.logger.log('OutcomeHandler', 'decision', `Resolved existing edge outcome: ${outcomeType} - ${outcomeReason}`, {
+        edgeId: existingEdge.id,
+        fpHash,
+        from: fromNodeId,
+        to: toNodeId,
+        normalizedTriggerUrl,
+        normalizedOutcomeUrl,
+      });
       return;
     }
 
@@ -153,7 +164,14 @@ export class OutcomeHandler {
       //     probabilities upward — the AI sees falsely high confidence on navigation steps.
       // updateProbability() is reserved for genuine re-observations on the existing-edge
       // path in ActionHandler.createEdge(), which is the only correct call site.
-      this.logger.log('OutcomeHandler', 'decision', 'Created new EXPLICIT edge', { edgeId, outcomeType, fpHash, from: fromNodeId, to: toNodeId });
+      this.logger.log('OutcomeHandler', 'decision', `Edge created: ${outcomeType} - ${outcomeReason}`, {
+        edgeId,
+        fpHash,
+        from: fromNodeId,
+        to: toNodeId,
+        normalizedTriggerUrl,
+        normalizedOutcomeUrl,
+      });
     } catch (e) {
       this.logger.log('OutcomeHandler', 'error', 'Failed to create explicit edge', { error: (e as Error).message });
     }

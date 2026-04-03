@@ -5,6 +5,17 @@
 
 import { GraphNode, GraphEdge, GraphStats, Session } from '../../core/types';
 
+export interface SessionDebugLog {
+  id: string;
+  timestamp: number;
+  component: string;
+  level: 'debug' | 'info' | 'warn' | 'error' | 'decision';
+  message: string;
+  data: Record<string, unknown>;
+  sessionId: string | null;
+  traceId: string | null;
+}
+
 export interface AirAPI {
   recording: {
     start: (url: string) => Promise<{ success: boolean; error?: string }>;
@@ -21,6 +32,7 @@ export interface AirAPI {
     getNodes: (sessionId: string) => Promise<GraphNode[]>;
     getEdges: (sessionId: string) => Promise<GraphEdge[]>;
     getGraph: (sessionId: string) => Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }>;
+    getDebugLogs: (sessionId: string, limit?: number) => Promise<SessionDebugLog[]>;
   };
   server: {
     // Returns the real OS-assigned ephemeral port the EventServer is listening on.

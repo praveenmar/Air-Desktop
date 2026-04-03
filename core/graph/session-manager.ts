@@ -15,14 +15,18 @@ export class SessionManager {
   public getOrCreateSession(sessionId: string | null | undefined): Session | null {
     if (!sessionId) return null;
 
-    const session = this.sessionRepo.getOrCreate(sessionId);
-    
-    // If it was just created (event_count === 0), log it.
-    if (session && session.eventCount === 0) {
-      this.logger.log('SessionManager', 'info', 'Created new session', { sessionId });
+    const existing = this.sessionRepo.findById(sessionId);
+    if (existing) {
+      this.logger.log('SessionManager', 'debug', 'Session already active - reusing existing session pointer', { sessionId });
+      return existing;
     }
-    
-    return session;
+
+    const created = this.sessionRepo.getOrCreate(sessionId);
+    if (created) {
+      this.logger.log('SessionManager', 'info', 'Session created (first event observed for this recording flow)', { sessionId });
+    }
+
+    return created;
   }
 
   public updatePointer(sessionId: string | null | undefined, nodeId: string): void {
