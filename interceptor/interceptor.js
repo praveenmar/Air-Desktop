@@ -293,6 +293,8 @@ class AIRInterceptor {
     // 1. SESSION PERSISTENCE (Hardened strict-mode flow)
     // ------------------------------------------------------------
     this.disabled = false;
+    this._storageAvailable = true;
+    this._storageFailureLogged = false;
     let currentSessionId = config.sessionId;
     let strictMode = false;
     let configServerUrl = null;
@@ -306,10 +308,9 @@ class AIRInterceptor {
     }
 
     // Non-strict only: allow sessionStorage fallback.
-    if (!currentSessionId && !strictMode && typeof sessionStorage !== "undefined") {
-      try {
-        currentSessionId = sessionStorage.getItem("AIR_SESSION_ID");
-      } catch (e) {}
+    if (!currentSessionId && !strictMode) {
+      const storedSessionId = this._safeGetStorage("session", "AIR_SESSION_ID");
+      if (storedSessionId) currentSessionId = storedSessionId;
     }
 
     if (strictMode && !currentSessionId) {
@@ -328,15 +329,11 @@ class AIRInterceptor {
         },
       );
 
-      if (!strictMode && typeof sessionStorage !== "undefined") {
-        try {
-          sessionStorage.setItem("AIR_SESSION_ID", currentSessionId);
-        } catch (e) {}
+      if (!strictMode) {
+        this._safeSetStorage("session", "AIR_SESSION_ID", currentSessionId);
       }
-    } else if (!strictMode && typeof sessionStorage !== "undefined") {
-      try {
-        sessionStorage.setItem("AIR_SESSION_ID", currentSessionId);
-      } catch (e) {}
+    } else if (!strictMode) {
+      this._safeSetStorage("session", "AIR_SESSION_ID", currentSessionId);
     }
 
     // ------------------------------------------------------------
@@ -498,6 +495,52 @@ class AIRInterceptor {
     this.init();
   }
 
+  _markStorageUnavailable(error) {
+    if (this._storageAvailable === false) return;
+    this._storageAvailable = false;
+
+    if (!this._storageFailureLogged) {
+      this._storageFailureLogged = true;
+      const reason = error && error.message ? error.message : String(error);
+      console.debug("[AIR] Storage unavailable; disabling persistence for this page.", reason);
+    }
+  }
+
+  _safeGetStorage(type, key) {
+    if (this._storageAvailable === false) return null;
+    try {
+      const storage = type === "local" ? window.localStorage : window.sessionStorage;
+      return storage.getItem(key);
+    } catch (error) {
+      this._markStorageUnavailable(error);
+      return null;
+    }
+  }
+
+  _safeSetStorage(type, key, value) {
+    if (this._storageAvailable === false) return false;
+    try {
+      const storage = type === "local" ? window.localStorage : window.sessionStorage;
+      storage.setItem(key, value);
+      return true;
+    } catch (error) {
+      this._markStorageUnavailable(error);
+      return false;
+    }
+  }
+
+  _safeRemoveStorage(type, key) {
+    if (this._storageAvailable === false) return false;
+    try {
+      const storage = type === "local" ? window.localStorage : window.sessionStorage;
+      storage.removeItem(key);
+      return true;
+    } catch (error) {
+      this._markStorageUnavailable(error);
+      return false;
+    }
+  }
+
   init() {
     if (this.disabled) return;
     this.log("🚀 AIR Interceptor initializing...", {
@@ -536,17 +579,14 @@ class AIRInterceptor {
         this.log("💾 Saving pending action to storage before unload", {
           traceId: this.pendingTraceId,
         });
-        try {
-          sessionStorage.setItem(
-            "air_pending_trace",
-            JSON.stringify({
-              traceId: this.pendingTraceId,
-              timestamp: Date.now(),
-            }),
-          );
-        } catch (e) {
-          // Storage quota full or disabled
-        }
+        this._safeSetStorage(
+          "session",
+          "air_pending_trace",
+          JSON.stringify({
+            traceId: this.pendingTraceId,
+            timestamp: Date.now(),
+          }),
+        );
       }
     });
 
@@ -1270,11 +1310,11 @@ class AIRInterceptor {
     // navigations). Filters expired events individually using each event's own
     // timestamp — prevents stale snapshots from being sent after TTL.
     let stashSuccess = false;
-    try {
-      // Read existing stash for this session (may have events from prior navigation)
-      let existingEvents = [];
-      const raw = localStorage.getItem(stashKey);
-      if (raw) {
+    // Read existing stash for this session (may have events from prior navigation)
+    let existingEvents = [];
+    const raw = this._safeGetStorage("local", stashKey);
+    if (raw) {
+      try {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed.events)) {
           // Filter out individually expired events — per-event TTL check
@@ -1282,23 +1322,23 @@ class AIRInterceptor {
             ev => ev.timestamp && (now - ev.timestamp) < STASH_TTL_MS
           );
         }
+      } catch (e) {
+        this.log("⚠️ localStorage stash parse failed — ignoring previous stash", e.message);
       }
+    }
 
-      // Merge: existing non-expired events + current queue events
-      const mergedEvents = [...existingEvents, ...this.eventQueue];
+    // Merge: existing non-expired events + current queue events
+    const mergedEvents = [...existingEvents, ...this.eventQueue];
 
-      localStorage.setItem(stashKey, JSON.stringify({
+    const stored = this._safeSetStorage("local", stashKey, JSON.stringify({
         events:    mergedEvents,
         sessionId: this.config.sessionId,
         // No stash-level timestamp — per-event timestamps used for TTL
       }));
 
+    if (stored) {
       stashSuccess = true;
       this.log(`📦 Stashed ${this.eventQueue.length} events to localStorage (total in stash: ${mergedEvents.length})`);
-    } catch (e) {
-      // localStorage unavailable (Private Browsing, quota exceeded, security policy)
-      // Beacon fallback below is the only delivery path in this case.
-      this.log("⚠️ localStorage stash failed — beacon is sole delivery path", e.message);
     }
 
     // ── STEP 3: Always fire stripped beacon (Belt and Suspenders) ─────────────
@@ -1359,12 +1399,12 @@ class AIRInterceptor {
 
     let recovered = 0;
     try {
-      const raw = localStorage.getItem(stashKey);
+      const raw = this._safeGetStorage("local", stashKey);
       if (!raw) return 0; // Nothing stashed for this session
 
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed.events) || parsed.events.length === 0) {
-        localStorage.removeItem(stashKey);
+        this._safeRemoveStorage("local", stashKey);
         return 0;
       }
 
@@ -1379,7 +1419,7 @@ class AIRInterceptor {
       }
 
       if (validEvents.length === 0) {
-        localStorage.removeItem(stashKey);
+        this._safeRemoveStorage("local", stashKey);
         this.log('🧹 Stash cleared — all events expired');
         return 0;
       }
@@ -1393,7 +1433,7 @@ class AIRInterceptor {
       // Clear stash immediately — events are now in queue and will be sent
       // via normal flushQueue on stable network. If page unloads again before
       // they flush, _beaconFlushAll will re-stash them.
-      localStorage.removeItem(stashKey);
+      this._safeRemoveStorage("local", stashKey);
 
       this.log(`📬 Recovered ${recovered} stashed event(s) — prepended to queue`, {
         sessionId: this.config.sessionId,
@@ -3155,10 +3195,10 @@ class AIRInterceptor {
 
   checkPendingOutcome() {
     if (this.disabled) return false;
-    const pending = sessionStorage.getItem("air_pending_trace");
+    const pending = this._safeGetStorage("session", "air_pending_trace");
     if (pending) {
       const data = JSON.parse(pending);
-      sessionStorage.removeItem("air_pending_trace");
+      this._safeRemoveStorage("session", "air_pending_trace");
       this.log("🔄 Recovering pending outcome from navigation", {
         traceId: data.traceId,
       });
