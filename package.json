@@ -15,6 +15,8 @@
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
     "test": "vitest",
+    "test:anchor": "playwright test packages/shared/__tests__/anchor-consistency.spec.ts --reporter=line",
+    "test:anchors": "npm run test:anchor",
     "lint": "eslint . --ext js,ts,tsx",
     "format": "prettier --write \"**/*.{js,ts,tsx,json}\""
   },

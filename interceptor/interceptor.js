@@ -667,7 +667,7 @@ class AIRInterceptor {
         const normalizedRole = this.normalizeAnchor(el.getAttribute("role"));
         if (normalizedRole.length > 1) anchors.push(`${tag}:role=${normalizedRole}`);
       } else if (tag === "BUTTON" || tag === "H1" || tag === "H2") {
-        const text = this.normalizeAnchor(el.innerText || "");
+        const text = this.normalizeAnchor(el.textContent || "");
         if (text.length > 2 && text.length < 30) {
           anchors.push(`${tag}:text=${text}`);
         }
