@@ -10,30 +10,9 @@ import { PendingActionRepository } from '../../db/repositories/pending-action.re
 import { DebugLogger } from '../../logger/debug-logger';
 import { OutcomeEventSchema, PendingAction, OutcomeType } from '../../types';
 import { z } from 'zod';
+import { normalizeUrl } from '@air/shared';
 
 type OutcomeEvent = z.infer<typeof OutcomeEventSchema>;
-
-/**
- * Normalises a URL for comparison by stripping hash fragments, query strings,
- * and trailing slashes. Prevents false navigation detections caused by:
- *   - Analytics params:  /page?utm_source=email  → /page
- *   - Hash anchors:      /page#section           → /page
- *   - Trailing slashes:  /dashboard/             → /dashboard
- *
- * Returns null for null/undefined input so callers can guard against missing URLs.
- */
-function normalizeUrl(url: string | undefined | null): string | null {
-  if (!url) return null;
-  try {
-    const parsed = new URL(url);
-    // Keep only origin + pathname, strip trailing slash (except root /)
-    const pathname = parsed.pathname.replace(/\/$/, '') || '/';
-    return parsed.origin + pathname;
-  } catch {
-    // Unparseable URL — compare as-is to avoid silently swallowing errors
-    return url;
-  }
-}
 
 export class OutcomeHandler {
   constructor(
@@ -93,10 +72,10 @@ export class OutcomeHandler {
 
     // Fetch the original trigger event for URL comparison (Tier 2)
     const triggerEventRow = this.eventRepo.findById(pendingAction.triggerEventId);
-    const normalizedTriggerUrl = triggerEventRow ? normalizeUrl(triggerEventRow.page_url) : null;
-    const normalizedOutcomeUrl = normalizeUrl(
-      outcomeEvent.normalizedUrl || outcomeEvent.meta?.urlAfter || outcomeEvent.pageUrl
-    );
+    const triggerUrl = triggerEventRow?.page_url || null;
+    const outcomeUrl = outcomeEvent.normalizedUrl || outcomeEvent.meta?.urlAfter || outcomeEvent.pageUrl || null;
+    const normalizedTriggerUrl = triggerUrl ? normalizeUrl(triggerUrl) : null;
+    const normalizedOutcomeUrl = outcomeUrl ? normalizeUrl(outcomeUrl) : null;
 
     if (outcomeEvent.meta?.settleType === 'navigation') {
       // Tier 1: Explicit navigation signal from interceptor — trust it unconditionally

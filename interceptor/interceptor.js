@@ -76,57 +76,6 @@ class QuiescenceEngine {
     this.log('Monitoring started (DOM observer + network callbacks from AIRInterceptor)');
   }
 
-  startNetworkObserver() {
-    const self = this;
-
-    // 1. Hook Fetch
-    const originalFetch = window.fetch;
-    window.fetch = async (...args) => {
-      const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
-      if (self.shouldIgnoreUrl(url)) {
-        self.log('Ignoring background fetch:', url);
-        return originalFetch(...args);
-      }
-
-      const requestId = Math.random().toString(36).substring(7);
-      self.pendingRequests.add(requestId);
-      self.log(`Fetch started. Active requests: ${self.pendingRequests.size}`);
-      try {
-        return await originalFetch(...args);
-      } finally {
-        self.pendingRequests.delete(requestId);
-        self.log(`Fetch finished. Active requests: ${self.pendingRequests.size}`);
-      }
-    };
-
-    // 2. Hook XHR
-    const originalOpen = XMLHttpRequest.prototype.open;
-    const originalSend = XMLHttpRequest.prototype.send;
-
-    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-      this.__airUrl = url;
-      return originalOpen.apply(this, [method, url, ...rest]);
-    };
-
-    XMLHttpRequest.prototype.send = function(...args) {
-      const url = this.__airUrl || '';
-      if (self.shouldIgnoreUrl(url)) {
-        self.log('Ignoring background XHR:', url);
-        return originalSend.apply(this, args);
-      }
-
-      const requestId = Math.random().toString(36).substring(7);
-      self.pendingRequests.add(requestId);
-      self.log(`XHR started. Active requests: ${self.pendingRequests.size}`);
-      
-      this.addEventListener('loadend', () => {
-        self.pendingRequests.delete(requestId);
-        self.log(`XHR finished. Active requests: ${self.pendingRequests.size}`);
-      });
-      return originalSend.apply(this, args);
-    };
-  }
-
   shouldIgnoreUrl(url) {
     return this.config.ignoredUrlPatterns.some(pattern => pattern.test(url));
   }
@@ -635,10 +584,12 @@ class AIRInterceptor {
       .trim();
   }
 
+  // MUST stay in sync with packages/shared/src/url-utils.ts::normalizeUrl
   normalizeUrl(url) {
     try {
       const u = new URL(url, window.location.href);
-      return `${u.origin}${u.pathname}`;
+      const path = u.pathname.replace(/\/$/, "") || "/";
+      return `${u.origin}${path}`;
     } catch {
       return url;
     }

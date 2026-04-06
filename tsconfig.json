@@ -24,6 +24,8 @@
       "@core/*": ["core/*"],
       "@src/*": ["src/*"],
       "@electron/*": ["electron/*"],
+      "@air/shared": ["packages/shared/index.ts"],
+      "@air/shared/*": ["packages/shared/src/*"],
       "@air/codegen/*": ["./packages/codegen/src/index.ts"]
     }
   }

@@ -17,6 +17,14 @@ type SelectorResult = {
   rank: number;
 };
 
+// const events = window._airInterceptor.eventQueue;
+// events.forEach(e => {
+//   if (e.pageUrl && e.normalizedUrl) {
+//     const expected = new URL(e.pageUrl).origin + new URL(e.pageUrl).pathname;
+//     console.assert(e.normalizedUrl === expected, `Mismatch: ${e.pageUrl} → ${e.normalizedUrl} vs ${expected}`);
+//   }
+// });
+
 type InterceptorEvalAPI = {
   generateOptimalSelector?: (element: Element) => SelectorResult;
   config?: { maxTextLength?: number };
