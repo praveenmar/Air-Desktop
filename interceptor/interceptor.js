@@ -70,7 +70,10 @@ class QuiescenceEngine {
   monitor() {
     if (this.isMonitoring) return;
     this.isMonitoring = true;
-    this.log('Monitoring started (Network hooked)');
+    if (!this.onNetworkStart || !this.onNetworkEnd) {
+      this.log('⚠️ Network callbacks not wired – quiescence may stall');
+    }
+    this.log('Monitoring started (DOM observer + network callbacks from AIRInterceptor)');
   }
 
   startNetworkObserver() {
@@ -138,6 +141,10 @@ class QuiescenceEngine {
       // Hard Ceiling Timeout
       const hardTimeout = setTimeout(() => {
         this.stopDomObserver();
+        if (this.activeNetworkCount > 0) {
+          this.log(`⚠️ Network counter stuck at ${this.activeNetworkCount}; forcing reset after timeout`);
+          this.activeNetworkCount = 0;
+        }
         this.log('TIMEOUT REACHED (Forced Settle)');
         resolve({ stable: false, reason: 'timeout', waitedMs: Date.now() - startTime });
       }, maxWait);
@@ -588,6 +595,15 @@ class AIRInterceptor {
       .trim();
   }
 
+  normalizeUrl(url) {
+    try {
+      const u = new URL(url, window.location.href);
+      return `${u.origin}${u.pathname}`;
+    } catch {
+      return url;
+    }
+  }
+
   getPrimaryHeading(root = document) {
     const h1 = root.querySelector?.("h1");
     if (!h1) return null;
@@ -886,16 +902,19 @@ class AIRInterceptor {
               // 🌟 NEW: Calculate Anchors along with snapshot
               const anchors = this.scanPageAnchors();
               const controlSignature = this.computeControlSignature(document);
+              const pageUrl = window.location.href;
+              const normalizedUrl = this.normalizeUrl(pageUrl);
 
               return {
                 html: result.html || "",
                 anchors: anchors, // <--- Added Anchors
                 controlSignature,
+                normalizedUrl,
                 viewport: {
                   width: window.innerWidth,
                   height: window.innerHeight,
                 },
-                url: window.location.href,
+                url: pageUrl,
                 timestamp: Date.now(),
                 metrics: {
                   ...result.metrics,
@@ -916,13 +935,16 @@ class AIRInterceptor {
 
         const anchors = this.scanPageAnchors();
         const controlSignature = this.computeControlSignature(document);
+        const pageUrl = window.location.href;
+        const normalizedUrl = this.normalizeUrl(pageUrl);
 
         return Promise.resolve({
           html: result?.html || "",
           anchors: anchors, // <--- Added Anchors
           controlSignature,
+          normalizedUrl,
           viewport: { width: window.innerWidth, height: window.innerHeight },
-          url: window.location.href,
+          url: pageUrl,
           timestamp: Date.now(),
           metrics: {
             ...(result?.metrics || {}),
@@ -1087,11 +1109,14 @@ class AIRInterceptor {
 
     this.log('🌐 Network captured', info);
 
+    const pageUrl = window.location.href;
+    const normalizedUrl = this.normalizeUrl(pageUrl);
     this.queueEvent({
       id:            this.generateUUID(),
       type:          'network',
       timestamp:     Date.now(),
-      pageUrl:       window.location.href,
+      pageUrl,
+      normalizedUrl,
       sessionId:     this.config.sessionId,
       schemaVersion: 'air:v2',
       traceId:       this.pendingTraceId || undefined,
@@ -1198,11 +1223,14 @@ class AIRInterceptor {
       if (!significant) return;
 
       this.log('🖱️ Hover triggered DOM change', { tag, hoverKey });
+      const pageUrl = window.location.href;
+      const normalizedUrl = this.normalizeUrl(pageUrl);
       this.queueEvent({
         id:            this.generateUUID(),
         type:          'hover',
         timestamp:     Date.now(),
-        pageUrl:       window.location.href,
+        pageUrl,
+        normalizedUrl,
         pageTitle:     document.title,
         sessionId:     this.config.sessionId,
         schemaVersion: 'air:v2',
@@ -1565,12 +1593,15 @@ class AIRInterceptor {
       selectedLabel = target.options[target.selectedIndex]?.text || undefined;
     }
 
+    const pageUrl = window.location.href;
+    const normalizedUrl = this.normalizeUrl(pageUrl);
     this.queueEvent({
       id:            this.generateUUID(),
       type:          "input",
       trigger,                          // blur | change | input:progress
       timestamp:     Date.now(),
-      pageUrl:       window.location.href,
+      pageUrl,
+      normalizedUrl,
       pageTitle:     document.title,
       viewport:      { width: window.innerWidth, height: window.innerHeight },
       fingerprint,
@@ -1910,13 +1941,16 @@ class AIRInterceptor {
     const durationMs       = session ? Date.now() - session.openTimestamp : null;
     const optionFingerprint = this.generateFingerprint(el);
 
+    const pageUrl = window.location.href;
+    const normalizedUrl = this.normalizeUrl(pageUrl);
     this.queueEvent({
       id:            this.generateUUID(),
       type:          "custom-select",          // distinct from native "input" / "change"
       trigger:       "option-click",
       timestamp:     Date.now(),
       traceId,
-      pageUrl:       window.location.href,
+      pageUrl,
+      normalizedUrl,
       pageTitle:     document.title,
       viewport:      { width: window.innerWidth, height: window.innerHeight },
       sessionId:     this.config.sessionId,
@@ -2050,12 +2084,14 @@ class AIRInterceptor {
     }
 
     // 4. Send ACTION Event (Immediate User Intent)
+    const actionNormalizedUrl = this.normalizeUrl(startUrl);
     const actionEvent = {
       id: this.generateUUID(),
       type: EventType.CLICK,
       timestamp: Date.now(),
       traceId: traceId, // <--- SHARED ID
       pageUrl: startUrl,
+      normalizedUrl: actionNormalizedUrl,
       pageTitle: document.title,
       viewport: { width: window.innerWidth, height: window.innerHeight },
       fingerprint,
@@ -2132,16 +2168,19 @@ class AIRInterceptor {
     // 7. Build OUTCOME Event (The Result)
     const controlSignature = this.computeControlSignature(document);
     const primaryHeading   = this.getPrimaryHeading(document);
+    const outcomePageUrl = window.location.href;
+    const outcomeNormalizedUrl = this.normalizeUrl(outcomePageUrl);
     const outcomeEvent = {
       id: this.generateUUID(),
       type: "outcome",
       traceId: traceId,
       timestamp: Date.now(),
       sessionId: this.config.sessionId,
-      pageUrl: window.location.href,
+      pageUrl: outcomePageUrl,
+      normalizedUrl: outcomeNormalizedUrl,
       meta: {
         settleType: settleResult,
-        urlAfter: window.location.href,
+        urlAfter: outcomePageUrl,
         titleAfter: document.title,
         controlSignature,
         primaryHeading,
@@ -2278,12 +2317,14 @@ class AIRInterceptor {
         ? await self.capturePageSnapshot(self.config.snapshotDepth, true).catch(() => null)
         : null;
 
+      const normalizedUrl = self.normalizeUrl(newUrl);
       self.queueEvent({
         id:            self.generateUUID(),
         type:          'spa-route-change',
         changeType,                        // pushState | replaceState | popstate | hashchange
         timestamp:     Date.now(),
         pageUrl:       newUrl,
+        normalizedUrl,
         pageTitle:     document.title,
         sessionId:     self.config.sessionId,
         schemaVersion: 'air:v2',
@@ -2421,11 +2462,14 @@ class AIRInterceptor {
                         : "unknown"),
             };
 
+        const pageUrl = window.location.href;
+        const normalizedUrl = this.normalizeUrl(pageUrl);
         this.queueEvent({
           id:        this.generateUUID(),
           type:      "scroll",
           timestamp: Date.now(),
-          pageUrl:   window.location.href,
+          pageUrl,
+          normalizedUrl,
           viewport:  { width: window.innerWidth, height: window.innerHeight },
           scroll: {
             x:           currentX,
@@ -2464,12 +2508,15 @@ class AIRInterceptor {
     // FIX: Assign it to the class property so beforeunload can grab it
     this.pendingTraceId = traceId;
 
+    const pageUrl = window.location.href;
+    const normalizedUrl = this.normalizeUrl(pageUrl);
     const baseEvent = {
       id: this.generateUUID(),
       type: "submit",
       timestamp: Date.now(),
       traceId: traceId,
-      pageUrl: window.location.href,
+      pageUrl,
+      normalizedUrl,
       pageTitle: document.title,
       viewport: { width: window.innerWidth, height: window.innerHeight },
       fingerprint,
@@ -3169,6 +3216,8 @@ class AIRInterceptor {
         (snapshot) => {
           const controlSignature = this.computeControlSignature(document);
           const primaryHeading   = this.getPrimaryHeading(document);
+          const pageUrl = window.location.href;
+          const normalizedUrl = this.normalizeUrl(pageUrl);
           this.queueEvent({
             id: this.generateUUID(),
             type: "outcome",
@@ -3184,7 +3233,8 @@ class AIRInterceptor {
             },
             pageSnapshot: snapshot,
             pageState: snapshot,
-            pageUrl: window.location.href,
+            pageUrl,
+            normalizedUrl,
           });
         },
       );
@@ -3200,6 +3250,8 @@ class AIRInterceptor {
       (snapshot) => {
         const controlSignature = this.computeControlSignature(document);
         const primaryHeading   = this.getPrimaryHeading(document);
+        const pageUrl = window.location.href;
+        const normalizedUrl = this.normalizeUrl(pageUrl);
         this.queueEvent({
           id: this.generateUUID(),
           type: "outcome",
@@ -3209,7 +3261,8 @@ class AIRInterceptor {
           meta: { settleType: "baseline", controlSignature, primaryHeading },
           pageSnapshot: snapshot,
           pageState: snapshot,
-          pageUrl: window.location.href,
+          pageUrl,
+          normalizedUrl,
         });
       },
     );
