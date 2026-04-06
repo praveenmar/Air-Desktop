@@ -1,3 +1,1 @@
-export * from "./src/selectors";
-export * from "./src/url-utils";
-
+export * from "./src/index";

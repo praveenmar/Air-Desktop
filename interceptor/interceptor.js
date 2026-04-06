@@ -191,6 +191,11 @@ function rankForPriority(priority) {
   return SELECTOR_RANK_MAP[priority] ?? 10;
 }
 
+// Safe CSS escape - matches @air/shared/src/selectors.ts
+const safeCssEscape = (typeof CSS !== 'undefined' && CSS.escape)
+  ? CSS.escape
+  : (str) => String(str).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+
 // Cache for DOM indexing
 const _rootIndexCache = new WeakMap();
 
@@ -575,6 +580,8 @@ class AIRInterceptor {
     return { hasVue, hasReact, isEmptyRoot, app };
   }
 
+  // IMPORTANT: Must stay identical to @air/shared/src/anchor-utils.ts
+  // Keep in sync until interceptor can import shared package
   normalizeAnchor(text) {
     if (!text) return "";
     return String(text)
@@ -642,6 +649,8 @@ class AIRInterceptor {
     return raw.length > 0 ? this.simpleHash(raw) : null;
   }
 
+  // IMPORTANT: Must stay identical to @air/shared/src/anchor-utils.ts
+  // Keep in sync until interceptor can import shared package
   scanPageAnchors() {
     const anchors = [];
     // 1. URL Path (Strongest Anchor)
@@ -2445,11 +2454,11 @@ class AIRInterceptor {
           : {
               tag: scrollTarget.tagName?.toLowerCase() || "unknown",
               selector: scrollTarget.id
-                ? `#${CSS.escape(scrollTarget.id)}`
+                ? `#${safeCssEscape(scrollTarget.id)}`
                 : (scrollTarget.getAttribute("data-testid")
                     ? `[data-testid="${escapeCssString(scrollTarget.getAttribute("data-testid"))}"]`
                     : scrollTarget.className?.split(" ")[0] 
-                        ? `.${CSS.escape(scrollTarget.className.split(" ")[0])}`
+                        ? `.${safeCssEscape(scrollTarget.className.split(" ")[0])}`
                         : "unknown"),
             };
 
@@ -2606,7 +2615,7 @@ class AIRInterceptor {
       );
       if (!isDynamic) {
         return {
-          selector: `#${CSS.escape(id)}`,
+          selector: `#${safeCssEscape(id)}`,
           priority: "id",
           rank: rankForPriority("id"),
         };
@@ -2653,7 +2662,7 @@ class AIRInterceptor {
     const stableClass = this.findStableClass(element);
     if (stableClass) {
       return {
-        selector: `.${CSS.escape(stableClass)}`,
+        selector: `.${safeCssEscape(stableClass)}`,
         priority: "class",
         rank: rankForPriority("class"),
       };
@@ -2700,7 +2709,7 @@ class AIRInterceptor {
       if (siblings.length > 0) {
         const index = siblings.indexOf(element);
         const parentSelector = parent.id && !/^\d/.test(parent.id)
-          ? `#${CSS.escape(parent.id)}`
+          ? `#${safeCssEscape(parent.id)}`
           : parent.tagName.toLowerCase();
 
         return {
