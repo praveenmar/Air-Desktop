@@ -94,7 +94,9 @@ export class OutcomeHandler {
     // Fetch the original trigger event for URL comparison (Tier 2)
     const triggerEventRow = this.eventRepo.findById(pendingAction.triggerEventId);
     const normalizedTriggerUrl = triggerEventRow ? normalizeUrl(triggerEventRow.page_url) : null;
-    const normalizedOutcomeUrl = normalizeUrl(outcomeEvent.meta?.urlAfter);
+    const normalizedOutcomeUrl = normalizeUrl(
+      outcomeEvent.normalizedUrl || outcomeEvent.meta?.urlAfter || outcomeEvent.pageUrl
+    );
 
     if (outcomeEvent.meta?.settleType === 'navigation') {
       // Tier 1: Explicit navigation signal from interceptor — trust it unconditionally

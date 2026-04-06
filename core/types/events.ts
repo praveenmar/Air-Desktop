@@ -31,6 +31,7 @@ export const PageSnapshotSchema = z.object({
   controlSignature: z.string().nullable().optional(),
   viewport: ViewportSchema.optional(),
   url: z.string().optional(),
+  normalizedUrl: z.string().optional(),
   timestamp: z.number().optional(),
   metrics: z.record(z.string(), z.unknown()).optional(),
 });
@@ -45,6 +46,7 @@ const BaseEventSchema = z.object({
     .min(1, 'Session ID required')
     .regex(/^session-[a-f0-9-]+$/, 'Invalid session ID format'),
   pageUrl: z.string().optional(), // Strictly optional to fix the Zod missing url error
+  normalizedUrl: z.string().optional(),
   schemaVersion: z.string().optional(),
 });
 

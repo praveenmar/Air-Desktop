@@ -123,6 +123,12 @@ export interface CodegenStep {
    * Enables the code generator to emit page.goto() when URL changes mid-flow.
    */
   pageUrl: string;
+
+  /**
+   * Normalized URL (origin + pathname) used for grouping/comparison.
+   * Additive field; raw pageUrl remains unchanged for debugging/display.
+   */
+  normalizedUrl?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

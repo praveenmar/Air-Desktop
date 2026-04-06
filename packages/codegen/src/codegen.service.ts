@@ -71,6 +71,19 @@ export function rankFromPriority(priority: SelectorPriority): number {
   return SELECTOR_RANK_MAP[priority] ?? 10;
 }
 
+function normalizeUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return url;
+  }
+}
+
+function getStepNormalizedUrl(step: Pick<CodegenStep, 'pageUrl'> & { normalizedUrl?: string }): string {
+  return step.normalizedUrl ?? normalizeUrl(step.pageUrl);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ACTION TYPES THAT PRODUCE MEANINGFUL TEST STEPS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -232,6 +245,24 @@ function extractValue(payloadJson: string | null, eventType: string): string | u
   }
 }
 
+function extractNormalizedUrl(payloadJson: string | null, fallbackPageUrl: string | null): string | undefined {
+  if (payloadJson) {
+    try {
+      const payload = JSON.parse(payloadJson);
+      if (typeof payload?.normalizedUrl === 'string' && payload.normalizedUrl.length > 0) {
+        return payload.normalizedUrl;
+      }
+    } catch {
+      // Fall through to pageUrl fallback
+    }
+  }
+
+  if (fallbackPageUrl) {
+    return normalizeUrl(fallbackPageUrl);
+  }
+  return undefined;
+}
+
 function computeFpHash(fp: FingerprintData | null, eventType: string): string {
   const raw = [
     fp?.selector       || '',
@@ -317,9 +348,11 @@ export function suppressPreNavSetupClicks(steps: CodegenStep[]): CodegenStep[] {
     // Condition 3a: look ahead within the window on the same page
     let foundNavAhead = false;
     let foundAnyStepOnSamePage = false;
+    const stepUrl = getStepNormalizedUrl(step);
 
     for (let j = i + 1; j < steps.length && j <= i + LOOKAHEAD_WINDOW; j++) {
-      if (steps[j].pageUrl !== step.pageUrl) break; // left the page
+      const nextUrl = getStepNormalizedUrl(steps[j]);
+      if (nextUrl !== stepUrl) break; // left the page
 
       foundAnyStepOnSamePage = true;
 
@@ -332,7 +365,7 @@ export function suppressPreNavSetupClicks(steps: CodegenStep[]): CodegenStep[] {
     // Condition 3b: also suppress if this is the last meaningful step on the
     // page (no further steps exist on this URL — trailing noise).
     const isTrailing = !foundAnyStepOnSamePage ||
-      steps.slice(i + 1).every(s => s.pageUrl !== step.pageUrl);
+      steps.slice(i + 1).every(s => getStepNormalizedUrl(s) !== stepUrl);
 
     if (foundNavAhead || isTrailing) {
       suppress.add(i);
@@ -602,6 +635,7 @@ export class CodegenService {
         selectorPriority,
         selectorRank,
         pageUrl:          ev.pageUrl || '',
+        normalizedUrl:    extractNormalizedUrl(ev.payload, ev.pageUrl || ''),
         confidence,
         sampleSize:       edge?.sampleSize ?? 1,
         assertions:       [],

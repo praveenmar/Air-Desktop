@@ -65,7 +65,10 @@ export class BaselineHandler {
       }
 
       const resolvedUrl = event.pageUrl || snapshot.url || 'unknown';
-      const normalizedUrl = normalizeUrl(resolvedUrl);
+      const normalizedUrl =
+        event.normalizedUrl ||
+        snapshot.normalizedUrl ||
+        normalizeUrl(resolvedUrl);
       
       const metadata = {
         stateSource: anchors ? 'anchor' : 'html',
@@ -160,7 +163,7 @@ export class BaselineHandler {
       const metadata = { stateSource: 'fingerprint' };
       const existing = this.nodeRepo.findByHash('default', canonicalHash);
       const resolvedUrl = event.pageUrl || 'unknown';
-      const normalizedUrl = normalizeUrl(resolvedUrl);
+      const normalizedUrl = event.normalizedUrl || normalizeUrl(resolvedUrl);
 
       let viewportWidth: number | null = null;
       let viewportHeight: number | null = null;
