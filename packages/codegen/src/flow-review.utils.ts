@@ -207,7 +207,9 @@ export function getSelectorQuality(priority: string): SelectorQuality {
     case 'text':        return 'good';
     case 'class':
     case 'path':
-    case 'xpath':       return 'fragile';
+    case 'xpath':
+    case 'other':
+    case 'chained':     return 'fragile';
     default:            return 'unknown';
   }
 }
