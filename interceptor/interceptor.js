@@ -76,57 +76,6 @@ class QuiescenceEngine {
     this.log('Monitoring started (DOM observer + network callbacks from AIRInterceptor)');
   }
 
-  startNetworkObserver() {
-    const self = this;
-
-    // 1. Hook Fetch
-    const originalFetch = window.fetch;
-    window.fetch = async (...args) => {
-      const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
-      if (self.shouldIgnoreUrl(url)) {
-        self.log('Ignoring background fetch:', url);
-        return originalFetch(...args);
-      }
-
-      const requestId = Math.random().toString(36).substring(7);
-      self.pendingRequests.add(requestId);
-      self.log(`Fetch started. Active requests: ${self.pendingRequests.size}`);
-      try {
-        return await originalFetch(...args);
-      } finally {
-        self.pendingRequests.delete(requestId);
-        self.log(`Fetch finished. Active requests: ${self.pendingRequests.size}`);
-      }
-    };
-
-    // 2. Hook XHR
-    const originalOpen = XMLHttpRequest.prototype.open;
-    const originalSend = XMLHttpRequest.prototype.send;
-
-    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-      this.__airUrl = url;
-      return originalOpen.apply(this, [method, url, ...rest]);
-    };
-
-    XMLHttpRequest.prototype.send = function(...args) {
-      const url = this.__airUrl || '';
-      if (self.shouldIgnoreUrl(url)) {
-        self.log('Ignoring background XHR:', url);
-        return originalSend.apply(this, args);
-      }
-
-      const requestId = Math.random().toString(36).substring(7);
-      self.pendingRequests.add(requestId);
-      self.log(`XHR started. Active requests: ${self.pendingRequests.size}`);
-      
-      this.addEventListener('loadend', () => {
-        self.pendingRequests.delete(requestId);
-        self.log(`XHR finished. Active requests: ${self.pendingRequests.size}`);
-      });
-      return originalSend.apply(this, args);
-    };
-  }
-
   shouldIgnoreUrl(url) {
     return this.config.ignoredUrlPatterns.some(pattern => pattern.test(url));
   }
@@ -241,6 +190,11 @@ function escapeCssString(value) {
 function rankForPriority(priority) {
   return SELECTOR_RANK_MAP[priority] ?? 10;
 }
+
+// Safe CSS escape - matches @air/shared/src/selectors.ts
+const safeCssEscape = (typeof CSS !== 'undefined' && CSS.escape)
+  ? CSS.escape
+  : (str) => String(str).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
 
 // Cache for DOM indexing
 const _rootIndexCache = new WeakMap();
@@ -626,6 +580,8 @@ class AIRInterceptor {
     return { hasVue, hasReact, isEmptyRoot, app };
   }
 
+  // IMPORTANT: Must stay identical to @air/shared/src/anchor-utils.ts
+  // Keep in sync until interceptor can import shared package
   normalizeAnchor(text) {
     if (!text) return "";
     return String(text)
@@ -635,10 +591,12 @@ class AIRInterceptor {
       .trim();
   }
 
+  // MUST stay in sync with packages/shared/src/url-utils.ts::normalizeUrl
   normalizeUrl(url) {
     try {
       const u = new URL(url, window.location.href);
-      return `${u.origin}${u.pathname}`;
+      const path = u.pathname.replace(/\/$/, "") || "/";
+      return `${u.origin}${path}`;
     } catch {
       return url;
     }
@@ -691,6 +649,8 @@ class AIRInterceptor {
     return raw.length > 0 ? this.simpleHash(raw) : null;
   }
 
+  // IMPORTANT: Must stay identical to @air/shared/src/anchor-utils.ts
+  // Keep in sync until interceptor can import shared package
   scanPageAnchors() {
     const anchors = [];
     // 1. URL Path (Strongest Anchor)
@@ -2494,11 +2454,11 @@ class AIRInterceptor {
           : {
               tag: scrollTarget.tagName?.toLowerCase() || "unknown",
               selector: scrollTarget.id
-                ? `#${CSS.escape(scrollTarget.id)}`
+                ? `#${safeCssEscape(scrollTarget.id)}`
                 : (scrollTarget.getAttribute("data-testid")
                     ? `[data-testid="${escapeCssString(scrollTarget.getAttribute("data-testid"))}"]`
                     : scrollTarget.className?.split(" ")[0] 
-                        ? `.${CSS.escape(scrollTarget.className.split(" ")[0])}`
+                        ? `.${safeCssEscape(scrollTarget.className.split(" ")[0])}`
                         : "unknown"),
             };
 
@@ -2655,7 +2615,7 @@ class AIRInterceptor {
       );
       if (!isDynamic) {
         return {
-          selector: `#${CSS.escape(id)}`,
+          selector: `#${safeCssEscape(id)}`,
           priority: "id",
           rank: rankForPriority("id"),
         };
@@ -2702,7 +2662,7 @@ class AIRInterceptor {
     const stableClass = this.findStableClass(element);
     if (stableClass) {
       return {
-        selector: `.${CSS.escape(stableClass)}`,
+        selector: `.${safeCssEscape(stableClass)}`,
         priority: "class",
         rank: rankForPriority("class"),
       };
@@ -2749,7 +2709,7 @@ class AIRInterceptor {
       if (siblings.length > 0) {
         const index = siblings.indexOf(element);
         const parentSelector = parent.id && !/^\d/.test(parent.id)
-          ? `#${CSS.escape(parent.id)}`
+          ? `#${safeCssEscape(parent.id)}`
           : parent.tagName.toLowerCase();
 
         return {

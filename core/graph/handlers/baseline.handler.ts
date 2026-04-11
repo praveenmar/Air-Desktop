@@ -8,16 +8,7 @@ import { StateEngine } from '../state-engine';
 import { AIREvent, ElementFingerprint, PageSnapshot } from '../../types';
 import { IntentDetector } from '../intent-detector';
 import { NodeRepository, NodeUpdate } from '../../db/repositories/node.repository';
-
-function normalizeUrl(url: string): string {
-  try {
-    const parsed = new URL(url);
-    const path = (parsed.pathname.toLowerCase().replace(/\/$/, '') || '/');
-    return `${parsed.origin}${path}`;
-  } catch {
-    return url;
-  }
-}
+import { normalizeUrl } from '@air/shared';
 
 export class BaselineHandler {
   constructor(

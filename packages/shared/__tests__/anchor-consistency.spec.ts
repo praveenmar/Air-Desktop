@@ -56,11 +56,7 @@ test.describe('Anchor consistency between interceptor and reporter', () => {
         return instance.scanPageAnchors();
       });
 
-      const currentPathname = new URL(page.url()).pathname;
-      const reporterAnchors = await page.evaluate(
-        reporterScan as unknown as (locationPath: string) => string[],
-        currentPathname
-      );
+      const reporterAnchors = await page.evaluate(reporterScan as () => string[]) as string[];
 
       const diffs = firstDifferences(reporterAnchors, interceptorAnchors, 20);
       expect(

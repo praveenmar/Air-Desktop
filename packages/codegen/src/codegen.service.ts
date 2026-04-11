@@ -45,6 +45,7 @@ import {
   getUserDefinedAssertions,
   hasUserAssertionSupport,
 } from './assertion.stub';
+import { normalizeUrl } from '@air/shared';
 
 export const SELECTOR_RANK_MAP: Record<string, number> = {
   'data-testid': 1,
@@ -70,15 +71,6 @@ function escapeCssString(value: string): string {
 
 export function rankFromPriority(priority: SelectorPriority): number {
   return SELECTOR_RANK_MAP[priority] ?? 10;
-}
-
-function normalizeUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    return `${u.origin}${u.pathname}`;
-  } catch {
-    return url;
-  }
 }
 
 function getStepNormalizedUrl(step: Pick<CodegenStep, 'pageUrl'> & { normalizedUrl?: string }): string {
