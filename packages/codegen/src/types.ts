@@ -47,6 +47,29 @@ export type SelectorPriority =
   | 'chained'
   | 'unknown';
 
+export type ResolverResolvedBy =
+  | 'kept-original'
+  | 'deterministic-override'
+  | 'llm-accepted'
+  | 'unresolved';
+
+export type ResolverSnapshotSource = 'latest' | 'latest-stable' | 'unavailable';
+
+export interface ResolverMetadata {
+  resolvedSelector: string;
+  resolvedBy: ResolverResolvedBy;
+  bestScore: number;
+  effectiveMatchCount: number;
+  snapshotSource: ResolverSnapshotSource;
+  validationMethod: string;
+  llmAttempted: boolean;
+  llmAccepted: boolean;
+  llmAlternative: string | null;
+  rejectReason: string | null;
+  warningCodes: string[];
+  resolverVersion: 1;
+}
+
 export interface CodegenStep {
   /** 1-based step index — used as the @air-step breadcrumb in generated code */
   step: number;
@@ -64,6 +87,12 @@ export interface CodegenStep {
 
   /** The CSS selector or XPath to target the element */
   selector: string;
+
+  /**
+   * Node ID of the DOM snapshot before this step executes.
+   * Additive-only field used by D3.5 selector resolution for generation.
+   */
+  sourceNodeId?: string;
 
   /**
    * How the selector was derived — drives selector strategy in generated code.
@@ -129,6 +158,17 @@ export interface CodegenStep {
    * Additive field; raw pageUrl remains unchanged for debugging/display.
    */
   normalizedUrl?: string;
+
+  /**
+   * Additive selector used only for generated output. Does not mutate
+   * recorded graph/session truth.
+   */
+  resolvedSelector?: string;
+
+  /**
+   * Additive D3.5 resolver diagnostics for sidecar and observability.
+   */
+  resolverMetadata?: ResolverMetadata;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

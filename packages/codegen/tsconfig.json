@@ -2,7 +2,8 @@
   "compilerOptions": {
     "target": "ES2020",
     "module": "CommonJS",
-    "moduleResolution": "Node",
+    "moduleResolution": "node",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "outDir": "dist",
     "rootDir": ".",
     "declaration": true,
@@ -12,7 +13,7 @@
     "skipLibCheck": true,
     "esModuleInterop": false,
     "resolveJsonModule": true,
-    "types": ["node", "better-sqlite3"]
+    "types": ["node", "better-sqlite3", "vitest"]
   },
   "include": [
     "index.ts",

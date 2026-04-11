@@ -24,7 +24,8 @@
       "@core/*": ["core/*"],
       "@src/*": ["src/*"],
       "@electron/*": ["electron/*"],
-      "@air/codegen/*": ["./packages/codegen/src/index.ts"]
+      "@air/codegen/*": ["packages/codegen/src/*"],
+      "@air/codegen": ["packages/codegen/src/index.ts"]
     }
   }
 }

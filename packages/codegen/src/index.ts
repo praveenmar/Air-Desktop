@@ -5,6 +5,13 @@
 
 // ── Core pipeline ────────────────────────────────────────────────────────────
 export { CodegenService } from './codegen.service';
+export { resolveSelectorsForSession } from './selector-resolver';
+export type {
+  ResolverConfig,
+  SnapshotCache,
+  SelectorResolution,
+  SelectorResolverResult,
+} from './selector-resolver';
 
 // ── FlowReview layer ─────────────────────────────────────────────────────────
 export { FlowReviewService }   from './flow-review.service';
@@ -23,6 +30,9 @@ export type {
   AssertionSource,
   OutcomeType,
   SelectorPriority,
+  ResolverMetadata,
+  ResolverResolvedBy,
+  ResolverSnapshotSource,
 } from './types';
 
 export type {

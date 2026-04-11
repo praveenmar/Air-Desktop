@@ -26,7 +26,9 @@
     "@xyflow/react": "^12.0.0",
     "better-sqlite3": "11.7.0",
     "dagre": "^0.8.5",
+    "html-encoding-sniffer": "5.0.0",
     "playwright": "^1.58.2",
+    "linkedom": "^0.18.0",
     "react": "19.0.0",
     "react-dom": "19.0.0",
     "reactflow": "^11.11.4",
@@ -55,5 +57,9 @@
     "typescript": "5.6.3",
     "vite": "5.4.11",
     "vitest": "^2.1.0"
+  }
+  ,
+  "overrides": {
+    "html-encoding-sniffer": "5.0.0"
   }
 }

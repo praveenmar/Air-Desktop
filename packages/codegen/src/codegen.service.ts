@@ -40,6 +40,7 @@ import {
   SelectorPriority,
   AssertionType,
 } from './types';
+import type { ResolverConfig, SnapshotCache } from './selector-resolver';
 import {
   getUserDefinedAssertions,
   hasUserAssertionSupport,
@@ -82,6 +83,13 @@ function normalizeUrl(url: string): string {
 
 function getStepNormalizedUrl(step: Pick<CodegenStep, 'pageUrl'> & { normalizedUrl?: string }): string {
   return step.normalizedUrl ?? normalizeUrl(step.pageUrl);
+}
+
+export function getSourceNodeId(
+  event: Pick<{ nodeId?: string | null }, 'nodeId'> | null | undefined,
+  edge: Pick<{ fromNodeId?: string | null; toNodeId?: string | null }, 'fromNodeId' | 'toNodeId'> | null | undefined
+): string | null {
+  return event?.nodeId ?? edge?.fromNodeId ?? edge?.toNodeId ?? null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -632,6 +640,7 @@ export class CodegenService {
         intent,
         action:           ev.eventType as ActionType,
         selector:         fingerprint.selector,
+        sourceNodeId:     getSourceNodeId(ev, edge) ?? undefined,
         selectorPriority,
         selectorRank,
         pageUrl:          ev.pageUrl || '',
@@ -730,5 +739,115 @@ export class CodegenService {
 
   public close(): void {
     this.db.close();
+  }
+
+  public async loadSnapshots(session: CodegenSession, options: ResolverConfig = {}): Promise<SnapshotCache> {
+    try {
+    const nodeIds = Array.from(
+      new Set(
+        session.steps
+          .map(step => step.sourceNodeId)
+          .filter((nodeId): nodeId is string => typeof nodeId === 'string' && nodeId.length > 0),
+      ),
+    );
+
+    const cache = new Map<string, Document | null>();
+    const maxBytes = options.maxSnapshotBytesForValidation ?? 2_000_000;
+    type JsdomCtor = new (html: string) => { window: { document: Document } };
+    let jsdomCtor: JsdomCtor | null = null;
+
+    const dynamicImport = new Function(
+      'specifier',
+      'return import(specifier);'
+    ) as (specifier: string) => Promise<any>;
+
+    let linkedomParse: ((html: string) => { window: { document: Document } }) | null = null;
+
+    try {
+      // Try jsdom first
+      const jsdomModule = await dynamicImport('jsdom');
+      if (typeof jsdomModule.JSDOM === 'function') {
+        jsdomCtor = jsdomModule.JSDOM as JsdomCtor;
+      }
+    } catch (err) {
+      // swallow and try linkedom below
+    }
+
+    if (!jsdomCtor) {
+      try {
+        const linkedom = await dynamicImport('linkedom');
+        if (typeof linkedom.parseHTML === 'function') {
+          linkedomParse = linkedom.parseHTML as any;
+        }
+      } catch (err) {
+        // failed to load linkedom as well
+      }
+    }
+
+    const snapshotEngineAvailable = !!(jsdomCtor || linkedomParse);
+    console.log('[DEBUG] loadSnapshots: jsdomCtor=', !!jsdomCtor, 'linkedomParse=', !!linkedomParse);
+    if (!snapshotEngineAvailable) {
+      console.warn('[AIR] Failed to load jsdom or linkedom. Snapshot validation disabled.');
+      console.warn('[AIR] Snapshot engine unavailable — resolver running in degraded mode');
+      for (const nodeId of nodeIds) cache.set(nodeId, null);
+      return {
+        snapshotEngineAvailable,
+        get(nodeId: string): Document | null {
+          return cache.get(nodeId) ?? null;
+        },
+      };
+    }
+
+    const getSnapshotStmt = this.db.prepare(`
+      SELECT snapshot_html AS snapshotHtml
+      FROM nodes
+      WHERE id = ?
+      LIMIT 1
+    `);
+
+    for (const nodeId of nodeIds) {
+      const row = getSnapshotStmt.get(nodeId) as { snapshotHtml?: string | null } | undefined;
+      const snapshotHtml = row?.snapshotHtml;
+      console.log(`[DEBUG] loadSnapshots: nodeId=${nodeId}, snapshotHtml length=${snapshotHtml ? snapshotHtml.length : 0}`);
+      if (!snapshotHtml || Buffer.byteLength(snapshotHtml, 'utf8') > maxBytes) {
+        cache.set(nodeId, null);
+        continue;
+      }
+
+      try {
+        if (jsdomCtor) {
+          const dom = new jsdomCtor(snapshotHtml);
+          cache.set(nodeId, dom.window.document);
+        } else if (linkedomParse) {
+          const parsed = linkedomParse(snapshotHtml);
+          cache.set(nodeId, parsed.window.document as Document);
+        } else {
+          cache.set(nodeId, null);
+        }
+      } catch (err) {
+        console.error('[DEBUG] loadSnapshots: parsing error for nodeId=', nodeId, err);
+        cache.set(nodeId, null);
+      }
+    }
+
+    return {
+      snapshotEngineAvailable,
+      get(nodeId: string): Document | null {
+        return cache.get(nodeId) ?? null;
+      },
+    };
+    } catch (err) {
+      console.error('[AIR] loadSnapshots fatal error:', err);
+      const fallbackCache = new Map<string, Document | null>();
+      for (const nodeId of (session.steps || []).map(s => s.sourceNodeId).filter(Boolean as any)) {
+        fallbackCache.set(nodeId as string, null);
+      }
+      return {
+        snapshotEngineAvailable: false,
+        get(nodeId: string): Document | null {
+          return fallbackCache.get(nodeId) ?? null;
+        },
+      };
+    }
   }
 }
