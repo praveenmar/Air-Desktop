@@ -1,29 +1,35 @@
 {
+  "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "CommonJS",
-    "moduleResolution": "node",
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
-    "outDir": "dist",
-    "rootDir": ".",
+    /* 1. THE FIX: Set rootDir to the 'packages' folder so it includes 'shared' */
+    "rootDir": "..", 
+    "outDir": "./dist",
+
+    "emitDeclarationOnly": true,
+    "noEmit": false, 
+    "module": "ESNext",
+    "moduleResolution": "bundler",
     "declaration": true,
-    "declarationMap": false,
-    "sourceMap": false,
-    "strict": true,
-    "skipLibCheck": true,
-    "esModuleInterop": false,
-    "resolveJsonModule": true,
-    "types": ["node", "better-sqlite3", "vitest"]
+    "declarationMap": true,
+
+    "types": ["node", "better-sqlite3", "vitest"],
+
+    "paths": {
+      "@air/shared": ["../shared/src/index.ts"],
+      "@air/shared/*": ["../shared/src/*"]
+    }
   },
   "include": [
-    "index.ts",
     "src/**/*.ts",
-    "bin/**/*.ts"
+    "bin/**/*.ts",
+    "__tests__/**/*.ts",
+    "test-codegen.ts",
+    /* 2. IMPORTANT: You must also include the shared files so TS can 'see' them */
+    "../shared/src/**/*.ts",
+    "index.ts"
   ],
   "exclude": [
     "dist",
-    "__tests__",
-    "test-codegen.ts",
-    "extract.ts"
+    "node_modules"
   ]
 }

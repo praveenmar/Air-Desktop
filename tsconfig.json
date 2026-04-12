@@ -1,7 +1,3 @@
-// Purpose: Base TypeScript configuration for the entire monorepo-style structure.
-// Prototype Origin: New file for Electron scaffolding.
-// Changes: Enforces strict mode, ES2022, and sets up path aliases.
-
 {
   "compilerOptions": {
     "target": "ES2022",
@@ -13,20 +9,23 @@
     "noImplicitAny": true,
     "noImplicitReturns": true,
     "forceConsistentCasingInFileNames": true,
+    /* 1. Use 'bundler' for Vite/Electron projects */
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
-    "baseUrl": ".",
+    "esModuleInterop": true,
+
     "paths": {
-      "@core/*": ["core/*"],
-      "@src/*": ["src/*"],
-      "@electron/*": ["electron/*"],
-      "@air/shared": ["packages/shared/index.ts"],
-      "@air/shared/*": ["packages/shared/src/*"],
-      "@air/codegen/*": ["./packages/codegen/src/index.ts"]
+      "@core/*": ["./core/*"],
+      "@src/*": ["./src/*"],
+      "@electron/*": ["./electron/*"],
+      "@air/shared": ["./packages/shared/src/index.ts"],
+      "@air/shared/*": ["./packages/shared/src/*"],
+      "@air/codegen": ["./packages/codegen/src/index.ts"],
+      "@air/codegen/*": ["./packages/codegen/src/*"]
     }
   }
 }

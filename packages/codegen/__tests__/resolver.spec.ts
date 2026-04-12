@@ -291,7 +291,7 @@ describe('selector-resolver', () => {
     }
 
     const llmProvider = vi.fn(async request =>
-      request.steps.map(item => ({ stepNumber: item.stepNumber, selector: `button[aria-label="submit ${item.stepNumber}"]` })),
+      request.steps.map((item: any) => ({ stepNumber: item.stepNumber, selector: `button[aria-label="submit ${item.stepNumber}"]` })),
     );
 
     const result = await resolveSelectorsForSession(

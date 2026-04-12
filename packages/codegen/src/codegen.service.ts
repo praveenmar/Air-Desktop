@@ -29,7 +29,7 @@
  * This fits comfortably in any AI context window alongside the prompt.
  */
 
-import * as Database from 'better-sqlite3';
+import Database from 'better-sqlite3';
 import * as crypto from 'crypto';
 import {
   CodegenSession,
