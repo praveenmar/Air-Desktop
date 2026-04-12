@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "AIR semantic timeline compressor and code generation service",
   "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "type": "module",
   "bin": {
     "air": "dist/bin/air-review.js"
   },
