@@ -1,0 +1,44 @@
+{
+  "name": "air-vscode-extension",
+  "displayName": "AIR Recording",
+  "description": "Autonomous Interaction Recorder",
+  "version": "0.0.1",
+  "publisher": "air-desktop",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "main": "./dist/extension.js",
+  "activationEvents": [
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "air.startRecording",
+        "title": "AIR: Start Recording",
+        "category": "AIR"
+      },
+      {
+        "command": "air.stopRecording",
+        "title": "AIR: Stop Recording",
+        "category": "AIR"
+      },
+      {
+        "command": "air.listSessions",
+        "title": "AIR: List Sessions",
+        "category": "AIR"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch"
+  },
+  "dependencies": {
+    "playwright": "^1.58.2",
+    "better-sqlite3": "11.7.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "@types/node": "^20.0.0"
+  }
+}
