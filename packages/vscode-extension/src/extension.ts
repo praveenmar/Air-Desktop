@@ -52,6 +52,7 @@ async function getServerBaseUrl(): Promise<string> {
 }
 
 async function startBackgroundServer(context: vscode.ExtensionContext, dbPath: string): Promise<void> {
+
   if (serverProcess) return;
 
   createServerReadyPromise();
@@ -62,13 +63,22 @@ async function startBackgroundServer(context: vscode.ExtensionContext, dbPath: s
     throw new Error(`Server module not found: ${serverModule}`);
   }
 
-  console.log(`[${SCOPE}] Spawning background server`, {
-    serverModule,
-    dbPath,
-    node: process.execPath,
+  // CHANGED: Use 'node' explicitly instead of process.execPath
+  serverProcess = spawn(process.execPath, [serverModule], {
+    env: { 
+      ...process.env, 
+      AIR_DB_PATH: dbPath,
+      // Forces VS Code to act as a standard Node runtime for your server
+      ELECTRON_RUN_AS_NODE: '1' 
+    },
+    stdio: ['ipc', 'pipe', 'pipe'],
+    windowsHide: true,
   });
 
-  serverProcess = spawn(process.execPath, [serverModule], {
+  console.log(`[${SCOPE}] Background server spawned using VS Code's Node 22 runtime`);
+
+  // CHANGED: Use 'node' here too
+  serverProcess = spawn('node', [serverModule], {
     env: { ...process.env, AIR_DB_PATH: dbPath },
     stdio: ['ipc', 'pipe', 'pipe'],
     windowsHide: true,
@@ -89,7 +99,7 @@ async function startBackgroundServer(context: vscode.ExtensionContext, dbPath: s
   });
 
   serverProcess.stderr?.on('data', (data) => {
-    console.error(`[${SCOPE}] Server stderr`, { error: data.toString() });
+    console.error(`[${SCOPE}] Server stderr: ${data.toString()}`);
   });
 
   serverProcess.on('error', (error) => {
@@ -224,7 +234,9 @@ async function startRecording() {
     });
 
     activeBrowser = await chromium.launch({ headless: false });
-    activeContext = await activeBrowser.newContext();
+    activeContext = await activeBrowser.newContext({
+    bypassCSP: true
+    });
 
     await activeContext.addInitScript({ content: configScript });
     await activeContext.addInitScript({ path: interceptorPath });
@@ -472,7 +484,6 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('air.deleteSession', deleteSession),
     vscode.commands.registerCommand('air.debugEvents', debugEvents),
     vscode.commands.registerCommand('air.showLogs', () => {
-        // Since airLogger is gone, this could open the debug console or do nothing.
         vscode.commands.executeCommand('workbench.action.debug.showConsole');
     }),
   );
