@@ -8,8 +8,7 @@
     "vscode": "^1.90.0"
   },
   "main": "./dist/extension.js",
-  "activationEvents": [
-  ],
+  "activationEvents": [],
   "contributes": {
     "commands": [
       {
@@ -34,11 +33,11 @@
     "watch": "node esbuild.js --watch"
   },
   "dependencies": {
-    "playwright": "^1.58.2",
-    "better-sqlite3": "11.7.0"
+    "@air/core": "*",
+    "playwright": "^1.58.2"
   },
   "devDependencies": {
-    "@types/vscode": "^1.90.0",
-    "@types/node": "^20.0.0"
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.90.0"
   }
 }

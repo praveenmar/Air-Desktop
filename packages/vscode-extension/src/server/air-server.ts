@@ -135,101 +135,141 @@ export class AIRServer {
     return result;
   }
 
-  private handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
-    const requestId = randomUUID().slice(0, 8);
-    const startedAt = Date.now();
-    this.setCorsHeaders(res, req.headers.origin as string | undefined);
-    if (!this.allowRequestRate()) {
-      log.warn(AIRServer.SCOPE, '[RATE_LIMIT] Exceeded (log-only)', { requestId, method: req.method, url: req.url });
-    }
+  // packages/vscode-extension/src/server/air-server.ts
 
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
+private handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+  const requestId = randomUUID().slice(0, 8);
+  const startedAt = Date.now();
+  
+  // Use a local constant for URL to avoid repetitive null-checks on req.url
+  const currentUrl = req.url || '';
+  
+  this.setCorsHeaders(res, req.headers.origin as string | undefined);
+  
+  if (!this.allowRequestRate()) {
+    log.warn(AIRServer.SCOPE, '[RATE_LIMIT] Exceeded', { requestId, method: req.method, url: currentUrl });
+  }
 
-    if (req.method === 'GET' && req.url === '/api/health') {
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  // --- 1. HEALTH & BASIC INFO ---
+  if (req.method === 'GET' && currentUrl === '/api/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ 
+      status: 'ok', 
+      port: this.port, 
+      activeSessionId: this.getActiveSessionId(),
+      version: 1 
+    }));
+    return;
+  }
+
+  // --- 2. SESSION MANAGEMENT ---
+  if (req.method === 'GET' && currentUrl === '/api/sessions') {
+    const sessions = this.listSessions();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(sessions));
+    return;
+  }
+
+  // Match /api/sessions/:id OR /api/sessions/:id/:action
+  const sessionMatch = currentUrl.match(/\/api\/sessions\/([^/]+)(?:\/([^/]+))?/);
+  if (sessionMatch) {
+    const sessionId = sessionMatch[1];
+    const action = sessionMatch[2];
+
+    if (req.method === 'POST' && action === 'end') {
+      this.markSessionEnded(sessionId);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', port: this.port, activeSessionId: this.getActiveSessionId(), version: 1 }));
+      res.end(JSON.stringify({ success: true }));
       return;
     }
 
-    if (req.method === 'GET' && req.url === '/api/session') {
+    if (req.method === 'DELETE' && !action) {
+      const result = this.deleteSession(sessionId);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ activeSessionId: this.getActiveSessionId() }));
+      res.end(JSON.stringify(result));
       return;
     }
 
-    if (req.method === 'POST' && req.url === '/api/events') {
+    if (req.method === 'POST' && action === 'export') {
       let body = '';
       req.on('data', chunk => { body += chunk; });
-      req.on('end', () => {
-        if (Buffer.byteLength(body) > this.maxPayloadBytes) {
-          res.writeHead(413, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: 'Payload too large' }));
-          return;
-        }
+      req.on('end', async () => {
         try {
-          const parsed = JSON.parse(body);
-          const rawEvents = Array.isArray(parsed) ? parsed : (parsed.events || [parsed]);
-          const events: IncomingEvent[] = [];
-          for (const rawEvent of rawEvents) {
-            const result = IncomingEventSchema.safeParse(rawEvent);
-            if (!result.success) {
-              log.error(AIRServer.SCOPE, '[SCHEMA_FAIL] Incoming event failed validation', result.error, { requestId, event: rawEvent });
-              continue;
-            }
-            events.push(result.data);
-          }
-          log.info(AIRServer.SCOPE, '[EVENT_RECEIVED]', {
-            requestId,
-            count: rawEvents.length,
-            acceptedForQueue: events.length,
-            droppedBySchema: rawEvents.length - events.length,
-            sessionId: events[0]?.sessionId ?? null,
-          });
-          const activeSessionId = this.getActiveSessionId();
-          if (activeSessionId && events.some((ev) => ev.sessionId !== activeSessionId)) {
-            log.warn(AIRServer.SCOPE, '[SESSION_MISMATCH] (log-only)', {
-              requestId,
-              activeSessionId,
-              incomingSessionIds: Array.from(new Set(events.map((event) => event.sessionId))),
-            });
-          }
-          if (!this.allowEventsPerSession(events)) {
-            log.warn(AIRServer.SCOPE, '[RATE_LIMIT] Events per session exceeded (log-only)', {
-              requestId,
-              eventCount: events.length,
-              sessionId: events[0]?.sessionId ?? null,
-            });
-          }
-          for (const ev of events) {
-            this.enqueueEvent(ev);
-          }
-          res.writeHead(202, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, queued: events.length, received: rawEvents.length }));
-          log.info(AIRServer.SCOPE, 'Events accepted', {
-            requestId,
-            queued: events.length,
-            queueDepth: this.eventQueue.length,
-            elapsedMs: Date.now() - startedAt,
-          });
+          const { outputPath } = JSON.parse(body);
+          if (!outputPath) throw new Error('Missing outputPath');
+          await this.exportSession(sessionId, outputPath);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true }));
         } catch (err) {
+          log.error(AIRServer.SCOPE, 'Export failed', err, { requestId, sessionId });
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: 'Invalid JSON' }));
-          log.warn(AIRServer.SCOPE, 'Rejected invalid JSON payload', {
-            requestId,
-            error: err instanceof Error ? err.message : String(err),
-          });
+          res.end(JSON.stringify({ success: false, error: err instanceof Error ? err.message : 'Invalid export request' }));
         }
       });
       return;
     }
-
-    res.writeHead(404);
-    res.end();
   }
+
+  // --- 3. EVENT INGESTION (High Frequency) ---
+  if (req.method === 'POST' && currentUrl === '/api/events') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      if (Buffer.byteLength(body) > this.maxPayloadBytes) {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'Payload too large' }));
+        return;
+      }
+      try {
+        const parsed = JSON.parse(body);
+        const rawEvents = Array.isArray(parsed) ? parsed : (parsed.events || [parsed]);
+        const events: any[] = [];
+        
+        // Use the safeParse logic from your event-schema.ts
+        for (const rawEvent of rawEvents) {
+          const result = IncomingEventSchema.safeParse(rawEvent);
+          if (result.success) {
+            events.push(result.data);
+          } else {
+            log.error(AIRServer.SCOPE, '[SCHEMA_FAIL]', result.error, { requestId });
+          }
+        }
+
+        if (!this.allowEventsPerSession(events)) {
+          log.warn(AIRServer.SCOPE, '[RATE_LIMIT] Session event limit hit', { requestId, sessionId: events[0]?.sessionId });
+        }
+
+        for (const ev of events) {
+          this.enqueueEvent(ev);
+        }
+
+        res.writeHead(202, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, queued: events.length }));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON' }));
+      }
+    });
+    return;
+  }
+
+  // --- 4. DEBUGGING ---
+  if (req.method === 'GET' && currentUrl === '/api/debug/events') {
+    const data = this.debugRecentEvents();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(data));
+    return;
+  }
+
+  res.writeHead(404);
+  res.end();
+}
 
   private setCorsHeaders(res: http.ServerResponse, origin?: string) {
     if (origin) {

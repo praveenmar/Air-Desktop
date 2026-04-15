@@ -6,10 +6,11 @@
   "author": "AIR Team",
   "private": true,
   "workspaces": [
+    "core",
     "packages/*"
   ],
   "scripts": {
-    "postinstall": "electron-builder install-app-deps",
+    "postinstall": "echo skipping sqlite rebuild",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "pack": "electron-builder --dir",
@@ -24,7 +25,7 @@
   "dependencies": {
     "@dagrejs/dagre": "^2.0.4",
     "@xyflow/react": "^12.0.0",
-    "better-sqlite3": "11.7.0",
+    "better-sqlite3": "^12.9.0",
     "dagre": "^0.8.5",
     "html-encoding-sniffer": "5.0.0",
     "linkedom": "^0.18.0",

@@ -29,6 +29,16 @@ process.on('message', (msg: any) => {
 
 async function bootstrap() {
   console.log('[AIR-Server] Starting background process...');
+
+  // VALIDATION: Immediate check for SQLite binary compatibility
+  try {
+    require('better-sqlite3');
+    console.log('[AIR-Server] SQLite Binary validated: ABI Compatibility OK.');
+  } catch (e) {
+    console.error('[AIR-Server] FATAL: ABI Mismatch or Binary missing.', e);
+    process.exit(1);
+  }
+  
   console.log(`[AIR-Server] Initializing SQLite at: ${dbPath}`);
 
   try {

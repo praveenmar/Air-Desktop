@@ -63,26 +63,20 @@ async function startBackgroundServer(context: vscode.ExtensionContext, dbPath: s
     throw new Error(`Server module not found: ${serverModule}`);
   }
 
-  // CHANGED: Use 'node' explicitly instead of process.execPath
-  serverProcess = spawn(process.execPath, [serverModule], {
-    env: { 
-      ...process.env, 
-      AIR_DB_PATH: dbPath,
-      // Forces VS Code to act as a standard Node runtime for your server
-      ELECTRON_RUN_AS_NODE: '1' 
-    },
-    stdio: ['ipc', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
+  // Define the environment for the background process
+ serverProcess = spawn(process.execPath, [serverModule], {
+  env: {
+    ...process.env,
+    AIR_DB_PATH: dbPath,
+    ELECTRON_RUN_AS_NODE: '1',
+    //NODE_PATH: path.join(context.extensionPath, '..', '..', 'node_modules')
+    NODE_PATH: path.join(context.extensionPath, 'node_modules')
+  },
+  stdio: ['ipc', 'pipe', 'pipe'],
+  windowsHide: true,
+});
 
   console.log(`[${SCOPE}] Background server spawned using VS Code's Node 22 runtime`);
-
-  // CHANGED: Use 'node' here too
-  serverProcess = spawn('node', [serverModule], {
-    env: { ...process.env, AIR_DB_PATH: dbPath },
-    stdio: ['ipc', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
 
   serverProcess.stdout?.on('data', (data) => {
     const out = data.toString();
