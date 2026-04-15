@@ -9,10 +9,13 @@ let activeBrowser: Browser | null = null;
 let activeContext: BrowserContext | null = null;
 let currentSessionId: string | null = null;
 let extensionContext: vscode.ExtensionContext | null = null;
+let outputChannel: vscode.OutputChannel | null = null;
 
 let serverProcess: ChildProcess | null = null;
 let serverPort: number | null = null;
 let stdoutBuffer = '';
+let stdoutLineBuffer = '';
+let stderrLineBuffer = '';
 
 let serverReadyResolve: ((port: number) => void) | null = null;
 let serverReadyReject: ((error: Error) => void) | null = null;
@@ -21,6 +24,47 @@ let serverReadyPromise: Promise<number> | null = null;
 let isStoppingRecording = false;
 
 const SCOPE = 'Extension';
+
+function toLogString(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function logToOutput(message: string, data?: unknown): void {
+  if (!outputChannel) {
+    return;
+  }
+
+  const timestamp = new Date().toISOString();
+  const suffix = data === undefined ? '' : ` ${toLogString(data)}`;
+  outputChannel.appendLine(`[${timestamp}] ${message}${suffix}`);
+}
+
+function flushServerChunk(stream: 'stdout' | 'stderr', chunk: string): void {
+  const normalized = chunk.replace(/\r\n/g, '\n');
+  const buffer = stream === 'stdout' ? stdoutLineBuffer : stderrLineBuffer;
+  const combined = `${buffer}${normalized}`;
+  const lines = combined.split('\n');
+  const remainder = lines.pop() ?? '';
+
+  for (const line of lines) {
+    if (line.trim().length === 0) continue;
+    logToOutput(`[Server ${stream}] ${line}`);
+  }
+
+  if (stream === 'stdout') {
+    stdoutLineBuffer = remainder;
+  } else {
+    stderrLineBuffer = remainder;
+  }
+}
 
 function createServerReadyPromise(): Promise<number> {
   serverReadyPromise = new Promise<number>((resolve, reject) => {
@@ -77,15 +121,18 @@ async function startBackgroundServer(context: vscode.ExtensionContext, dbPath: s
 });
 
   console.log(`[${SCOPE}] Background server spawned using VS Code's Node 22 runtime`);
+  logToOutput(`[${SCOPE}] Background server spawned`, { runtime: process.execPath, dbPath });
 
   serverProcess.stdout?.on('data', (data) => {
     const out = data.toString();
     stdoutBuffer += out;
+    flushServerChunk('stdout', out);
 
     const match = stdoutBuffer.match(/AIR_SERVER_PORT:(\d+)/);
     if (match && !serverPort) {
       serverPort = parseInt(match[1], 10);
       console.log(`[${SCOPE}] Server started`, { port: serverPort });
+      logToOutput(`[${SCOPE}] Server started`, { port: serverPort });
       serverReadyResolve?.(serverPort);
       serverReadyResolve = null;
       serverReadyReject = null;
@@ -93,11 +140,14 @@ async function startBackgroundServer(context: vscode.ExtensionContext, dbPath: s
   });
 
   serverProcess.stderr?.on('data', (data) => {
-    console.error(`[${SCOPE}] Server stderr: ${data.toString()}`);
+    const err = data.toString();
+    flushServerChunk('stderr', err);
+    console.error(`[${SCOPE}] Server stderr: ${err}`);
   });
 
   serverProcess.on('error', (error) => {
     console.error(`[${SCOPE}] Server spawn failed`, error);
+    logToOutput(`[${SCOPE}] Server spawn failed`, { error: String(error) });
     serverPort = null;
     serverProcess = null;
     serverReadyReject?.(error instanceof Error ? error : new Error(String(error)));
@@ -107,6 +157,7 @@ async function startBackgroundServer(context: vscode.ExtensionContext, dbPath: s
 
   serverProcess.on('exit', (code, signal) => {
     console.warn(`[${SCOPE}] Server exited`, { code, signal });
+    logToOutput(`[${SCOPE}] Server exited`, { code, signal });
     serverPort = null;
     serverProcess = null;
 
@@ -122,25 +173,56 @@ async function startBackgroundServer(context: vscode.ExtensionContext, dbPath: s
 }
 
 function buildConfigScript(sessionId: string, port: number): string {
+  const serverUrl = `http://127.0.0.1:${port}`;
+  const eventEndpoint = `${serverUrl}/api/events`;
   return `
     window.__AIR_CONFIG__ = {
       sessionId: ${JSON.stringify(sessionId)},
-      serverUrl: ${JSON.stringify(`http://127.0.0.1:${port}`)},
+      serverUrl: ${JSON.stringify(serverUrl)},
       version: ${Date.now()}
     };
-    window.__air_gmSend = (url, payload) => {
-      if (typeof window.__air_nodeSend !== 'function') {
-        return Promise.resolve({ ok: false, status: 0, statusText: 'Bridge unavailable' });
+    window.__air_gmSend = async (url, payload) => {
+      const targetUrl = typeof url === 'string' ? url : ${JSON.stringify(eventEndpoint)};
+      const body = typeof payload === 'string' ? payload : JSON.stringify(payload ?? {});
+
+      try {
+        // Browser fetch path keeps /api/events visible in DevTools Network.
+        return await fetch(targetUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          mode: 'cors',
+          keepalive: true
+        });
+      } catch (_) {
+        // Fall through to node bridge fallback.
       }
-      return window.__air_nodeSend(url, payload);
+
+      if (typeof window.__air_nodeSend !== 'function') {
+        return { ok: false, status: 0, statusText: 'Transport unavailable' };
+      }
+
+      return window.__air_nodeSend(targetUrl, body);
     };
     window.__air_gmBeacon = (url, payload) => {
+      const targetUrl = typeof url === 'string' ? url : ${JSON.stringify(eventEndpoint)};
+      const body = typeof payload === 'string' ? payload : JSON.stringify(payload ?? {});
+
       try {
-        if (typeof window.__air_nodeSend === 'function') {
-          window.__air_nodeSend(url, payload).catch(() => {});
+        const blob = new Blob([body], { type: 'application/json' });
+        const sent = navigator.sendBeacon(targetUrl, blob);
+        if (sent) {
           return true;
         }
       } catch (_) {}
+
+      try {
+        if (typeof window.__air_nodeSend === 'function') {
+          window.__air_nodeSend(targetUrl, body).catch(() => {});
+          return true;
+        }
+      } catch (_) {}
+
       return false;
     };
   `;
@@ -241,6 +323,11 @@ async function startRecording() {
       url,
       serverUrl: baseUrl,
     });
+    logToOutput(`[${SCOPE}] Starting recording`, {
+      sessionId: currentSessionId,
+      url,
+      serverUrl: baseUrl,
+    });
 
     activeBrowser = await chromium.launch({ headless: false });
     activeContext = await activeBrowser.newContext({
@@ -314,10 +401,16 @@ async function startRecording() {
       url,
       serverUrl: baseUrl,
     });
+    logToOutput(`[${SCOPE}] Recording started`, {
+      sessionId: currentSessionId,
+      url,
+      serverUrl: baseUrl,
+    });
 
     void vscode.window.showInformationMessage(`AIR Recording: ${currentSessionId}`);
   } catch (error) {
     console.error(`[${SCOPE}] Failed to start recording`, error);
+    logToOutput(`[${SCOPE}] Failed to start recording`, { error: String(error) });
 
     void vscode.window.showErrorMessage(`Failed to start recording: ${String(error)}`);
 
@@ -366,6 +459,7 @@ async function stopRecording() {
     }
 
     console.log(`[${SCOPE}] Recording stopped`, { sessionId: currentSessionId });
+    logToOutput(`[${SCOPE}] Recording stopped`, { sessionId: currentSessionId });
     currentSessionId = null;
     void vscode.window.showInformationMessage('AIR: Recording stopped');
   } catch (error) {
@@ -511,8 +605,49 @@ async function debugEvents() {
   }
 }
 
+async function inspectSession() {
+  try {
+    const baseUrl = await getServerBaseUrl();
+    const listRes = await fetch(`${baseUrl}/api/sessions`);
+    if (!listRes.ok) {
+      throw new Error(`HTTP ${listRes.status}`);
+    }
+
+    const sessions: Array<{ id: string }> = await listRes.json();
+    if (!Array.isArray(sessions) || sessions.length === 0) {
+      void vscode.window.showInformationMessage('AIR: No sessions found');
+      return;
+    }
+
+    const sessionId = await vscode.window.showQuickPick(
+      sessions.map((s) => s.id),
+      { placeHolder: 'Inspect session data' },
+    );
+    if (!sessionId) return;
+
+    const inspectRes = await fetch(`${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/inspect`);
+    if (!inspectRes.ok) {
+      throw new Error(`Inspect failed with HTTP ${inspectRes.status}`);
+    }
+
+    const snapshot = await inspectRes.json();
+    const doc = await vscode.workspace.openTextDocument({
+      language: 'json',
+      content: JSON.stringify(snapshot, null, 2),
+    });
+    await vscode.window.showTextDocument(doc, { preview: false });
+    logToOutput(`[${SCOPE}] Session inspection opened`, { sessionId });
+  } catch (error) {
+    console.error(`[${SCOPE}] Inspect session failed`, error);
+    logToOutput(`[${SCOPE}] Inspect session failed`, { error: String(error) });
+    void vscode.window.showErrorMessage('AIR: Failed to inspect session');
+  }
+}
+
 export async function activate(context: vscode.ExtensionContext) {
   extensionContext = context;
+  outputChannel = vscode.window.createOutputChannel('AIR');
+  context.subscriptions.push(outputChannel);
 
   const envDbPath = process.env.AIR_DB_PATH?.trim();
   const dbPath = envDbPath && envDbPath.length > 0
@@ -522,11 +657,13 @@ export async function activate(context: vscode.ExtensionContext) {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
   console.log(`[${SCOPE}] Extension activated`, { dbPath, dbPathSource });
+  logToOutput(`[${SCOPE}] Extension activated`, { dbPath, dbPathSource });
 
   try {
     await startBackgroundServer(context, dbPath);
   } catch (error) {
     console.error(`[${SCOPE}] Failed to start background server`, error);
+    logToOutput(`[${SCOPE}] Failed to start background server`, { error: String(error) });
     void vscode.window.showErrorMessage('AIR: Failed to start local event server');
   }
 
@@ -537,8 +674,12 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('air.listSessions', listSessions),
     vscode.commands.registerCommand('air.deleteSession', deleteSession),
     vscode.commands.registerCommand('air.debugEvents', debugEvents),
+    vscode.commands.registerCommand('air.inspectSession', inspectSession),
     vscode.commands.registerCommand('air.showLogs', () => {
-        vscode.commands.executeCommand('workbench.action.debug.showConsole');
+      if (!outputChannel) {
+        outputChannel = vscode.window.createOutputChannel('AIR');
+      }
+      outputChannel.show(true);
     }),
   );
 }
@@ -576,12 +717,15 @@ export async function deactivate() {
     }
 
     console.log(`[${SCOPE}] Extension deactivated`);
+    logToOutput(`[${SCOPE}] Extension deactivated`);
   } catch (error) {
     console.error(`[${SCOPE}] Failed during extension deactivation`, error);
+    logToOutput(`[${SCOPE}] Failed during extension deactivation`, { error: String(error) });
   } finally {
     activeBrowser = null;
     activeContext = null;
     currentSessionId = null;
     isStoppingRecording = false;
+    outputChannel = null;
   }
 }

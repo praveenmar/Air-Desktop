@@ -1,6 +1,7 @@
 ﻿// Purpose: A lightweight HTTP server for the interceptor to POST events to.
 
 import * as http from 'http';
+import { ZodError } from 'zod';
 import { GraphBuilder } from '../../core/graph/graph-builder';
 import { AIREventSchema } from '../../core/types';
 
@@ -43,7 +44,7 @@ export class EventServer {
         const address = this.server.address();
         if (address && typeof address !== 'string') {
           this.port = address.port;
-          console.log(`[EventServer] Started`, { port: this.port });
+          console.log('[EventServer] Started', { port: this.port });
           resolve(this.port);
         } else {
           reject(new Error('Failed to bind EventServer port'));
@@ -66,6 +67,57 @@ export class EventServer {
 
   public getPort(): number {
     return this.port;
+  }
+
+  private extractValidationIssues(error: unknown): string[] {
+    if (!(error instanceof ZodError)) {
+      return [];
+    }
+
+    return error.issues.slice(0, 8).map((issue) => {
+      const path = issue.path.length > 0 ? issue.path.join('.') : 'root';
+      return `${path}: ${issue.message}`;
+    });
+  }
+
+  private extractEventId(rawEvent: unknown): string | undefined {
+    if (!rawEvent || typeof rawEvent !== 'object' || !('id' in rawEvent)) return undefined;
+    const idValue = (rawEvent as { id?: unknown }).id;
+    return typeof idValue === 'string' ? idValue : undefined;
+  }
+
+  private extractEventType(rawEvent: unknown): string | undefined {
+    if (!rawEvent || typeof rawEvent !== 'object' || !('type' in rawEvent)) return undefined;
+    const typeValue = (rawEvent as { type?: unknown }).type;
+    return typeof typeValue === 'string' ? typeValue : undefined;
+  }
+
+  private extractSessionId(rawEvent: unknown): string | undefined {
+    if (!rawEvent || typeof rawEvent !== 'object' || !('sessionId' in rawEvent)) return undefined;
+    const sessionValue = (rawEvent as { sessionId?: unknown }).sessionId;
+    return typeof sessionValue === 'string' ? sessionValue : undefined;
+  }
+
+  private logSchemaFail(rawEvent: unknown, error: unknown): void {
+    const issues = this.extractValidationIssues(error);
+    console.error('[EventServer] [SCHEMA_FAIL]', {
+      eventId: this.extractEventId(rawEvent) || 'unknown',
+      type: this.extractEventType(rawEvent) || 'unknown',
+      sessionId: this.extractSessionId(rawEvent) || 'unknown',
+      error: error instanceof Error ? error.message : String(error),
+      issueCount: issues.length,
+      issues,
+    });
+  }
+
+  private logEventDropped(reason: string, rawEvent: unknown, extra: Record<string, unknown> = {}): void {
+    console.warn('[EventServer] [EVENT_DROPPED]', {
+      reason,
+      eventId: this.extractEventId(rawEvent) || 'unknown',
+      type: this.extractEventType(rawEvent) || 'unknown',
+      sessionId: this.extractSessionId(rawEvent) || 'unknown',
+      ...extra,
+    });
   }
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -126,9 +178,10 @@ export class EventServer {
     try {
       parsed = await this.readJsonBody(req);
     } catch (error) {
-      console.warn(`[EventServer] Invalid request payload - ${(error as Error).message}`);
+      const message = (error as Error).message;
+      console.warn(`[EventServer] Invalid request payload - ${message}`);
       res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: false, error: (error as Error).message }));
+      res.end(JSON.stringify({ success: false, error: message }));
       return;
     }
 
@@ -149,32 +202,57 @@ export class EventServer {
     if (isBatch) {
       const events = (parsed as { events: unknown[] }).events;
       const results: Array<{ success: boolean; eventId?: string; error?: string }> = [];
-      let anyInvalid = false;
+      let anyFailed = false;
+      let anyServerFailure = false;
 
       for (const rawEvent of events) {
         const eventId = this.extractEventId(rawEvent);
-        try {
-          const parsedEvent = AIREventSchema.parse(rawEvent);
-          if (parsedEvent.sessionId !== activeSessionId) {
-            console.warn('[EventServer] Session mismatch in batch', {
-              incoming: parsedEvent.sessionId,
-              active: activeSessionId,
-              eventId: parsedEvent.id,
-            });
-            anyInvalid = true;
-            results.push({ success: false, eventId: parsedEvent.id, error: 'Session mismatch' });
-            continue;
-          }
+        const parseResult = AIREventSchema.safeParse(rawEvent);
 
+        if (!parseResult.success) {
+          anyFailed = true;
+          const issues = this.extractValidationIssues(parseResult.error);
+          this.logSchemaFail(rawEvent, parseResult.error);
+          this.logEventDropped('schema_validation_failed', rawEvent, {
+            issueCount: issues.length,
+            issues,
+          });
+          results.push({
+            success: false,
+            eventId,
+            error: issues.length > 0 ? issues.join(' | ') : parseResult.error.message,
+          });
+          continue;
+        }
+
+        const parsedEvent = parseResult.data;
+        if (parsedEvent.sessionId !== activeSessionId) {
+          anyFailed = true;
+          console.warn('[EventServer] Session mismatch in batch', {
+            incoming: parsedEvent.sessionId,
+            active: activeSessionId,
+            eventId: parsedEvent.id,
+          });
+          this.logEventDropped('session_mismatch', rawEvent, {
+            incomingSessionId: parsedEvent.sessionId,
+            activeSessionId,
+          });
+          results.push({ success: false, eventId: parsedEvent.id, error: 'Session mismatch' });
+          continue;
+        }
+
+        try {
           console.log('[EventServer] [EVENT_RECEIVED]', { eventId: parsedEvent.id, type: parsedEvent.type });
           const result = await this.graphBuilder.processEvent(parsedEvent);
           if (!result.success) {
-            anyInvalid = true;
-            results.push({ success: false, eventId: parsedEvent.id, error: result.error || 'Event processing failed' });
+            anyServerFailure = true;
+            const graphError = result.error || 'Event processing failed';
             console.warn('[EventServer] [GRAPH_PROCESS_FAIL]', {
               eventId: parsedEvent.id,
-              error: result.error || 'Event processing failed',
+              error: graphError,
             });
+            this.logEventDropped('graph_processing_failed', rawEvent, { error: graphError });
+            results.push({ success: false, eventId: parsedEvent.id, error: graphError });
             continue;
           }
 
@@ -183,33 +261,52 @@ export class EventServer {
           console.log('[EventServer] [PIPELINE_OK]', { eventId: parsedEvent.id, type: parsedEvent.type });
           results.push({ success: true, eventId: parsedEvent.id });
         } catch (error) {
-          anyInvalid = true;
-          console.error('[EventServer] [SCHEMA_FAIL]', { eventId: eventId || 'unknown', error: (error as Error).message });
-          results.push({ success: false, eventId, error: (error as Error).message });
+          anyServerFailure = true;
+          const message = error instanceof Error ? error.message : String(error);
+          console.error('[EventServer] [INTERNAL_FAIL]', {
+            eventId: parsedEvent.id,
+            type: parsedEvent.type,
+            error: message,
+          });
+          this.logEventDropped('internal_processing_error', rawEvent, { error: message });
+          results.push({ success: false, eventId: parsedEvent.id, error: message });
         }
       }
 
-      res.writeHead(anyInvalid ? 207 : 202, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: !anyInvalid, queued: events.length, results }));
+      const status = anyServerFailure ? 500 : anyFailed ? 400 : 200;
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: status === 200, queued: events.length, results }));
       return;
     }
 
-    const eventId = this.extractEventId(parsed);
-    let parsedEvent;
-    try {
-      parsedEvent = AIREventSchema.parse(parsed);
-    } catch (error) {
-      console.error('[EventServer] [SCHEMA_FAIL]', { eventId: eventId || 'unknown', error: (error as Error).message });
+    const parseResult = AIREventSchema.safeParse(parsed);
+    if (!parseResult.success) {
+      const issues = this.extractValidationIssues(parseResult.error);
+      this.logSchemaFail(parsed, parseResult.error);
+      this.logEventDropped('schema_validation_failed', parsed, {
+        issueCount: issues.length,
+        issues,
+      });
+
       res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: false, error: (error as Error).message }));
+      res.end(JSON.stringify({
+        success: false,
+        error: issues.length > 0 ? issues.join(' | ') : parseResult.error.message,
+        issues,
+      }));
       return;
     }
 
+    const parsedEvent = parseResult.data;
     if (parsedEvent.sessionId !== activeSessionId) {
       console.warn('[EventServer] Session mismatch', {
         incoming: parsedEvent.sessionId,
         active: activeSessionId,
         eventId: parsedEvent.id,
+      });
+      this.logEventDropped('session_mismatch', parsed, {
+        incomingSessionId: parsedEvent.sessionId,
+        activeSessionId,
       });
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, error: 'Session mismatch' }));
@@ -217,23 +314,38 @@ export class EventServer {
     }
 
     console.log('[EventServer] [EVENT_RECEIVED]', { eventId: parsedEvent.id, type: parsedEvent.type });
-    const result = await this.graphBuilder.processEvent(parsedEvent);
-    if (!result.success) {
-      console.warn('[EventServer] [GRAPH_PROCESS_FAIL]', {
+
+    try {
+      const result = await this.graphBuilder.processEvent(parsedEvent);
+      if (!result.success) {
+        const graphError = result.error || 'Event processing failed';
+        console.warn('[EventServer] [GRAPH_PROCESS_FAIL]', {
+          eventId: parsedEvent.id,
+          error: graphError,
+        });
+        this.logEventDropped('graph_processing_failed', parsed, { error: graphError });
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: graphError }));
+        return;
+      }
+
+      console.log('[EventServer] [EVENT_STORED]', { eventId: parsedEvent.id, type: parsedEvent.type });
+      console.log('[EventServer] [GRAPH_PROCESSED]', { eventId: parsedEvent.id, stage: result.stage || 'ok' });
+      console.log('[EventServer] [PIPELINE_OK]', { eventId: parsedEvent.id, type: parsedEvent.type });
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, queued: 1, result }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[EventServer] [INTERNAL_FAIL]', {
         eventId: parsedEvent.id,
-        error: result.error || 'Event processing failed',
+        type: parsedEvent.type,
+        error: message,
       });
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: false, error: result.error || 'Event processing failed' }));
-      return;
+      this.logEventDropped('internal_processing_error', parsed, { error: message });
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'Internal event processing failure' }));
     }
-
-    console.log('[EventServer] [EVENT_STORED]', { eventId: parsedEvent.id, type: parsedEvent.type });
-    console.log('[EventServer] [GRAPH_PROCESSED]', { eventId: parsedEvent.id, stage: result.stage || 'ok' });
-    console.log('[EventServer] [PIPELINE_OK]', { eventId: parsedEvent.id, type: parsedEvent.type });
-
-    res.writeHead(202, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ success: true, queued: 1, result }));
   }
 
   private setCorsHeaders(req: http.IncomingMessage, res: http.ServerResponse): void {
@@ -251,12 +363,6 @@ export class EventServer {
 
     res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS, DELETE');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  }
-
-  private extractEventId(rawEvent: unknown): string | undefined {
-    if (!rawEvent || typeof rawEvent !== 'object' || !('id' in rawEvent)) return undefined;
-    const idValue = (rawEvent as { id?: unknown }).id;
-    return typeof idValue === 'string' ? idValue : undefined;
   }
 
   private readJsonBody(req: http.IncomingMessage): Promise<unknown> {

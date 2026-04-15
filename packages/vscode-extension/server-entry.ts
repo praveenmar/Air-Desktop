@@ -29,6 +29,7 @@ let dbService: DatabaseService | null = null;
 let graphBuilder: GraphBuilder | null = null;
 let eventServer: EventServer | null = null;
 let sessionRepo: SessionRepository | null = null;
+let debugLogger: DebugLogger | null = null;
 
 process.on('uncaughtException', (error) => {
   console.error('[AIR-Server] Uncaught exception', error);
@@ -54,8 +55,28 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-function matchSessionRoute(currentUrl: string): { sessionId: string; action?: string } | null {
-  const match = currentUrl.match(/\/api\/sessions\/([^/]+)(?:\/([^/]+))?$/);
+function parseRequestUrl(req: http.IncomingMessage): URL {
+  return new URL(req.url || '/', 'http://127.0.0.1');
+}
+
+function parseLimit(rawValue: string | null, fallback: number, max: number): number {
+  if (!rawValue) return fallback;
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(1, Math.min(Math.floor(parsed), max));
+}
+
+function parseJsonText(raw: string | null): unknown {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function matchSessionRoute(pathname: string): { sessionId: string; action?: string } | null {
+  const match = pathname.match(/\/api\/sessions\/([^/]+)(?:\/([^/]+))?$/);
   if (!match) return null;
   return { sessionId: decodeURIComponent(match[1]), action: match[2] };
 }
@@ -204,27 +225,244 @@ async function debugRecentEvents(limit = 5): Promise<Array<{ id: string; type: s
   }));
 }
 
-async function handleExtensionRoutes(req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
-  const currentUrl = req.url || '';
+async function debugRecentLogs(limit = 100): Promise<unknown[]> {
+  if (!debugLogger) {
+    return [];
+  }
+  return debugLogger.getRecent(limit);
+}
 
-  if (req.method === 'GET' && currentUrl === '/api/sessions') {
+async function inspectSession(sessionId: string): Promise<Record<string, unknown>> {
+  if (!dbService) {
+    throw new Error('Database service not initialized');
+  }
+
+  const db = dbService.getInstance();
+
+  const sessionRow = await db.prepare(`
+    SELECT id, started_at, last_event_at, last_node_id, event_count, status, metadata
+    FROM sessions
+    WHERE id = ?
+    LIMIT 1
+  `).get<{
+    id: string;
+    started_at: number;
+    last_event_at: number | null;
+    last_node_id: string | null;
+    event_count: number;
+    status: string;
+    metadata: string | null;
+  }>(sessionId);
+
+  if (!sessionRow) {
+    throw new Error('Session not found');
+  }
+
+  const eventCountRow = await db.prepare('SELECT COUNT(*) AS count FROM events WHERE session_id = ?').get<{ count: number }>(sessionId);
+  const edgeCountRow = await db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM edges
+    WHERE trigger_event_id IN (
+      SELECT id FROM events WHERE session_id = ?
+    )
+  `).get<{ count: number }>(sessionId);
+  const outcomeCountRow = await db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM outcomes
+    WHERE edge_id IN (
+      SELECT e.id FROM edges e
+      JOIN events ev ON ev.id = e.trigger_event_id
+      WHERE ev.session_id = ?
+    )
+  `).get<{ count: number }>(sessionId);
+  const pendingCountRow = await db.prepare('SELECT COUNT(*) AS count FROM pending_actions WHERE session_id = ?').get<{ count: number }>(sessionId);
+  const nodeCountRow = await db.prepare(`
+    SELECT COUNT(*) AS count FROM nodes
+    WHERE id IN (
+      SELECT node_id FROM events WHERE session_id = ? AND node_id IS NOT NULL
+      UNION
+      SELECT from_node_id FROM edges e
+      JOIN events ev ON ev.id = e.trigger_event_id
+      WHERE ev.session_id = ? AND from_node_id IS NOT NULL
+      UNION
+      SELECT to_node_id FROM edges e
+      JOIN events ev ON ev.id = e.trigger_event_id
+      WHERE ev.session_id = ? AND to_node_id IS NOT NULL
+    )
+  `).get<{ count: number }>(sessionId, sessionId, sessionId);
+
+  const recentEvents = await db.prepare(`
+    SELECT id, type, timestamp, trace_id, node_id, page_url, payload, intent, intent_raw
+    FROM events
+    WHERE session_id = ?
+    ORDER BY timestamp DESC
+    LIMIT 250
+  `).all<{
+    id: string;
+    type: string;
+    timestamp: number;
+    trace_id: string | null;
+    node_id: string | null;
+    page_url: string | null;
+    payload: string;
+    intent: string | null;
+    intent_raw: string | null;
+  }>(sessionId);
+
+  const nodes = await db.prepare(`
+    SELECT DISTINCT n.id, n.page_url, n.normalized_url, n.page_title, n.state_source,
+                    n.control_signature, n.canonical_hash, n.created_at,
+                    n.last_observed_at, n.observation_count
+    FROM nodes n
+    WHERE n.id IN (
+      SELECT node_id FROM events WHERE session_id = ? AND node_id IS NOT NULL
+      UNION
+      SELECT from_node_id FROM edges e
+      JOIN events ev ON ev.id = e.trigger_event_id
+      WHERE ev.session_id = ? AND from_node_id IS NOT NULL
+      UNION
+      SELECT to_node_id FROM edges e
+      JOIN events ev ON ev.id = e.trigger_event_id
+      WHERE ev.session_id = ? AND to_node_id IS NOT NULL
+    )
+    ORDER BY n.last_observed_at DESC
+    LIMIT 250
+  `).all(sessionId, sessionId, sessionId);
+
+  const edges = await db.prepare(`
+    SELECT e.id, e.from_node_id, e.to_node_id, e.trigger_event_id,
+           e.fingerprint_hash, e.seek_strategy, e.sample_size,
+           e.last_updated, e.outcome_type
+    FROM edges e
+    JOIN events ev ON ev.id = e.trigger_event_id
+    WHERE ev.session_id = ?
+    ORDER BY e.last_updated DESC
+    LIMIT 250
+  `).all(sessionId);
+
+  const outcomes = await db.prepare(`
+    SELECT o.id, o.edge_id, o.target_node_id, o.probability, o.decayed_count, o.last_observed
+    FROM outcomes o
+    JOIN edges e ON e.id = o.edge_id
+    JOIN events ev ON ev.id = e.trigger_event_id
+    WHERE ev.session_id = ?
+    ORDER BY o.last_observed DESC
+    LIMIT 250
+  `).all(sessionId);
+
+  const pendingActions = await db.prepare(`
+    SELECT trace_id, session_id, from_node_id, trigger_event_id,
+           action_type, fingerprint_hash, created_at, resolved_at, status
+    FROM pending_actions
+    WHERE session_id = ?
+    ORDER BY created_at DESC
+    LIMIT 250
+  `).all(sessionId);
+
+  const recentLogs = await db.prepare(`
+    SELECT id, timestamp, component, level, message, data, session_id, trace_id
+    FROM debug_logs
+    ORDER BY timestamp DESC
+    LIMIT 300
+  `).all<{
+    id: string;
+    timestamp: number;
+    component: string;
+    level: string;
+    message: string;
+    data: string | null;
+    session_id: string | null;
+    trace_id: string | null;
+  }>();
+
+  return {
+    session: {
+      id: sessionRow.id,
+      startedAt: sessionRow.started_at,
+      lastEventAt: sessionRow.last_event_at,
+      lastNodeId: sessionRow.last_node_id,
+      eventCount: sessionRow.event_count,
+      status: sessionRow.status,
+      metadata: parseJsonText(sessionRow.metadata),
+    },
+    counts: {
+      events: eventCountRow?.count ?? 0,
+      nodes: nodeCountRow?.count ?? 0,
+      edges: edgeCountRow?.count ?? 0,
+      outcomes: outcomeCountRow?.count ?? 0,
+      pendingActions: pendingCountRow?.count ?? 0,
+      debugLogs: recentLogs.length,
+    },
+    recentEvents: recentEvents.map((row) => ({
+      id: row.id,
+      type: row.type,
+      timestamp: row.timestamp,
+      traceId: row.trace_id,
+      nodeId: row.node_id,
+      pageUrl: row.page_url,
+      intent: row.intent,
+      intentRaw: row.intent_raw,
+      payload: parseJsonText(row.payload),
+    })),
+    nodes,
+    edges,
+    outcomes,
+    pendingActions,
+    recentLogs: recentLogs.map((row) => ({
+      id: row.id,
+      timestamp: row.timestamp,
+      component: row.component,
+      level: row.level,
+      message: row.message,
+      data: parseJsonText(row.data),
+      sessionId: row.session_id,
+      traceId: row.trace_id,
+    })),
+  };
+}
+
+async function handleExtensionRoutes(req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
+  const requestUrl = parseRequestUrl(req);
+  const pathname = requestUrl.pathname;
+
+  if (req.method === 'GET' && pathname === '/api/sessions') {
     const sessions = await listSessions();
     json(res, 200, sessions);
     return true;
   }
 
-  if (req.method === 'GET' && currentUrl === '/api/debug/events') {
-    const data = await debugRecentEvents(5);
+  if (req.method === 'GET' && pathname === '/api/debug/events') {
+    const limit = parseLimit(requestUrl.searchParams.get('limit'), 5, 200);
+    const data = await debugRecentEvents(limit);
     json(res, 200, data);
     return true;
   }
 
-  const sessionRoute = matchSessionRoute(currentUrl);
+  if (req.method === 'GET' && pathname === '/api/debug/logs') {
+    const limit = parseLimit(requestUrl.searchParams.get('limit'), 100, 500);
+    const logs = await debugRecentLogs(limit);
+    json(res, 200, logs);
+    return true;
+  }
+
+  const sessionRoute = matchSessionRoute(pathname);
   if (!sessionRoute) {
     return false;
   }
 
   const { sessionId, action } = sessionRoute;
+
+  if (req.method === 'GET' && action === 'inspect') {
+    try {
+      const snapshot = await inspectSession(sessionId);
+      json(res, 200, snapshot);
+    } catch (error) {
+      const message = (error as Error).message || 'Inspect failed';
+      const status = message === 'Session not found' ? 404 : 500;
+      json(res, status, { success: false, error: message });
+    }
+    return true;
+  }
 
   if (req.method === 'POST' && action === 'end') {
     await markSessionEnded(sessionId);
@@ -242,7 +480,7 @@ async function handleExtensionRoutes(req: http.IncomingMessage, res: http.Server
     let body: any;
     try {
       body = await readJsonBody(req);
-    } catch (error) {
+    } catch {
       json(res, 400, { success: false, error: 'Invalid JSON body' });
       return true;
     }
@@ -300,7 +538,7 @@ async function bootstrap() {
     sessionRepo = new SessionRepository(db);
     const outcomeRepo = new OutcomeRepository(db);
     const pendingRepo = new PendingActionRepository(db);
-    const logger = new DebugLogger(db);
+    debugLogger = new DebugLogger(db);
 
     graphBuilder = new GraphBuilder(
       db,
@@ -311,7 +549,7 @@ async function bootstrap() {
       outcomeRepo,
       pendingRepo,
       StateEngine,
-      logger
+      debugLogger
     );
 
     graphBuilder.startCleanupService();

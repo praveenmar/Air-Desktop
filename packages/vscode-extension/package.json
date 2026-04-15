@@ -25,6 +25,31 @@
         "command": "air.listSessions",
         "title": "AIR: List Sessions",
         "category": "AIR"
+      },
+      {
+        "command": "air.exportSession",
+        "title": "AIR: Export Session",
+        "category": "AIR"
+      },
+      {
+        "command": "air.deleteSession",
+        "title": "AIR: Delete Session",
+        "category": "AIR"
+      },
+      {
+        "command": "air.debugEvents",
+        "title": "AIR: Debug Recent Events",
+        "category": "AIR"
+      },
+      {
+        "command": "air.inspectSession",
+        "title": "AIR: Inspect Session",
+        "category": "AIR"
+      },
+      {
+        "command": "air.showLogs",
+        "title": "AIR: Show Logs",
+        "category": "AIR"
       }
     ]
   },
