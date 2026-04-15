@@ -2,7 +2,7 @@ const esbuild = require('esbuild');
 const fs = require('fs');
 const path = require('path');
 
-const externalDeps = ['vscode', 'better-sqlite3', 'playwright'];
+const externalDeps = ['vscode', 'playwright'];
 
 async function build() {
   try {

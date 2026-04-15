@@ -5,8 +5,8 @@
 //      Without this, session.eventCount, session.startedAt, session.lastNodeId etc. all returned
 //      undefined, including the new-session detection log in SessionManager.
 
-import { Database } from 'better-sqlite3';
 import { Session } from '../../types';
+import { AsyncSQLiteDatabase } from '../sqlite-adapter';
 
 // Translates every snake_case SQLite column to its camelCase TypeScript equivalent.
 function mapSessionRow(row: any): Session | null {
@@ -24,19 +24,19 @@ function mapSessionRow(row: any): Session | null {
 }
 
 export class SessionRepository {
-  constructor(private db: Database) {}
+  constructor(private db: AsyncSQLiteDatabase) {}
 
-  public findById(sessionId: string): Session | null {
+  public async findById(sessionId: string): Promise<Session | null> {
     if (!sessionId) return null;
     const stmt = this.db.prepare('SELECT * FROM sessions WHERE id = ?');
-    return mapSessionRow(stmt.get(sessionId));
+    return mapSessionRow(await stmt.get(sessionId));
   }
 
-  public getOrCreate(sessionId: string): Session | null {
+  public async getOrCreate(sessionId: string): Promise<Session | null> {
     if (!sessionId) return null;
 
     const stmt = this.db.prepare('SELECT * FROM sessions WHERE id = ?');
-    const existing = mapSessionRow(stmt.get(sessionId));
+    const existing = mapSessionRow(await stmt.get(sessionId));
 
     if (existing) return existing;
 
@@ -46,27 +46,36 @@ export class SessionRepository {
     `);
 
     const now = Date.now();
-    insertStmt.run(sessionId, now, now);
+    await insertStmt.run(sessionId, now, now);
 
     // Re-fetch through the mapper so the returned object is correctly shaped
-    return mapSessionRow(stmt.get(sessionId));
+    return mapSessionRow(await stmt.get(sessionId));
   }
 
-  public updatePointer(sessionId: string, nodeId: string): void {
+  public async updatePointer(sessionId: string, nodeId: string): Promise<void> {
     const stmt = this.db.prepare(`
       UPDATE sessions SET last_node_id = ?, last_event_at = ?, event_count = event_count + 1 WHERE id = ?
     `);
-    stmt.run(nodeId, Date.now(), sessionId);
+    await stmt.run(nodeId, Date.now(), sessionId);
   }
 
-  public getLastNode(sessionId: string): string | null {
+  public async getLastNode(sessionId: string): Promise<string | null> {
     const stmt = this.db.prepare('SELECT last_node_id FROM sessions WHERE id = ?');
-    const result = stmt.get(sessionId) as { last_node_id: string } | undefined;
+    const result = await stmt.get(sessionId) as { last_node_id: string } | undefined;
     return result?.last_node_id || null;
   }
 
-  public getAll(limit: number = 20): Session[] {
+  public async getAll(limit: number = 20): Promise<Session[]> {
     const stmt = this.db.prepare('SELECT * FROM sessions ORDER BY last_event_at DESC LIMIT ?');
-    return (stmt.all(limit) as any[]).map(mapSessionRow) as Session[];
+    return ((await stmt.all(limit)) as any[]).map(mapSessionRow) as Session[];
+  }
+
+  public async markEnded(sessionId: string): Promise<void> {
+    const stmt = this.db.prepare(`
+      UPDATE sessions
+      SET status = 'ended', last_event_at = ?
+      WHERE id = ?
+    `);
+    await stmt.run(Date.now(), sessionId);
   }
 }

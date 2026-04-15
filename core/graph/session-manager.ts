@@ -12,29 +12,29 @@ export class SessionManager {
     private logger: DebugLogger
   ) {}
 
-  public getOrCreateSession(sessionId: string | null | undefined): Session | null {
+  public async getOrCreateSession(sessionId: string | null | undefined): Promise<Session | null> {
     if (!sessionId) return null;
 
-    const existing = this.sessionRepo.findById(sessionId);
+    const existing = await this.sessionRepo.findById(sessionId);
     if (existing) {
-      this.logger.log('SessionManager', 'debug', 'Session already active - reusing existing session pointer', { sessionId });
+      await this.logger.log('SessionManager', 'debug', 'Session already active - reusing existing session pointer', { sessionId });
       return existing;
     }
 
-    const created = this.sessionRepo.getOrCreate(sessionId);
+    const created = await this.sessionRepo.getOrCreate(sessionId);
     if (created) {
-      this.logger.log('SessionManager', 'info', 'Session created (first event observed for this recording flow)', { sessionId });
+      await this.logger.log('SessionManager', 'info', 'Session created (first event observed for this recording flow)', { sessionId });
     }
 
     return created;
   }
 
-  public updatePointer(sessionId: string | null | undefined, nodeId: string): void {
+  public async updatePointer(sessionId: string | null | undefined, nodeId: string): Promise<void> {
     if (!sessionId) return;
-    this.sessionRepo.updatePointer(sessionId, nodeId);
+    await this.sessionRepo.updatePointer(sessionId, nodeId);
   }
 
-  public getLastNode(sessionId: string | null | undefined): string | null {
+  public async getLastNode(sessionId: string | null | undefined): Promise<string | null> {
     if (!sessionId) return null;
     return this.sessionRepo.getLastNode(sessionId);
   }

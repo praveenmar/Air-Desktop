@@ -5,8 +5,8 @@
 //      Without this, every field access on a returned GraphNode (e.g. node.canonicalHash,
 //      node.pageUrl, node.lastObservedAt) silently returned undefined at runtime.
 
-import { Database } from 'better-sqlite3';
 import { GraphNode } from '../../types';
+import { AsyncSQLiteDatabase } from '../sqlite-adapter';
 
 export interface NodeUpdate {
   lastObservedAt?: number;
@@ -46,34 +46,34 @@ function mapNodeRow(row: any): GraphNode | null {
 }
 
 export class NodeRepository {
-  constructor(private db: Database) {}
+  constructor(private db: AsyncSQLiteDatabase) {}
 
-  public findById(id: string): GraphNode | null {
+  public async findById(id: string): Promise<GraphNode | null> {
     const stmt = this.db.prepare('SELECT * FROM nodes WHERE id = ?');
-    return mapNodeRow(stmt.get(id));
+    return mapNodeRow(await stmt.get(id));
   }
 
-  public findByHash(projectId: string, canonicalHash: string): GraphNode | null {
+  public async findByHash(projectId: string, canonicalHash: string): Promise<GraphNode | null> {
     const stmt = this.db.prepare('SELECT * FROM nodes WHERE project_id = ? AND canonical_hash = ?');
-    return mapNodeRow(stmt.get(projectId, canonicalHash));
+    return mapNodeRow(await stmt.get(projectId, canonicalHash));
   }
 
-  public findByControlSigAndUrl(controlSignature: string, normalizedUrl: string): GraphNode | null {
+  public async findByControlSigAndUrl(controlSignature: string, normalizedUrl: string): Promise<GraphNode | null> {
     const stmt = this.db.prepare(`
       SELECT * FROM nodes
       WHERE control_signature = ? AND normalized_url = ?
       LIMIT 1
     `);
-    return mapNodeRow(stmt.get(controlSignature, normalizedUrl));
+    return mapNodeRow(await stmt.get(controlSignature, normalizedUrl));
   }
 
-  public getAll(limit: number = 100): GraphNode[] {
+  public async getAll(limit: number = 100): Promise<GraphNode[]> {
     const stmt = this.db.prepare('SELECT * FROM nodes ORDER BY last_observed_at DESC LIMIT ?');
-    return (stmt.all(limit) as any[]).map(mapNodeRow) as GraphNode[];
+    return ((await stmt.all(limit)) as any[]).map(mapNodeRow) as GraphNode[];
   }
 
-  public upsert(node: Partial<GraphNode> & { id: string, canonicalHash: string, projectId: string }): string {
-    const existing = this.findByHash(node.projectId, node.canonicalHash);
+  public async upsert(node: Partial<GraphNode> & { id: string, canonicalHash: string, projectId: string }): Promise<string> {
+    const existing = await this.findByHash(node.projectId, node.canonicalHash);
 
     if (existing) {
       const updates: NodeUpdate = {};
@@ -90,7 +90,7 @@ export class NodeRepository {
       if (node.viewportWidth !== undefined) updates.viewportWidth = node.viewportWidth;
       if (node.viewportHeight !== undefined) updates.viewportHeight = node.viewportHeight;
 
-      this.updateObservation(existing.id, updates);
+      await this.updateObservation(existing.id, updates);
       return existing.id;
     }
 
@@ -102,7 +102,7 @@ export class NodeRepository {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    stmt.run(
+    await stmt.run(
       node.id,
       node.projectId,
       node.canonicalHash,
@@ -124,7 +124,7 @@ export class NodeRepository {
     return node.id;
   }
 
-  public updateObservation(id: string, updates: NodeUpdate): void {
+  public async updateObservation(id: string, updates: NodeUpdate): Promise<void> {
     const setClauses: string[] = [];
     const params: any[] = [];
 
@@ -170,6 +170,6 @@ export class NodeRepository {
 
     params.push(id);
     const sql = `UPDATE nodes SET ${setClauses.join(', ')} WHERE id = ?`;
-    this.db.prepare(sql).run(...params);
+    await this.db.prepare(sql).run(...params);
   }
 }

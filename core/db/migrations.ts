@@ -1,6 +1,6 @@
 // Purpose: Schema definition and migration tracking.
 
-import { Database } from 'better-sqlite3';
+import { AsyncSQLiteDatabase } from './sqlite-adapter';
 
 const TABLES: string[] = [
   `CREATE TABLE IF NOT EXISTS schema_version (
@@ -183,61 +183,62 @@ const MIGRATIONS: Array<{ cmd: string; name: string }> = [
   },
 ];
 
-export function runMigrations(db: Database): void {
-  TABLES.forEach((sql) => {
+export async function runMigrations(db: AsyncSQLiteDatabase): Promise<void> {
+  for (const sql of TABLES) {
     try {
-      db.exec(sql);
+      await db.exec(sql);
     } catch (error) {
       console.error('Error executing base SQL:', (error as Error).message);
     }
-  });
+  }
 
   const appliedMigrations = new Set<string>();
 
   try {
-    const rows = db
+    const rows = await db
       .prepare('SELECT description FROM schema_version WHERE description IS NOT NULL')
-      .all() as Array<{ description: string }>;
+      .all<{ description: string }>();
 
-    rows.forEach((row) => {
+    for (const row of rows) {
       if (row.description) appliedMigrations.add(row.description);
-    });
+    }
   } catch (error) {
     console.error('Error reading migration history:', (error as Error).message);
   }
 
-  const markMigrationApplied = (name: string): void => {
-    db.prepare('INSERT INTO schema_version (applied_at, description) VALUES (?, ?)')
+  const markMigrationApplied = async (name: string): Promise<void> => {
+    await db.prepare('INSERT INTO schema_version (applied_at, description) VALUES (?, ?)')
       .run(Date.now(), name);
     appliedMigrations.add(name);
   };
 
-  MIGRATIONS.forEach((migration) => {
-    if (appliedMigrations.has(migration.name)) return;
+  for (const migration of MIGRATIONS) {
+    if (appliedMigrations.has(migration.name)) continue;
     if (migration.name === 'enforce_session_id_not_null') {
-      const columns = db.prepare("PRAGMA table_info(events)").all() as Array<{
+      const columns = await db.prepare('PRAGMA table_info(events)').all<{
         name: string;
         notnull: number;
-      }>;
+      }>();
       const sessionColumn = columns.find(col => col.name === 'session_id');
       if (sessionColumn?.notnull === 1) {
-        markMigrationApplied(migration.name);
-        return;
+        await markMigrationApplied(migration.name);
+        continue;
       }
     }
 
     try {
-      db.exec(migration.cmd);
+      await db.exec(migration.cmd);
       console.log(`Applied migration: ${migration.name}`);
-      markMigrationApplied(migration.name);
+      await markMigrationApplied(migration.name);
     } catch (error) {
       const message = (error as Error).message || '';
       const lowered = message.toLowerCase();
       if (lowered.includes('duplicate column name') || lowered.includes('already exists')) {
-        markMigrationApplied(migration.name);
-        return;
+        await markMigrationApplied(migration.name);
+        continue;
       }
       console.error(`Migration ${migration.name} failed:`, message);
+      throw error;
     }
-  });
+  }
 }

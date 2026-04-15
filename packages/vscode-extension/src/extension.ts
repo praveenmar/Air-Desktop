@@ -128,6 +128,21 @@ function buildConfigScript(sessionId: string, port: number): string {
       serverUrl: ${JSON.stringify(`http://127.0.0.1:${port}`)},
       version: ${Date.now()}
     };
+    window.__air_gmSend = (url, payload) => {
+      if (typeof window.__air_nodeSend !== 'function') {
+        return Promise.resolve({ ok: false, status: 0, statusText: 'Bridge unavailable' });
+      }
+      return window.__air_nodeSend(url, payload);
+    };
+    window.__air_gmBeacon = (url, payload) => {
+      try {
+        if (typeof window.__air_nodeSend === 'function') {
+          window.__air_nodeSend(url, payload).catch(() => {});
+          return true;
+        }
+      } catch (_) {}
+      return false;
+    };
   `;
 }
 
@@ -206,7 +221,7 @@ async function startRecording() {
   try {
     const baseUrl = await getServerBaseUrl();
 
-    currentSessionId = randomUUID();
+    currentSessionId = `session-${randomUUID()}`;
 
     const configScript = buildConfigScript(
       currentSessionId,
@@ -231,6 +246,47 @@ async function startRecording() {
     activeContext = await activeBrowser.newContext({
     bypassCSP: true
     });
+
+    const eventEndpoint = `http://127.0.0.1:${Number(baseUrl.split(':').pop())}/api/events`;
+    await activeContext.exposeBinding(
+      '__air_nodeSend',
+      async (_source, targetUrl: unknown, payload: unknown) => {
+        if (targetUrl !== eventEndpoint) {
+          return { ok: false, status: 400, statusText: 'Blocked URL' };
+        }
+        if (typeof payload !== 'string') {
+          return { ok: false, status: 400, statusText: 'Invalid payload' };
+        }
+
+        try {
+          const response = await fetch(eventEndpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: payload,
+          });
+
+          let body: unknown = null;
+          try {
+            body = await response.json();
+          } catch {
+            // Non-JSON response is allowed for the bridge contract.
+          }
+
+          return {
+            ok: response.ok,
+            status: response.status,
+            statusText: response.statusText,
+            body,
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            status: 0,
+            statusText: (error as Error).message || 'Network error',
+          };
+        }
+      },
+    );
 
     await activeContext.addInitScript({ content: configScript });
     await activeContext.addInitScript({ path: interceptorPath });
@@ -458,10 +514,14 @@ async function debugEvents() {
 export async function activate(context: vscode.ExtensionContext) {
   extensionContext = context;
 
-  const dbPath = path.join(context.globalStorageUri.fsPath, 'air-data.db');
+  const envDbPath = process.env.AIR_DB_PATH?.trim();
+  const dbPath = envDbPath && envDbPath.length > 0
+    ? path.resolve(envDbPath)
+    : path.join(context.globalStorageUri.fsPath, 'air-data.db');
+  const dbPathSource = envDbPath && envDbPath.length > 0 ? 'AIR_DB_PATH' : 'globalStorage';
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
-  console.log(`[${SCOPE}] Extension activated`, { dbPath });
+  console.log(`[${SCOPE}] Extension activated`, { dbPath, dbPathSource });
 
   try {
     await startBackgroundServer(context, dbPath);

@@ -2,13 +2,13 @@
 // Prototype Origin: graph-builder.js (processEvent database inserts)
 // Changes: Extracted into typed methods.
 
-import { Database } from 'better-sqlite3';
 import { AIREvent } from '../../types';
+import { AsyncSQLiteDatabase } from '../sqlite-adapter';
 
 export class EventRepository {
-  constructor(private db: Database) {}
+  constructor(private db: AsyncSQLiteDatabase) {}
 
-  public insert(event: AIREvent, intent: string, intentRaw: string | null): void {
+  public async insert(event: AIREvent, intent: string, intentRaw: string | null): Promise<void> {
     const payloadStr = JSON.stringify(event);
 
     const stmt = this.db.prepare(`
@@ -17,7 +17,7 @@ export class EventRepository {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
     `);
 
-    stmt.run(
+    await stmt.run(
       event.id,
       event.type,
       event.timestamp,
@@ -30,23 +30,23 @@ export class EventRepository {
     );
   }
 
-  public findById(id: string): any | null {
+  public async findById(id: string): Promise<any | null> {
     const stmt = this.db.prepare('SELECT * FROM events WHERE id = ?');
-    return stmt.get(id) || null;
+    return (await stmt.get(id)) || null;
   }
 
-  public findBySession(sessionId: string): any[] {
+  public async findBySession(sessionId: string): Promise<any[]> {
     const stmt = this.db.prepare('SELECT * FROM events WHERE session_id = ? ORDER BY timestamp');
-    return stmt.all(sessionId) as any[];
+    return await stmt.all(sessionId) as any[];
   }
 
-  public getRecent(limit: number = 100): any[] {
+  public async getRecent(limit: number = 100): Promise<any[]> {
     const stmt = this.db.prepare('SELECT * FROM events ORDER BY timestamp DESC LIMIT ?');
-    return stmt.all(limit) as any[];
+    return await stmt.all(limit) as any[];
   }
 
-  public updateNodeId(eventId: string, nodeId: string): void {
+  public async updateNodeId(eventId: string, nodeId: string): Promise<void> {
     const stmt = this.db.prepare('UPDATE events SET node_id = ? WHERE id = ?');
-    stmt.run(nodeId, eventId);
+    await stmt.run(nodeId, eventId);
   }
 }

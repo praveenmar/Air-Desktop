@@ -19,6 +19,7 @@ import { NodeRepository } from '../../core/db/repositories/node.repository';
 import { EdgeRepository } from '../../core/db/repositories/edge.repository';
 import { SessionRepository } from '../../core/db/repositories/session.repository';
 import { DatabaseService } from '../../core/db/database';
+import { AsyncSQLiteDatabase } from '../../core/db/sqlite-adapter';
 import { browserManager } from './browser-manager';
 import crypto from 'crypto';
 
@@ -62,17 +63,18 @@ function mapEdgeRow(row: any) {
   };
 }
 
-function getSessionNodes(db: ReturnType<DatabaseService['getInstance']>, sessionId: string) {
-  return db.prepare(`
+async function getSessionNodes(db: AsyncSQLiteDatabase, sessionId: string) {
+  const rows = await db.prepare(`
       SELECT DISTINCT n.*
       FROM nodes n
       INNER JOIN events e ON e.node_id = n.id
       WHERE e.session_id = ?
-    `).all(sessionId).map(mapNodeRow);
+    `).all(sessionId);
+  return rows.map(mapNodeRow);
 }
 
-function getSessionEdges(db: ReturnType<DatabaseService['getInstance']>, sessionId: string) {
-  const rawEdges = db.prepare(`
+async function getSessionEdges(db: AsyncSQLiteDatabase, sessionId: string) {
+  const rawEdges = await db.prepare(`
       SELECT
         e.*,
         ev.type    AS action_type,
@@ -148,19 +150,20 @@ function mapDebugLogRow(row: any) {
   };
 }
 
-function getSessionDebugLogs(
-  db: ReturnType<DatabaseService['getInstance']>,
+async function getSessionDebugLogs(
+  db: AsyncSQLiteDatabase,
   sessionId: string,
   limit: number = 200
 ) {
   const safeLimit = Math.max(1, Math.min(limit, 1000));
-  return db.prepare(`
+  const rows = await db.prepare(`
       SELECT *
       FROM debug_logs
       WHERE session_id = ?
       ORDER BY timestamp DESC
       LIMIT ?
-    `).all(sessionId, safeLimit).map(mapDebugLogRow);
+    `).all(sessionId, safeLimit);
+  return rows.map(mapDebugLogRow);
 }
 
 export function registerIpcHandlers(
@@ -228,68 +231,59 @@ export function registerIpcHandlers(
 
   // --- GRAPH DATA ---
 
-  ipcMain.handle('graph:get-stats', () => {
-    return graphBuilder.getStats();
-  });
+  ipcMain.handle('graph:get-stats', async () => graphBuilder.getStats());
 
-  ipcMain.handle('graph:get-nodes', (_, limit: number = 100) => {
-    return nodeRepo.getAll(limit);
-  });
+  ipcMain.handle('graph:get-nodes', async (_, limit: number = 100) => nodeRepo.getAll(limit));
 
-  ipcMain.handle('graph:get-edges', (_, limit: number = 100) => {
-    return edgeRepo.getAll(limit);
-  });
+  ipcMain.handle('graph:get-edges', async (_, limit: number = 100) => edgeRepo.getAll(limit));
 
   // --- SESSIONS ---
 
-  ipcMain.handle('session:list', (_, limit: number = 20) => {
-    return sessionRepo.getAll(limit);
-  });
+  ipcMain.handle('session:list', async (_, limit: number = 20) => sessionRepo.getAll(limit));
 
   // Temporary debug channels: fetch session-scoped graph slices independently.
-  ipcMain.handle('session:get-nodes', (_, sessionId: string) => {
+  ipcMain.handle('session:get-nodes', async (_, sessionId: string) => {
     const db = dbService.getInstance();
-    return getSessionNodes(db, sessionId);
+    return await getSessionNodes(db, sessionId);
   });
 
-  ipcMain.handle('session:get-edges', (_, sessionId: string) => {
+  ipcMain.handle('session:get-edges', async (_, sessionId: string) => {
     const db = dbService.getInstance();
-    return getSessionEdges(db, sessionId);
+    return await getSessionEdges(db, sessionId);
   });
 
-  ipcMain.handle('session:get-graph', (_, sessionId: string) => {
+  ipcMain.handle('session:get-graph', async (_, sessionId: string) => {
     const db = dbService.getInstance();
 
     // Nodes: JOIN to events to scope by session — no nodeId array needed.
-    const nodes = getSessionNodes(db, sessionId);
+    const nodes = await getSessionNodes(db, sessionId);
 
     if (nodes.length === 0) return { nodes: [], edges: [] };
 
     // Edges: correlated subqueries — sessionId bound exactly twice, no variable limit.
-    const edges = getSessionEdges(db, sessionId);
+    const edges = await getSessionEdges(db, sessionId);
 
     return { nodes, edges };
   });
 
-  ipcMain.handle('session:get-debug-logs', (_, sessionId: string, limit: number = 200) => {
+  ipcMain.handle('session:get-debug-logs', async (_, sessionId: string, limit: number = 200) => {
     const db = dbService.getInstance();
-    return getSessionDebugLogs(db, sessionId, limit);
+    return await getSessionDebugLogs(db, sessionId, limit);
   });
 
   // --- RESET ---
 
-  ipcMain.handle('db:reset', () => {
+  ipcMain.handle('db:reset', async () => {
     const db = dbService.getInstance();
     try {
       const tables = ['pending_actions', 'outcomes', 'edges', 'events', 'nodes', 'sessions', 'debug_logs'];
-      db.exec('BEGIN TRANSACTION');
-      for (const table of tables) {
-        db.prepare(`DELETE FROM ${table}`).run();
-      }
-      db.exec('COMMIT');
-      return { success: true };
+      return await db.transaction(async () => {
+        for (const table of tables) {
+          await db.prepare(`DELETE FROM ${table}`).run();
+        }
+        return { success: true };
+      });
     } catch (error) {
-      db.exec('ROLLBACK');
       return { success: false, error: (error as Error).message };
     }
   });

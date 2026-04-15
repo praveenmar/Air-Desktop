@@ -26,7 +26,7 @@ async function bootstrap() {
 
   // 1. Initialize SQLite Database inside UserData directory
   const dbPath = path.join(app.getPath('userData'), 'air-data.db');
-  const dbService = new DatabaseService(dbPath);
+  const dbService = await DatabaseService.create(dbPath);
   const db = dbService.getInstance();
 
   // 2. Instantiate Repositories
@@ -55,8 +55,10 @@ async function bootstrap() {
   graphBuilder.startCleanupService();
 
   app.on('before-quit', () => {
-    graphBuilder.close();  // stop the cleanup interval
-    dbService.close();     // then close the SQLite connection
+    void (async () => {
+      await graphBuilder.close();  // stop the cleanup interval
+      await dbService.close();     // then close the SQLite connection
+    })();
   });
 
   // 4. Start Local Event Server for Interceptor

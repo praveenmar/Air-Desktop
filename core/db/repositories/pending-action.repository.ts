@@ -1,5 +1,5 @@
-import { Database } from 'better-sqlite3';
 import { PendingAction } from '../../types';
+import { AsyncSQLiteDatabase } from '../sqlite-adapter';
 
 // The Magic Fix: Translates SQLite snake_case to TypeScript camelCase
 function mapPendingActionRow(row: any): PendingAction | null {
@@ -18,31 +18,31 @@ function mapPendingActionRow(row: any): PendingAction | null {
 }
 
 export class PendingActionRepository {
-  constructor(private db: Database) {}
+  constructor(private db: AsyncSQLiteDatabase) {}
 
-  public register(traceId: string, sessionId: string, fromNodeId: string, triggerEventId: string, actionType: string, fingerprintHash: string): void {
+  public async register(traceId: string, sessionId: string, fromNodeId: string, triggerEventId: string, actionType: string, fingerprintHash: string): Promise<void> {
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO pending_actions 
       (trace_id, session_id, from_node_id, trigger_event_id, action_type, fingerprint_hash, created_at, status)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
     `);
-    stmt.run(traceId, sessionId, fromNodeId, triggerEventId, actionType, fingerprintHash, Date.now());
+    await stmt.run(traceId, sessionId, fromNodeId, triggerEventId, actionType, fingerprintHash, Date.now());
   }
 
-  public find(traceId: string): PendingAction | null {
+  public async find(traceId: string): Promise<PendingAction | null> {
     const stmt = this.db.prepare('SELECT * FROM pending_actions WHERE trace_id = ? AND status = ?');
-    const row = stmt.get(traceId, 'pending');
+    const row = await stmt.get(traceId, 'pending');
     return mapPendingActionRow(row); // Run the row through the mapper before returning
   }
 
-  public resolve(traceId: string): void {
+  public async resolve(traceId: string): Promise<void> {
     const stmt = this.db.prepare('UPDATE pending_actions SET status = ?, resolved_at = ? WHERE trace_id = ?');
-    stmt.run('resolved', Date.now(), traceId);
+    await stmt.run('resolved', Date.now(), traceId);
   }
 
-  public cleanupStale(cutoffMs: number): number {
+  public async cleanupStale(cutoffMs: number): Promise<number> {
     const stmt = this.db.prepare(`DELETE FROM pending_actions WHERE status = 'pending' AND created_at < ?`);
-    const result = stmt.run(cutoffMs);
+    const result = await stmt.run(cutoffMs);
     return result.changes;
   }
 }

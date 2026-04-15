@@ -35,7 +35,7 @@ export class ActionHandler {
     private logger: DebugLogger
   ) {}
 
-  public handleAction(event: AIREvent, traceId: string, currentNodeId: string, lastNodeId: string | null): void {
+  public async handleAction(event: AIREvent, traceId: string, currentNodeId: string, lastNodeId: string | null): Promise<void> {
     const fpHash    = this.computeFingerprintHash(event);
     const safeEventId = event.id || crypto.randomUUID();
 
@@ -43,28 +43,28 @@ export class ActionHandler {
 
     // 1. Register PENDING ACTION in DB (for future Outcome to resolve)
     if (shouldRegisterPending) {
-      this.registerPendingAction(traceId, event.sessionId, currentNodeId, safeEventId, event.type, fpHash);
-      this.logger.log('ActionHandler', 'info', 'Registered PENDING ACTION in DB', { traceId, type: event.type });
+      await this.registerPendingAction(traceId, event.sessionId, currentNodeId, safeEventId, event.type, fpHash);
+      await this.logger.log('ActionHandler', 'info', 'Registered PENDING ACTION in DB', { traceId, type: event.type });
     }
 
     // 2. Self-Loop Fix: Ensure immediate actions still create edges
     if (lastNodeId) {
-      this.createEdge(lastNodeId, currentNodeId, event, fpHash);
+      await this.createEdge(lastNodeId, currentNodeId, event, fpHash);
     }
   }
 
-  public registerPendingAction(
+  public async registerPendingAction(
     traceId: string,
     sessionId: string,
     fromNodeId: string,
     triggerEventId: string,
     actionType: string,
     fingerprintHash: string
-  ): void {
+  ): Promise<void> {
     try {
-      this.pendingRepo.register(traceId, sessionId, fromNodeId, triggerEventId, actionType, fingerprintHash);
+      await this.pendingRepo.register(traceId, sessionId, fromNodeId, triggerEventId, actionType, fingerprintHash);
     } catch (e) {
-      this.logger.log('ActionHandler', 'error', 'Failed to register pending action', { error: (e as Error).message });
+      await this.logger.log('ActionHandler', 'error', 'Failed to register pending action', { error: (e as Error).message });
       throw e; // FIX: re-throw so GraphBuilder's transaction rolls back
     }
   }
@@ -94,16 +94,16 @@ export class ActionHandler {
   /**
    * Speculative / Immediate Edge creation (handles the Self-Loop Fix).
    */
-  public createEdge(fromNodeId: string, toNodeId: string, event: AIREvent, fpHash: string): string | null {
-    const existingEdge = this.edgeRepo.findByFingerprint(fromNodeId, toNodeId, fpHash);
+  public async createEdge(fromNodeId: string, toNodeId: string, event: AIREvent, fpHash: string): Promise<string | null> {
+    const existingEdge = await this.edgeRepo.findByFingerprint(fromNodeId, toNodeId, fpHash);
 
     try {
       if (existingEdge) {
         // Genuine repeat observation -- increment count and recalculate probability.
         // fingerprintHash must be explicit: GraphEdge.fingerprintHash is string | null
         // but upsert() requires string. All other required fields come from the spread.
-        this.edgeRepo.incrementObservation(existingEdge.id);
-        this.outcomeRepo.updateProbability(existingEdge.id, toNodeId);
+        await this.edgeRepo.incrementObservation(existingEdge.id);
+        await this.outcomeRepo.updateProbability(existingEdge.id, toNodeId);
         return existingEdge.id;
       }
 
@@ -111,7 +111,7 @@ export class ActionHandler {
       const outcomeId = crypto.randomUUID();
 
       // REPLACE with:
-      this.edgeRepo.insert({
+      await this.edgeRepo.insert({
         id: edgeId,
         fromNodeId,
         toNodeId,
@@ -125,11 +125,11 @@ export class ActionHandler {
       // Do NOT call updateProbability() here -- it would immediately increment decayed_count
       // to 2.0 before any real second observation, corrupting the Laplace smoothing math
       // for the lifetime of this edge. updateProbability() is reserved for re-observations.
-      this.outcomeRepo.insert(outcomeId, edgeId, toNodeId, event.timestamp);
+      await this.outcomeRepo.insert(outcomeId, edgeId, toNodeId, event.timestamp);
 
       return edgeId;
     } catch (e) {
-      this.logger.log('ActionHandler', 'error', 'Failed to create edge', { error: (e as Error).message });
+      await this.logger.log('ActionHandler', 'error', 'Failed to create edge', { error: (e as Error).message });
       throw e; // FIX: re-throw so GraphBuilder's transaction rolls back
     }
   }

@@ -1,16 +1,14 @@
-// Purpose: Handles "Branch B" logic (Outcomes) and Explicit Edge creation.
-// Prototype Origin: graph-builder.js (Branch B block, createExplicitEdge, updateOutcomeProbability)
-// Changes: Coordinates via Repositories.
+﻿// Purpose: Handles Branch B logic (Outcomes) and explicit edge creation.
 
 import crypto from 'crypto';
+import { z } from 'zod';
+import { normalizeUrl } from '@air/shared';
 import { EdgeRepository } from '../../db/repositories/edge.repository';
 import { OutcomeRepository } from '../../db/repositories/outcome.repository';
 import { EventRepository } from '../../db/repositories/event.repository';
 import { PendingActionRepository } from '../../db/repositories/pending-action.repository';
 import { DebugLogger } from '../../logger/debug-logger';
 import { OutcomeEventSchema, PendingAction, OutcomeType } from '../../types';
-import { z } from 'zod';
-import { normalizeUrl } from '@air/shared';
 
 type OutcomeEvent = z.infer<typeof OutcomeEventSchema>;
 
@@ -23,66 +21,50 @@ export class OutcomeHandler {
     private logger: DebugLogger
   ) {}
 
-  public handleOutcome(event: OutcomeEvent, traceId: string, currentNodeId: string): void {
-    const pending = this.pendingRepo.find(traceId);
+  public async handleOutcome(event: OutcomeEvent, traceId: string, currentNodeId: string): Promise<void> {
+    const pending = await this.pendingRepo.find(traceId);
 
     if (pending) {
-      this.logger.log('OutcomeHandler', 'decision', 'Found PENDING ACTION for outcome', { 
-        traceId, 
-        fromNode: pending.fromNodeId, 
-        toNode: currentNodeId 
+      await this.logger.log('OutcomeHandler', 'decision', 'Found PENDING ACTION for outcome', {
+        traceId,
+        fromNode: pending.fromNodeId,
+        toNode: currentNodeId,
       });
 
-      // Create EXPLICIT Edge
-      this.createExplicitEdge(pending.fromNodeId, currentNodeId, pending, event);
-
-      // Mark pending as resolved
-      this.pendingRepo.resolve(traceId);
-    } else {
-      // Fix (Bug #5): Baseline outcomes naturally have no preceding pending action —
-      // captureBaseline() fires on every session init with traceId: 'baseline-<uuid>'.
-      // Logging a warning for these polluted logs and obscured real orphan problems.
-      // Silently return for baseline, warn only for genuinely unexpected orphans.
-      if (traceId.startsWith('baseline-')) {
-        return;
-      }
-      this.logger.log('OutcomeHandler', 'warn', 'Orphaned OUTCOME event — No pending action found', { traceId });
+      await this.createExplicitEdge(pending.fromNodeId, currentNodeId, pending, event);
+      await this.pendingRepo.resolve(traceId);
+      return;
     }
+
+    // Baseline outcomes naturally have no pending action.
+    if (traceId.startsWith('baseline-')) {
+      return;
+    }
+
+    await this.logger.log('OutcomeHandler', 'warn', 'Orphaned OUTCOME event - no pending action found', { traceId });
   }
 
-  public createExplicitEdge(fromNodeId: string, toNodeId: string, pendingAction: PendingAction, outcomeEvent: OutcomeEvent): void {
-    // ── outcomeType determination — three-tier priority chain ────────────────
-    //
-    // Tier 1: Trust the interceptor's explicit settleType signal first.
-    //   checkPendingOutcome() and _monitorSPARoutes() both set settleType='navigation'
-    //   only when they are certain a real navigation occurred. This is the most
-    //   reliable signal and must take priority over URL comparison.
-    //
-    // Tier 2: If no explicit signal, compare normalised URLs from the trigger event.
-    //   normalizeUrl strips hash/query/trailing-slash so minor URL differences
-    //   (analytics params, hash anchors) don't produce false navigation detections.
-    //
-    // Tier 3: If trigger event missing AND no explicit signal, default to state_refresh.
-    //   This is the safe fallback — avoids false 'navigation' labels on SPA modals
-    //   or drawers where nodes differ but URL did not change. A false navigation label
-    //   would cause the Playwright code generator to emit waitForURL() that never fires.
-    //
+  public async createExplicitEdge(
+    fromNodeId: string,
+    toNodeId: string,
+    pendingAction: PendingAction,
+    outcomeEvent: OutcomeEvent
+  ): Promise<void> {
     let outcomeType: OutcomeType = 'state_refresh';
     let outcomeReason = 'state refresh (URL unchanged while node changed)';
 
-    // Fetch the original trigger event for URL comparison (Tier 2)
-    const triggerEventRow = this.eventRepo.findById(pendingAction.triggerEventId);
+    const triggerEventRow = await this.eventRepo.findById(pendingAction.triggerEventId);
     const triggerUrl = triggerEventRow?.page_url || null;
     const outcomeUrl = outcomeEvent.normalizedUrl || outcomeEvent.meta?.urlAfter || outcomeEvent.pageUrl || null;
     const normalizedTriggerUrl = triggerUrl ? normalizeUrl(triggerUrl) : null;
     const normalizedOutcomeUrl = outcomeUrl ? normalizeUrl(outcomeUrl) : null;
 
     if (outcomeEvent.meta?.settleType === 'navigation') {
-      // Tier 1: Explicit navigation signal from interceptor — trust it unconditionally
+      // Tier 1: explicit signal from interceptor.
       outcomeType = 'navigation';
       outcomeReason = 'explicit navigation settleType from interceptor';
     } else if (triggerEventRow) {
-      // Tier 2: Calculate from normalised URL comparison
+      // Tier 2: normalized URL comparison.
       if (normalizedOutcomeUrl && normalizedTriggerUrl !== normalizedOutcomeUrl) {
         outcomeType = 'navigation';
         outcomeReason = 'normalized URL changed between trigger and outcome';
@@ -90,26 +72,23 @@ export class OutcomeHandler {
         outcomeType = 'no_change';
         outcomeReason = 'resolved to same node and same URL';
       }
-      // else: URLs match, nodes differ (modal/drawer/SPA state change) → state_refresh
     } else {
-      // Tier 3: No trigger event AND no explicit signal — safe default
+      // Tier 3: conservative fallback.
       outcomeReason = 'trigger event missing; defaulting to state_refresh';
-      this.logger.log('OutcomeHandler', 'warn',
-        'Trigger event missing and no explicit settleType — defaulting to state_refresh to prevent false Playwright navigation waits',
+      await this.logger.log(
+        'OutcomeHandler',
+        'warn',
+        'Trigger event missing and no explicit settleType - defaulting to state_refresh',
         { traceId: pendingAction.traceId }
       );
     }
 
-    // This guarantees fpHash is a strict string, never null
     const fpHash = pendingAction.fingerprintHash || 'unknown';
-
-    // Check existing explicit edge
-    const existingEdge = this.edgeRepo.findByFingerprint(fromNodeId, toNodeId, fpHash);
+    const existingEdge = await this.edgeRepo.findByFingerprint(fromNodeId, toNodeId, fpHash);
 
     if (existingEdge) {
-      // Stamp the resolved outcomeType — does NOT touch sample_size or decayed_count
-      this.edgeRepo.resolveOutcome(existingEdge.id, outcomeType);
-      this.logger.log('OutcomeHandler', 'decision', `Resolved existing edge outcome: ${outcomeType} - ${outcomeReason}`, {
+      await this.edgeRepo.resolveOutcome(existingEdge.id, outcomeType);
+      await this.logger.log('OutcomeHandler', 'decision', `Resolved existing edge outcome: ${outcomeType} - ${outcomeReason}`, {
         edgeId: existingEdge.id,
         fpHash,
         from: fromNodeId,
@@ -122,30 +101,20 @@ export class OutcomeHandler {
 
     const edgeId = crypto.randomUUID();
     try {
-      this.edgeRepo.insert({
+      await this.edgeRepo.insert({
         id: edgeId,
         fromNodeId,
         toNodeId,
         triggerEventId: pendingAction.triggerEventId,
         fingerprintHash: fpHash,
         outcomeType,
-        lastUpdated: Date.now()
+        lastUpdated: Date.now(),
       });
 
       const outcomeId = crypto.randomUUID();
-      this.outcomeRepo.insert(outcomeId, edgeId, toNodeId, Date.now());
+      await this.outcomeRepo.insert(outcomeId, edgeId, toNodeId, Date.now());
 
-      // FIX (Bug #10c — OutcomeHandler path): Do NOT call updateProbability() here.
-      // insert() already sets decayed_count = 1.0 and probability = 1.0 for a brand-new
-      // edge. Calling updateProbability() immediately after increments decayed_count to
-      // 2.0 before any real second observation has occurred. This corrupts the Laplace
-      // smoothing denominator for the entire lifetime of the edge:
-      //   - On re-observation (K=1): looks like 3 total observations instead of 2
-      //   - On multi-outcome edges (K>1): inflates the denominator, skewing all path
-      //     probabilities upward — the AI sees falsely high confidence on navigation steps.
-      // updateProbability() is reserved for genuine re-observations on the existing-edge
-      // path in ActionHandler.createEdge(), which is the only correct call site.
-      this.logger.log('OutcomeHandler', 'decision', `Edge created: ${outcomeType} - ${outcomeReason}`, {
+      await this.logger.log('OutcomeHandler', 'decision', `Edge created: ${outcomeType} - ${outcomeReason}`, {
         edgeId,
         fpHash,
         from: fromNodeId,
@@ -154,11 +123,12 @@ export class OutcomeHandler {
         normalizedOutcomeUrl,
       });
     } catch (e) {
-      this.logger.log('OutcomeHandler', 'error', 'Failed to create explicit edge', { error: (e as Error).message });
+      await this.logger.log('OutcomeHandler', 'error', 'Failed to create explicit edge', { error: (e as Error).message });
+      throw e;
     }
   }
 
-  public updateOutcomeProbability(edgeId: string, targetNodeId: string): void {
-    this.outcomeRepo.updateProbability(edgeId, targetNodeId);
+  public async updateOutcomeProbability(edgeId: string, targetNodeId: string): Promise<void> {
+    await this.outcomeRepo.updateProbability(edgeId, targetNodeId);
   }
 }

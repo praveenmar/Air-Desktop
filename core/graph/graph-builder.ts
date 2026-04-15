@@ -1,24 +1,15 @@
-// Purpose: The main orchestrator connecting Handlers, DB Repositories, and the Event Stream.
-// Prototype Origin: graph-builder.js (Main class body, processEvent, getStats, startCleanupService)
-// Changes: Strictly typed Dependency Injection container.
-// Fix (Bug #3): All write steps inside processEvent are now wrapped in a single db.transaction().
-//   Before this fix, a crash between any of the 9 sequential writes (insert event → upsert node →
-//   update node_id → register pending → upsert edge → insert outcome → update probability →
-//   update session pointer) would leave the database in a partially written, inconsistent state.
-//   Now any failure in any step automatically rolls back the entire sequence.
-//   The deduplication check (pure read) intentionally stays outside the transaction.
+﻿// Purpose: The main orchestrator connecting Handlers, DB Repositories, and the Event Stream.
 
 import crypto from 'crypto';
-import { Database } from 'better-sqlite3';
 import { NodeRepository } from '../db/repositories/node.repository';
 import { EdgeRepository } from '../db/repositories/edge.repository';
 import { EventRepository } from '../db/repositories/event.repository';
 import { SessionRepository } from '../db/repositories/session.repository';
 import { OutcomeRepository } from '../db/repositories/outcome.repository';
 import { PendingActionRepository } from '../db/repositories/pending-action.repository';
+import { AsyncSQLiteDatabase } from '../db/sqlite-adapter';
 import { DebugLogger } from '../logger/debug-logger';
 import { StateEngine } from './state-engine';
-
 import { SessionManager } from './session-manager';
 import { BaselineHandler } from './handlers/baseline.handler';
 import { ActionHandler } from './handlers/action.handler';
@@ -44,7 +35,7 @@ export class GraphBuilder {
   private cleanupInterval: NodeJS.Timeout | null = null;
 
   constructor(
-    private db: Database,             // FIX: injected directly to enable db.transaction()
+    private db: AsyncSQLiteDatabase,
     private nodeRepo: NodeRepository,
     private edgeRepo: EdgeRepository,
     private eventRepo: EventRepository,
@@ -54,155 +45,162 @@ export class GraphBuilder {
     private stateEngine: typeof StateEngine,
     private logger: DebugLogger
   ) {
-    this.sessionManager  = new SessionManager(this.sessionRepo, this.logger);
+    this.sessionManager = new SessionManager(this.sessionRepo, this.logger);
     this.baselineHandler = new BaselineHandler(this.nodeRepo, this.logger, this.stateEngine);
-    this.actionHandler   = new ActionHandler(this.pendingRepo, this.edgeRepo, this.outcomeRepo, this.logger);
-    this.outcomeHandler  = new OutcomeHandler(this.edgeRepo, this.outcomeRepo, this.eventRepo, this.pendingRepo, this.logger);
+    this.actionHandler = new ActionHandler(this.pendingRepo, this.edgeRepo, this.outcomeRepo, this.logger);
+    this.outcomeHandler = new OutcomeHandler(this.edgeRepo, this.outcomeRepo, this.eventRepo, this.pendingRepo, this.logger);
   }
 
-  public getStats(): GraphStats {
+  public async getStats(): Promise<GraphStats> {
     try {
-      const nodes          = this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as { count: number };
-      const edges          = this.db.prepare('SELECT COUNT(*) as count FROM edges').get() as { count: number };
-      const events         = this.db.prepare('SELECT COUNT(*) as count FROM events').get() as { count: number };
-      const outcomes       = this.db.prepare('SELECT COUNT(*) as count FROM outcomes').get() as { count: number };
-      const sessions       = this.db.prepare('SELECT COUNT(*) as count FROM sessions').get() as { count: number };
-      const pendingActions = this.db.prepare("SELECT COUNT(*) as count FROM pending_actions WHERE status = 'pending'").get() as { count: number };
+      const nodes = await this.db.prepare('SELECT COUNT(*) as count FROM nodes').get<{ count: number }>();
+      const edges = await this.db.prepare('SELECT COUNT(*) as count FROM edges').get<{ count: number }>();
+      const events = await this.db.prepare('SELECT COUNT(*) as count FROM events').get<{ count: number }>();
+      const outcomes = await this.db.prepare('SELECT COUNT(*) as count FROM outcomes').get<{ count: number }>();
+      const sessions = await this.db.prepare('SELECT COUNT(*) as count FROM sessions').get<{ count: number }>();
+      const pendingActions = await this.db
+        .prepare("SELECT COUNT(*) as count FROM pending_actions WHERE status = 'pending'")
+        .get<{ count: number }>();
 
       return {
-        nodes:          nodes.count,
-        edges:          edges.count,
-        events:         events.count,
-        outcomes:       outcomes.count,
-        sessions:       sessions.count,
-        pendingActions: pendingActions.count,
-        timestamp:      Date.now(),
+        nodes: nodes?.count ?? 0,
+        edges: edges?.count ?? 0,
+        events: events?.count ?? 0,
+        outcomes: outcomes?.count ?? 0,
+        sessions: sessions?.count ?? 0,
+        pendingActions: pendingActions?.count ?? 0,
+        timestamp: Date.now(),
       };
     } catch (error) {
-      this.logger.log('GraphBuilder', 'error', 'Failed to get stats', { error: (error as Error).message });
-      return { nodes: 0, edges: 0, events: 0, outcomes: 0, sessions: 0, pendingActions: 0, error: (error as Error).message };
+      await this.logger.log('GraphBuilder', 'error', 'Failed to get stats', { error: (error as Error).message });
+      return {
+        nodes: 0,
+        edges: 0,
+        events: 0,
+        outcomes: 0,
+        sessions: 0,
+        pendingActions: 0,
+        error: (error as Error).message,
+      };
     }
   }
 
-  public processEvent(event: AIREvent): ProcessResult {
-    // --- NORMALISATION (no DB calls) ---
-    const safeEventId  = event.id        || crypto.randomUUID();
-    const traceId      = event.traceId   || crypto.randomUUID();
-    const sessionId  = event.sessionId;
+  public async processEvent(event: AIREvent): Promise<ProcessResult> {
+    const safeEventId = event.id || crypto.randomUUID();
+    const traceId = event.traceId || crypto.randomUUID();
+    const sessionId = event.sessionId;
 
     if (!sessionId) {
-      this.logger.log('GraphBuilder', 'error', 'Event stage: missing session - rejected before persistence', {
+      await this.logger.log('GraphBuilder', 'error', 'Event stage: missing session - rejected before persistence', {
         eventId: safeEventId,
         type: event.type,
       });
       return { success: false, error: 'Missing sessionId' };
     }
 
-    // --- DEDUPLICATION (pure read — intentionally outside the transaction) ---
     try {
-      const existing = this.eventRepo.findById(safeEventId);
+      const existing = await this.eventRepo.findById(safeEventId);
       if (existing) {
-        this.logger.log('GraphBuilder', 'warn', 'Event stage: duplicate event ID detected - skipping graph work', {
+        await this.logger.log('GraphBuilder', 'warn', 'Event stage: duplicate event ID detected - skipping graph work', {
           eventId: safeEventId,
           type: event.type,
         });
         return { success: true, eventId: safeEventId, duplicate: true };
       }
     } catch (error) {
-      this.logger.log('GraphBuilder', 'error', 'Failed to check for duplicate', { error: (error as Error).message });
+      await this.logger.log('GraphBuilder', 'error', 'Failed to check for duplicate', { error: (error as Error).message });
     }
 
-    // --- ALL WRITES — wrapped in a single atomic transaction ---
-    // Any exception thrown by any step (including re-throws from ActionHandler /
-    // OutcomeHandler) will cause better-sqlite3 to automatically roll back every
-    // write in this block, leaving the DB in a clean state.
+    const normalizedEvent = {
+      ...event,
+      id: safeEventId,
+      traceId: event.traceId || traceId,
+    } as AIREvent;
+
     try {
-      return this.db.transaction((ev: AIREvent): ProcessResult => {
+      return await this.db.transaction(async (): Promise<ProcessResult> => {
+        await this.sessionManager.getOrCreateSession(normalizedEvent.sessionId);
 
-        // STEP 0: Ensure session exists
-        this.sessionManager.getOrCreateSession(ev.sessionId);
-
-        // STEP 1: Insert event (slim — strip heavy snapshot fields)
-        const intent    = IntentDetector.detectIntent(ev);
-        const intentRaw = IntentDetector.getRawIntent(ev);
-        const slimPayload = { ...ev } as any;
+        const intent = IntentDetector.detectIntent(normalizedEvent);
+        const intentRaw = IntentDetector.getRawIntent(normalizedEvent);
+        const slimPayload = { ...normalizedEvent } as any;
         delete slimPayload.pageSnapshot;
         delete slimPayload.pageState;
-        this.eventRepo.insert(slimPayload as AIREvent, intent, intentRaw);
+        await this.eventRepo.insert(slimPayload as AIREvent, intent, intentRaw);
 
-        // STEP 2: Resolve current node
         let currentNodeId: string | null = null;
-        const isInput     = ev.type === 'input';
-        const isScroll    = ev.type === 'scroll';
-        const hasSnapshot = !!(('pageState' in ev && ev.pageState) || ('pageSnapshot' in ev && (ev as any).pageSnapshot));
-        const lastNodeId  = this.sessionManager.getLastNode(ev.sessionId!);
+        const isInput = normalizedEvent.type === 'input';
+        const isScroll = normalizedEvent.type === 'scroll';
+        const hasSnapshot = !!(
+          ('pageState' in normalizedEvent && normalizedEvent.pageState) ||
+          ('pageSnapshot' in normalizedEvent && (normalizedEvent as any).pageSnapshot)
+        );
+        const lastNodeId = await this.sessionManager.getLastNode(normalizedEvent.sessionId);
 
         if (isInput && !hasSnapshot && lastNodeId) {
           currentNodeId = lastNodeId;
-          this.logger.log('GraphBuilder', 'info', 'Anchoring Input event to existing node', { nodeId: currentNodeId });
+          await this.logger.log('GraphBuilder', 'info', 'Anchoring Input event to existing node', { nodeId: currentNodeId });
         } else if (isScroll && !hasSnapshot && lastNodeId) {
           currentNodeId = lastNodeId;
-          this.logger.log('GraphBuilder', 'info', 'Anchoring Scroll event to existing node', { nodeId: currentNodeId });
-        } else if (['click', 'input', 'custom', 'outcome', 'scroll', 'custom-select', 'spa-route-change'].includes(ev.type)) {
-          currentNodeId = this.baselineHandler.upsertNode(ev);
+          await this.logger.log('GraphBuilder', 'info', 'Anchoring Scroll event to existing node', { nodeId: currentNodeId });
+        } else if (['click', 'input', 'custom', 'outcome', 'scroll', 'custom-select', 'spa-route-change'].includes(normalizedEvent.type)) {
+          currentNodeId = await this.baselineHandler.upsertNode(normalizedEvent);
         }
 
-        // STEP 3: Link event → node
         if (currentNodeId) {
-          this.eventRepo.updateNodeId(ev.id!, currentNodeId);
+          await this.eventRepo.updateNodeId(safeEventId, currentNodeId);
         }
 
-        const isHeartbeat = ev.type === 'input' && (ev as any).trigger === 'input:progress';
+        const isHeartbeat = normalizedEvent.type === 'input' && (normalizedEvent as any).trigger === 'input:progress';
 
-        // STEP 4: Graph linking
-        if (ev.sessionId && currentNodeId) {
-
-          // BRANCH A: User actions
-          if (['click', 'input', 'submit', 'custom-select'].includes(ev.type) && !isHeartbeat) {
-            this.actionHandler.handleAction(ev, traceId, currentNodeId, lastNodeId);
-            this.sessionManager.updatePointer(ev.sessionId, currentNodeId);
-            this.logger.log('GraphBuilder', 'info', 'Event stage: action recorded, pending action registered', {
+        if (normalizedEvent.sessionId && currentNodeId) {
+          if (['click', 'input', 'submit', 'custom-select'].includes(normalizedEvent.type) && !isHeartbeat) {
+            await this.actionHandler.handleAction(normalizedEvent, traceId, currentNodeId, lastNodeId);
+            await this.sessionManager.updatePointer(normalizedEvent.sessionId, currentNodeId);
+            await this.logger.log('GraphBuilder', 'info', 'Event stage: action recorded, pending action registered', {
               eventId: safeEventId,
-              type: ev.type,
+              type: normalizedEvent.type,
               nodeId: currentNodeId,
               traceId,
             });
             return { success: true, stage: 'action_recorded', nodeId: currentNodeId, traceId };
           }
 
-          // BRANCH B: Outcomes
-          if (ev.type === 'outcome') {
-            const parsedOutcome = OutcomeEventSchema.parse(ev);
-            this.outcomeHandler.handleOutcome(parsedOutcome, traceId, currentNodeId);
-            this.sessionManager.updatePointer(ev.sessionId, currentNodeId);
-            this.logger.log('GraphBuilder', 'info', 'Event stage: outcome processed, edge created or updated', {
+          if (normalizedEvent.type === 'outcome') {
+            const parsedOutcome = OutcomeEventSchema.parse(normalizedEvent);
+            await this.outcomeHandler.handleOutcome(parsedOutcome, traceId, currentNodeId);
+            await this.sessionManager.updatePointer(normalizedEvent.sessionId, currentNodeId);
+            await this.logger.log('GraphBuilder', 'info', 'Event stage: outcome processed, edge created or updated', {
               eventId: safeEventId,
-              type: ev.type,
+              type: normalizedEvent.type,
               nodeId: currentNodeId,
               traceId,
             });
             return { success: true, stage: 'edge_finalized', nodeId: currentNodeId, traceId };
           }
-          if (ev.type === 'spa-route-change') {
-            const spaEvent = ev as any;
+
+          if (normalizedEvent.type === 'spa-route-change') {
+            const spaEvent = normalizedEvent as any;
             try {
               const syntheticOutcome = OutcomeEventSchema.parse({
-                ...ev,
-                type: 'outcome', // Cast it so Zod accepts it
+                ...normalizedEvent,
+                type: 'outcome',
                 meta: {
                   settleType: spaEvent.changeType || 'navigation',
-                  urlAfter: spaEvent.navigation?.to || (ev as any).pageUrl,
-                }
+                  urlAfter: spaEvent.navigation?.to || (normalizedEvent as any).pageUrl,
+                },
               });
-              this.outcomeHandler.handleOutcome(syntheticOutcome, traceId, currentNodeId);
+              await this.outcomeHandler.handleOutcome(syntheticOutcome, traceId, currentNodeId);
             } catch (e) {
-              this.logger.log('GraphBuilder', 'warn', 'Failed to parse synthetic outcome for spa-route-change', { error: (e as Error).message });
+              await this.logger.log('GraphBuilder', 'warn', 'Failed to parse synthetic outcome for spa-route-change', {
+                error: (e as Error).message,
+              });
             }
-            
-            this.sessionManager.updatePointer(ev.sessionId!, currentNodeId);
-            this.logger.log('GraphBuilder', 'info', 'Event stage: SPA route transition processed as synthetic outcome', {
+
+            await this.sessionManager.updatePointer(normalizedEvent.sessionId, currentNodeId);
+            await this.logger.log('GraphBuilder', 'info', 'Event stage: SPA route transition processed as synthetic outcome', {
               eventId: safeEventId,
-              type: ev.type,
+              type: normalizedEvent.type,
               nodeId: currentNodeId,
               traceId,
             });
@@ -213,70 +211,62 @@ export class GraphBuilder {
         let stage = 'event processed but no graph change';
         if (isHeartbeat) stage = 'ignored input heartbeat';
         else if (!currentNodeId) stage = 'no node resolved - event not linked';
-        else if (!ev.sessionId) stage = 'missing session - rejected';
+        else if (!normalizedEvent.sessionId) stage = 'missing session - rejected';
 
-        this.logger.log('GraphBuilder', 'info', `Event stage: ${stage}`,
-          {
-            eventId: safeEventId,
-            nodeId: currentNodeId,
-            type: ev.type,
-            traceId,
-          }
-        );
+        await this.logger.log('GraphBuilder', 'info', `Event stage: ${stage}`, {
+          eventId: safeEventId,
+          nodeId: currentNodeId,
+          type: normalizedEvent.type,
+          traceId,
+        });
+
         return { success: true, eventId: safeEventId, nodeId: currentNodeId, traceId };
-
-      })(event); // immediately invoke the transaction with the normalised event
-
+      });
     } catch (error) {
-      // The transaction has already been rolled back at this point by better-sqlite3.
-      this.logger.log('GraphBuilder', 'error', 'Transaction failed — all writes rolled back',
+      await this.logger.log(
+        'GraphBuilder',
+        'error',
+        'Transaction failed - all writes rolled back',
         { error: (error as Error).message, eventId: safeEventId, traceId },
-        sessionId, traceId
+        sessionId,
+        traceId
       );
       return { success: false, error: (error as Error).message };
     }
   }
 
   public startCleanupService(): void {
-    if (this.cleanupInterval) clearInterval(this.cleanupInterval);
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+    }
 
     this.cleanupInterval = setInterval(() => {
-      // 1. Purge stale pending actions (older than 2 minutes)
-      const cutoffMs     = Date.now() - 120_000;
-      const deletedCount = this.pendingRepo.cleanupStale(cutoffMs);
-      if (deletedCount > 0) {
-        this.logger.log('GraphBuilder', 'warn', `Cleaned up ${deletedCount} stale pending action(s)`);
-      }
-
-      // 2. FIX (Bug #8b): Prune debug_logs older than 24 hours so the table
-      //    doesn't grow unbounded. Piggybacks on the existing 15-second tick —
-      //    no extra interval needed.
-      const prunedLogs = this.logger.pruneOldLogs(86_400_000);
-      if (prunedLogs > 0) {
-        this.logger.log('GraphBuilder', 'info', `Pruned ${prunedLogs} old debug log(s)`);
-      }
+      void this.runCleanupTick();
     }, 15000);
   }
 
-  /**
-   * Tears down the cleanup interval before the database connection is closed.
-   *
-   * MUST be called before DatabaseService.close() on app exit or DB reset.
-   * If the interval fires after db.close(), every pending_actions and debug_logs
-   * query inside the tick throws "The database connection is not open" — an
-   * unhandled error on a background timer that Node cannot surface cleanly.
-   *
-   * Wiring (Electron main entry):
-   *   app.on('before-quit', () => {
-   *     graphBuilder.close();   // ← stop interval first
-   *     dbService.close();      // ← then close the connection
-   *   });
-   */
-  public close(): void {
+  private async runCleanupTick(): Promise<void> {
+    try {
+      const cutoffMs = Date.now() - 120_000;
+      const deletedCount = await this.pendingRepo.cleanupStale(cutoffMs);
+      if (deletedCount > 0) {
+        await this.logger.log('GraphBuilder', 'warn', `Cleaned up ${deletedCount} stale pending action(s)`);
+      }
+
+      const prunedLogs = await this.logger.pruneOldLogs(86_400_000);
+      if (prunedLogs > 0) {
+        await this.logger.log('GraphBuilder', 'info', `Pruned ${prunedLogs} old debug log(s)`);
+      }
+    } catch (error) {
+      await this.logger.log('GraphBuilder', 'error', 'Cleanup tick failed', { error: (error as Error).message });
+    }
+  }
+
+  public async close(): Promise<void> {
     if (this.cleanupInterval) {
       clearInterval(this.cleanupInterval);
       this.cleanupInterval = null;
-      this.logger.log('GraphBuilder', 'info', 'Cleanup service stopped');
+      await this.logger.log('GraphBuilder', 'info', 'Cleanup service stopped');
     }
   }
 }

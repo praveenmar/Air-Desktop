@@ -1,5 +1,5 @@
-import { Database } from 'better-sqlite3';
 import { GraphEdge } from '../../types';
+import { AsyncSQLiteDatabase } from '../sqlite-adapter';
 
 // The Magic Fix: Translates SQLite snake_case to TypeScript camelCase
 function mapEdgeRow(row: any): GraphEdge | null {
@@ -18,28 +18,28 @@ function mapEdgeRow(row: any): GraphEdge | null {
 }
 
 export class EdgeRepository {
-  constructor(private db: Database) {}
+  constructor(private db: AsyncSQLiteDatabase) {}
 
-  public findByFingerprint(fromNodeId: string, toNodeId: string, fingerprintHash: string): GraphEdge | null {
+  public async findByFingerprint(fromNodeId: string, toNodeId: string, fingerprintHash: string): Promise<GraphEdge | null> {
     const stmt = this.db.prepare(`
       SELECT * FROM edges 
       WHERE from_node_id = ? AND to_node_id = ? AND fingerprint_hash = ?
     `);
-    return mapEdgeRow(stmt.get(fromNodeId, toNodeId, fingerprintHash));
+    return mapEdgeRow(await stmt.get(fromNodeId, toNodeId, fingerprintHash));
   }
 
-  public findByNodes(fromNodeId: string, toNodeId: string): GraphEdge[] {
+  public async findByNodes(fromNodeId: string, toNodeId: string): Promise<GraphEdge[]> {
     const stmt = this.db.prepare(`
       SELECT * FROM edges WHERE from_node_id = ? AND to_node_id = ?
     `);
-    return stmt.all(fromNodeId, toNodeId).map(mapEdgeRow) as GraphEdge[];
+    return (await stmt.all(fromNodeId, toNodeId)).map(mapEdgeRow) as GraphEdge[];
   }
 
-  public getAll(limit: number = 100): GraphEdge[] {
+  public async getAll(limit: number = 100): Promise<GraphEdge[]> {
     const stmt = this.db.prepare(`
       SELECT * FROM edges ORDER BY last_updated DESC LIMIT ?
     `);
-    return stmt.all(limit).map(mapEdgeRow) as GraphEdge[];
+    return (await stmt.all(limit)).map(mapEdgeRow) as GraphEdge[];
   }
 
   /**
@@ -49,7 +49,7 @@ export class EdgeRepository {
    *   - OutcomeHandler.createExplicitEdge() → new explicit edge with resolved outcomeType
    * Never increments sample_size (starts at 1 per schema default).
    */
-  public insert(edge: {
+  public async insert(edge: {
     id: string;
     fromNodeId: string;
     toNodeId: string;
@@ -57,14 +57,14 @@ export class EdgeRepository {
     fingerprintHash: string;
     outcomeType?: string | null;
     lastUpdated?: number;
-  }): string {
+  }): Promise<string> {
     const stmt = this.db.prepare(`
       INSERT INTO edges (
         id, from_node_id, to_node_id, trigger_event_id, fingerprint_hash, outcome_type, sample_size, last_updated
       ) VALUES (?, ?, ?, ?, ?, ?, 1, ?)
     `);
 
-    stmt.run(
+    await stmt.run(
       edge.id,
       edge.fromNodeId,
       edge.toNodeId,
@@ -84,8 +84,8 @@ export class EdgeRepository {
    * by a subsequent speculative click.
    * Called by: ActionHandler.createEdge() when findByFingerprint returns a hit.
    */
-  public incrementObservation(edgeId: string): void {
-    this.db.prepare(`
+  public async incrementObservation(edgeId: string): Promise<void> {
+    await this.db.prepare(`
       UPDATE edges SET sample_size = sample_size + 1, last_updated = ? WHERE id = ?
     `).run(Date.now(), edgeId);
   }
@@ -96,8 +96,8 @@ export class EdgeRepository {
    * it is the completion of one that ActionHandler already counted.
    * Called by: OutcomeHandler.createExplicitEdge() when findByFingerprint returns a hit.
    */
-  public resolveOutcome(edgeId: string, outcomeType: string): void {
-    this.db.prepare(`
+  public async resolveOutcome(edgeId: string, outcomeType: string): Promise<void> {
+    await this.db.prepare(`
       UPDATE edges SET outcome_type = ?, last_updated = ? WHERE id = ?
     `).run(outcomeType, Date.now(), edgeId);
   }
