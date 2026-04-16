@@ -1006,7 +1006,103 @@ class AIRInterceptor {
       bestHtml = bestHtml.slice(0, maxChars) + '<!-- truncated -->';
     }
 
-    return bestHtml;
+    let anchors = [];
+    let controlSignature = null;
+
+    try {
+      anchors = this.scanPageAnchors();
+    } catch (_) {}
+
+    try {
+      controlSignature = this.computeControlSignature(document);
+    } catch (_) {}
+
+    const pageUrl = window.location.href;
+    const normalizedUrl = this.normalizeUrl(pageUrl);
+
+    return {
+      html: bestHtml,
+      anchors,
+      controlSignature,
+      normalizedUrl,
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      url: pageUrl,
+      timestamp: Date.now(),
+      metrics: { subtree: true, maxChars },
+    };
+  }
+
+  _normalizeSnapshotForTransport(snapshotValue, maxChars = 30000) {
+    if (snapshotValue === undefined) return undefined;
+    if (snapshotValue === null) return null;
+
+    let snapshotObject = null;
+    if (typeof snapshotValue === "string") {
+      snapshotObject = {
+        html: snapshotValue,
+        metrics: { coercedFromString: true },
+      };
+    } else if (typeof snapshotValue === "object") {
+      snapshotObject = { ...snapshotValue };
+    } else {
+      return null;
+    }
+
+    const html = typeof snapshotObject.html === "string" ? snapshotObject.html : "";
+    let reducedHtml = html;
+    if (new Blob([reducedHtml]).size > maxChars) {
+      reducedHtml = reducedHtml.slice(0, maxChars) + '<!-- reduced -->';
+    }
+
+    // Build a schema-compatible snapshot shape.
+    const normalizedSnapshot = {
+      html: reducedHtml,
+      url: typeof snapshotObject.url === "string" ? snapshotObject.url : window.location.href,
+      normalizedUrl:
+        typeof snapshotObject.normalizedUrl === "string"
+          ? snapshotObject.normalizedUrl
+          : this.normalizeUrl(window.location.href),
+      viewport:
+        snapshotObject.viewport &&
+        typeof snapshotObject.viewport === "object" &&
+        typeof snapshotObject.viewport.width === "number" &&
+        typeof snapshotObject.viewport.height === "number"
+          ? {
+              width: snapshotObject.viewport.width,
+              height: snapshotObject.viewport.height,
+            }
+          : { width: window.innerWidth, height: window.innerHeight },
+      timestamp:
+        typeof snapshotObject.timestamp === "number"
+          ? snapshotObject.timestamp
+          : Date.now(),
+      metrics: {
+        ...(
+          snapshotObject.metrics &&
+          typeof snapshotObject.metrics === "object" &&
+          !Array.isArray(snapshotObject.metrics)
+            ? snapshotObject.metrics
+            : {}
+        ),
+        reducedForTransport: true,
+        maxChars,
+      },
+    };
+
+    if (Array.isArray(snapshotObject.anchors)) {
+      normalizedSnapshot.anchors = snapshotObject.anchors.filter(
+        (anchor) => typeof anchor === "string"
+      );
+    }
+
+    if (
+      snapshotObject.controlSignature === null ||
+      typeof snapshotObject.controlSignature === "string"
+    ) {
+      normalizedSnapshot.controlSignature = snapshotObject.controlSignature;
+    }
+
+    return normalizedSnapshot;
   }
 
   // ============================================================
@@ -3085,21 +3181,20 @@ class AIRInterceptor {
       // Recovery events must keep snapshot
       if (payloadSize > 60_000 && currentEvent.pageSnapshot && !currentEvent.meta?.isRecovery) {
         this.log(`[FLUSH] Payload too big (${payloadSize}). Reducing snapshot.`);
-
-        let reduced = typeof currentEvent.pageSnapshot === "string"
-          ? currentEvent.pageSnapshot
-          : JSON.stringify(currentEvent.pageSnapshot);
-        const reducedSize = new Blob([reduced]).size;
-
-        if (reducedSize > 30_000) {
-          reduced = reduced.slice(0, 30_000) + '<!-- reduced -->';
-        }
+        const reducedPageSnapshot = this._normalizeSnapshotForTransport(
+          currentEvent.pageSnapshot,
+          30000
+        );
+        const reducedPageState = this._normalizeSnapshotForTransport(
+          currentEvent.pageState,
+          30000
+        );
 
         // Clone the payload event and keep queue event immutable for retries/debugging.
         const reducedEvent = {
           ...currentEvent,
-          pageSnapshot: reduced,
-          pageState: reduced,
+          pageSnapshot: reducedPageSnapshot,
+          pageState: reducedPageState,
         };
 
         payload = JSON.stringify(reducedEvent);

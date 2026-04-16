@@ -98,6 +98,51 @@ export class EventServer {
     return typeof sessionValue === 'string' ? sessionValue : undefined;
   }
 
+  private coerceSnapshotField(value: unknown): unknown {
+    if (typeof value !== 'string') {
+      return value;
+    }
+
+    return {
+      html: value,
+      metrics: {
+        coercedFromString: true,
+        source: 'event-server-compat',
+      },
+    };
+  }
+
+  private normalizeIncomingEventPayload(rawEvent: unknown): unknown {
+    if (!rawEvent || typeof rawEvent !== 'object') {
+      return rawEvent;
+    }
+
+    const candidate = rawEvent as Record<string, unknown>;
+    let coercedFields: string[] = [];
+    const normalized: Record<string, unknown> = { ...candidate };
+
+    if ('pageSnapshot' in candidate && typeof candidate.pageSnapshot === 'string') {
+      normalized.pageSnapshot = this.coerceSnapshotField(candidate.pageSnapshot);
+      coercedFields.push('pageSnapshot');
+    }
+
+    if ('pageState' in candidate && typeof candidate.pageState === 'string') {
+      normalized.pageState = this.coerceSnapshotField(candidate.pageState);
+      coercedFields.push('pageState');
+    }
+
+    if (coercedFields.length > 0) {
+      console.warn('[EventServer] [COMPAT_SNAPSHOT_COERCE]', {
+        eventId: this.extractEventId(rawEvent) || 'unknown',
+        type: this.extractEventType(rawEvent) || 'unknown',
+        sessionId: this.extractSessionId(rawEvent) || 'unknown',
+        coercedFields,
+      });
+    }
+
+    return normalized;
+  }
+
   private logSchemaFail(rawEvent: unknown, error: unknown): void {
     const issues = this.extractValidationIssues(error);
     console.error('[EventServer] [SCHEMA_FAIL]', {
@@ -207,13 +252,14 @@ export class EventServer {
 
       for (const rawEvent of events) {
         const eventId = this.extractEventId(rawEvent);
-        const parseResult = AIREventSchema.safeParse(rawEvent);
+        const normalizedRawEvent = this.normalizeIncomingEventPayload(rawEvent);
+        const parseResult = AIREventSchema.safeParse(normalizedRawEvent);
 
         if (!parseResult.success) {
           anyFailed = true;
           const issues = this.extractValidationIssues(parseResult.error);
-          this.logSchemaFail(rawEvent, parseResult.error);
-          this.logEventDropped('schema_validation_failed', rawEvent, {
+          this.logSchemaFail(normalizedRawEvent, parseResult.error);
+          this.logEventDropped('schema_validation_failed', normalizedRawEvent, {
             issueCount: issues.length,
             issues,
           });
@@ -251,7 +297,7 @@ export class EventServer {
               eventId: parsedEvent.id,
               error: graphError,
             });
-            this.logEventDropped('graph_processing_failed', rawEvent, { error: graphError });
+            this.logEventDropped('graph_processing_failed', normalizedRawEvent, { error: graphError });
             results.push({ success: false, eventId: parsedEvent.id, error: graphError });
             continue;
           }
@@ -268,7 +314,7 @@ export class EventServer {
             type: parsedEvent.type,
             error: message,
           });
-          this.logEventDropped('internal_processing_error', rawEvent, { error: message });
+          this.logEventDropped('internal_processing_error', normalizedRawEvent, { error: message });
           results.push({ success: false, eventId: parsedEvent.id, error: message });
         }
       }
@@ -279,11 +325,12 @@ export class EventServer {
       return;
     }
 
-    const parseResult = AIREventSchema.safeParse(parsed);
+    const normalizedSingleEvent = this.normalizeIncomingEventPayload(parsed);
+    const parseResult = AIREventSchema.safeParse(normalizedSingleEvent);
     if (!parseResult.success) {
       const issues = this.extractValidationIssues(parseResult.error);
-      this.logSchemaFail(parsed, parseResult.error);
-      this.logEventDropped('schema_validation_failed', parsed, {
+      this.logSchemaFail(normalizedSingleEvent, parseResult.error);
+      this.logEventDropped('schema_validation_failed', normalizedSingleEvent, {
         issueCount: issues.length,
         issues,
       });
@@ -304,7 +351,7 @@ export class EventServer {
         active: activeSessionId,
         eventId: parsedEvent.id,
       });
-      this.logEventDropped('session_mismatch', parsed, {
+      this.logEventDropped('session_mismatch', normalizedSingleEvent, {
         incomingSessionId: parsedEvent.sessionId,
         activeSessionId,
       });
@@ -323,7 +370,7 @@ export class EventServer {
           eventId: parsedEvent.id,
           error: graphError,
         });
-        this.logEventDropped('graph_processing_failed', parsed, { error: graphError });
+        this.logEventDropped('graph_processing_failed', normalizedSingleEvent, { error: graphError });
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: graphError }));
         return;
@@ -342,7 +389,7 @@ export class EventServer {
         type: parsedEvent.type,
         error: message,
       });
-      this.logEventDropped('internal_processing_error', parsed, { error: message });
+      this.logEventDropped('internal_processing_error', normalizedSingleEvent, { error: message });
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, error: 'Internal event processing failure' }));
     }
