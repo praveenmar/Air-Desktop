@@ -131,6 +131,11 @@ export class EventServer {
       coercedFields.push('pageState');
     }
 
+    if ('interactionContext' in candidate && typeof candidate.interactionContext === 'string') {
+      normalized.interactionContext = this.coerceSnapshotField(candidate.interactionContext);
+      coercedFields.push('interactionContext');
+    }
+
     if (coercedFields.length > 0) {
       console.warn('[EventServer] [COMPAT_SNAPSHOT_COERCE]', {
         eventId: this.extractEventId(rawEvent) || 'unknown',

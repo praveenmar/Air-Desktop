@@ -29,6 +29,7 @@ export const PageSnapshotSchema = z.object({
   html: z.string(),
   anchors: z.array(z.string()).optional(),
   controlSignature: z.string().nullable().optional(),
+  isStable: z.boolean().optional(),
   viewport: ViewportSchema.optional(),
   url: z.string().optional(),
   normalizedUrl: z.string().optional(),
@@ -107,6 +108,8 @@ export const OutcomeEventSchema = BaseEventSchema.extend({
   type: z.literal('outcome'),
   pageState: PageSnapshotSchema.nullable().optional(),
   pageSnapshot: PageSnapshotSchema.nullable().optional(),
+  // D3.5: full-page context used for selector uniqueness / stability validation.
+  interactionContext: PageSnapshotSchema.nullable().optional(),
   meta: z.object({
     // Strictly accept either a string ("navigation") OR the Quiescence Engine's object
     settleType: z.union([

@@ -750,7 +750,11 @@ class AIRInterceptor {
 
     const shouldIncludeAttr = (name, value) => {
       if (!name || value == null) return false;
-      if (name === "style") return false;
+      if (name === "style") {
+        // D3.5 checks display/visibility for visible-match counting.
+        // Keep style only when it carries visibility-related hints.
+        return /display\s*:|visibility\s*:|opacity\s*:\s*0|hidden/i.test(String(value));
+      }
       if (captureVue && name.startsWith("data-v-")) return true;
       if (captureReact && name.startsWith("data-react")) return true;
       if (name === "data-testid" || name === "data-test-id") return true;
@@ -910,12 +914,19 @@ class AIRInterceptor {
               const controlSignature = this.computeControlSignature(document);
               const pageUrl = window.location.href;
               const normalizedUrl = this.normalizeUrl(pageUrl);
+              let isStable = true;
+              if (this.quiescence) {
+                isStable =
+                  this.quiescence.activeNetworkCount === 0 &&
+                  this.quiescence.domMutationTimer === null;
+              }
 
               return {
                 html: result.html || "",
                 anchors: anchors, // <--- Added Anchors
                 controlSignature,
                 normalizedUrl,
+                isStable,
                 viewport: {
                   width: window.innerWidth,
                   height: window.innerHeight,
@@ -943,12 +954,19 @@ class AIRInterceptor {
         const controlSignature = this.computeControlSignature(document);
         const pageUrl = window.location.href;
         const normalizedUrl = this.normalizeUrl(pageUrl);
+        let isStable = true;
+        if (this.quiescence) {
+          isStable =
+            this.quiescence.activeNetworkCount === 0 &&
+            this.quiescence.domMutationTimer === null;
+        }
 
         return Promise.resolve({
           html: result?.html || "",
           anchors: anchors, // <--- Added Anchors
           controlSignature,
           normalizedUrl,
+          isStable,
           viewport: { width: window.innerWidth, height: window.innerHeight },
           url: pageUrl,
           timestamp: Date.now(),
@@ -973,6 +991,49 @@ class AIRInterceptor {
       });
     }
     return runCapture();
+  }
+
+  /**
+   * Capture a full-page snapshot for InteractionContext (IC) validation.
+   * Captured once per unique page-state (normalizedUrl + controlSignature).
+   */
+  async _captureFullPageForIC() {
+    const controlSig = this.computeControlSignature(document);
+    const normalizedUrl = this.normalizeUrl(window.location.href);
+    const cacheKey = `${normalizedUrl}|${controlSig}`;
+
+    if (!this._icCaptureCache) this._icCaptureCache = new Set();
+    if (this._icCaptureCache.has(cacheKey)) return null;
+
+    let result;
+    try {
+      result = this.captureDOM(this.config.snapshotDepth);
+      if (!result?.html) result = this.captureDOMFallback(5);
+    } catch (_) {
+      result = this.captureDOMFallback(5);
+    }
+
+    if (!result?.html) return null;
+    this._icCaptureCache.add(cacheKey);
+
+    let isStable = true;
+    if (this.quiescence) {
+      isStable =
+        this.quiescence.activeNetworkCount === 0 &&
+        this.quiescence.domMutationTimer === null;
+    }
+
+    return {
+      html: result.html,
+      anchors: this.scanPageAnchors(),
+      controlSignature: controlSig,
+      normalizedUrl,
+      isStable,
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      url: window.location.href,
+      timestamp: Date.now(),
+      metrics: { ...result.metrics, fullPage: true },
+    };
   }
 
   _captureSubtreeSnapshot(element, maxChars = 50000) {
@@ -1022,11 +1083,18 @@ class AIRInterceptor {
     const pageUrl = window.location.href;
     const normalizedUrl = this.normalizeUrl(pageUrl);
 
+    let isStable = true;
+    if(this.quiescence) {
+      isStable = this.quiescence.activeNetworkCount === 0 
+            && this.quiescence.domMutationTimer === null;
+    }
+
     return {
       html: bestHtml,
       anchors,
       controlSignature,
       normalizedUrl,
+      isStable,
       viewport: { width: window.innerWidth, height: window.innerHeight },
       url: pageUrl,
       timestamp: Date.now(),
@@ -2348,6 +2416,10 @@ class AIRInterceptor {
           this.log("Failed to capture final snapshot", err);
         }
       }
+      let icSnapshot = null;
+      try {
+        icSnapshot = await this._captureFullPageForIC();
+      } catch (_) {}
 
     // 7. Build OUTCOME Event (The Result)
     const controlSignature = this.computeControlSignature(document);
@@ -2369,6 +2441,7 @@ class AIRInterceptor {
         controlSignature,
         primaryHeading,
       },
+      interactionContext: icSnapshot, // full-page context for D3.5 validation
       pageSnapshot: finalSnapshot, // State B
       pageState: finalSnapshot,    // Used by DB to identify "To Node"
     };
@@ -2770,6 +2843,8 @@ class AIRInterceptor {
       selector: selectorResult.selector,
       selectorPriority: selectorResult.priority,
       selectorRank: selectorResult.rank,
+      tagName: element.tagName.toLowerCase(),
+      parentSelector: context.parentSelector,
       textExcerpt,
       context,
       attributes,
@@ -2868,7 +2943,7 @@ class AIRInterceptor {
       const text = this.extractText(element);
       if (text && text.length > 0 && text.length < 50) {
         return {
-          selector: `${tagName}:has-text("${escapeCssString(text)}")`,
+          selector:`text=${text}`,
           priority: "text",
           rank: rankForPriority("text"),
         };
@@ -3003,6 +3078,18 @@ class AIRInterceptor {
   extractContext(element) {
     const parentTag = element.parentElement?.tagName?.toLowerCase() || null;
 
+    let parentSelector = null;
+    const parent = element.parentElement;
+    if (parent) {
+      if (parent.id && !/^\d/.test(parent.id) && !/[0-9a-f]{8}-[0-9a-f]{4}/i.test(parent.id)) {
+        parentSelector = `#${safeCssEscape(parent.id)}`;
+      }else if (parent.getAttribute("data-testid")) {
+        parentSelector = `[data-testid="${escapeCssString(parent.getAttribute("data-testid"))}"]`;
+      } else {
+        parentSelector = parent.tagName.toLowerCase();
+      }
+    }
+
     const containers = ["form", "nav", "section", "article", "main"];
     let current = element.parentElement;
     let nearestContainerTag = null;
@@ -3015,11 +3102,13 @@ class AIRInterceptor {
       current = current.parentElement;
     }
 
-    return { parentTag, nearestContainerTag: nearestContainerTag || "div" };
+    return { parentTag, parentSelector, nearestContainerTag: nearestContainerTag || "div" };
   }
 
   extractAttributes(element) {
     const attrs = {
+      dataTestId: element.getAttribute("data-testid") || null,
+      id: element.id || null,
       name: element.name || null,
       role: element.getAttribute("role") || null,
       ariaLabel: element.getAttribute("aria-label") || null,
@@ -3449,11 +3538,15 @@ class AIRInterceptor {
     this.lastActionTraceAt = Date.now();
     this.log("🔄 Recovering pending outcome from navigation", { traceId: data.traceId });
 
-    this.capturePageSnapshot(this.config.snapshotDepth, false).then((snapshot) => {
+    this.capturePageSnapshot(this.config.snapshotDepth, false).then(async (snapshot) => {
       const controlSignature = this.computeControlSignature(document);
       const primaryHeading = this.getPrimaryHeading(document);
       const pageUrl = window.location.href;
       const normalizedUrl = this.normalizeUrl(pageUrl);
+      let icSnapshot = null;
+      try {
+        icSnapshot = await this._captureFullPageForIC();
+      } catch (_) {}
 
       this.queueEvent({
         id: this.generateUUID(),
@@ -3468,6 +3561,7 @@ class AIRInterceptor {
           primaryHeading,
           isRecovery: true,
         },
+        interactionContext: icSnapshot, // full-page context for D3.5 validation
         pageSnapshot: snapshot,
         pageState: snapshot,
         pageUrl,
@@ -3492,11 +3586,15 @@ async flushPending() {
     if (this.disabled) return;
     // ✅ NEW: Fresh start? Capture the page so we have a node to anchor input events to.
     this.capturePageSnapshot(this.config.snapshotDepth, false).then(
-      (snapshot) => {
+      async (snapshot) => {
         const controlSignature = this.computeControlSignature(document);
         const primaryHeading   = this.getPrimaryHeading(document);
         const pageUrl = window.location.href;
         const normalizedUrl = this.normalizeUrl(pageUrl);
+        let icSnapshot = null;
+        try {
+          icSnapshot = await this._captureFullPageForIC();
+        } catch (_) {}
         this.queueEvent({
           id: this.generateUUID(),
           type: "outcome",
@@ -3504,6 +3602,7 @@ async flushPending() {
           timestamp: Date.now(),
           sessionId: this.config.sessionId,
           meta: { settleType: "baseline", controlSignature, primaryHeading },
+          interactionContext: icSnapshot, // full-page context for D3.5 validation
           pageSnapshot: snapshot,
           pageState: snapshot,
           pageUrl,
@@ -3531,8 +3630,8 @@ async flushPending() {
   }
 
   if (this.quiescence) {
-    this.quiescence.timers.forEach((t) => clearTimeout(t));
-    this.quiescence.observer.disconnect();
+    if(this.quiescence.domMutationTimer) clearTimeout(this.quiescence.domMutationTimer);
+    if(this.quiescence.observer) this.quiescence.observer.disconnect();
   }
 }
 }

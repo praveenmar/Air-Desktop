@@ -124,6 +124,7 @@ export class GraphBuilder {
         const intent = IntentDetector.detectIntent(normalizedEvent);
         const intentRaw = IntentDetector.getRawIntent(normalizedEvent);
         const slimPayload = { ...normalizedEvent } as any;
+        // Keep interactionContext in payload for D3.5 diagnostics; trim only large node-resolution snapshots.
         delete slimPayload.pageSnapshot;
         delete slimPayload.pageState;
         await this.eventRepo.insert(slimPayload as AIREvent, intent, intentRaw);
