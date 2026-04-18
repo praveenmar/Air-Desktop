@@ -13,6 +13,7 @@ import { EventRepository } from '../../core/db/repositories/event.repository';
 import { SessionRepository } from '../../core/db/repositories/session.repository';
 import { OutcomeRepository } from '../../core/db/repositories/outcome.repository';
 import { PendingActionRepository } from '../../core/db/repositories/pending-action.repository';
+import { InteractionContextRepository } from '../../core/db/repositories/interaction-context.repository';
 import { DebugLogger } from '../../core/logger/debug-logger';
 import { StateEngine } from '../../core/graph/state-engine';
 import { GraphBuilder } from '../../core/graph/graph-builder';
@@ -124,6 +125,7 @@ async function deleteSession(sessionId: string): Promise<{ deletedEvents: number
 
   return dbService.getInstance().transaction(async () => {
     await dbService!.getInstance().prepare('DELETE FROM pending_actions WHERE session_id = ?').run(sessionId);
+    await dbService!.getInstance().prepare('DELETE FROM interaction_contexts WHERE session_id = ?').run(sessionId);
 
     await dbService!.getInstance().prepare(`
       DELETE FROM outcomes
@@ -276,6 +278,9 @@ async function inspectSession(sessionId: string): Promise<Record<string, unknown
     )
   `).get<{ count: number }>(sessionId);
   const pendingCountRow = await db.prepare('SELECT COUNT(*) AS count FROM pending_actions WHERE session_id = ?').get<{ count: number }>(sessionId);
+  const interactionContextCountRow = await db
+    .prepare('SELECT COUNT(*) AS count FROM interaction_contexts WHERE session_id = ?')
+    .get<{ count: number }>(sessionId);
   const nodeCountRow = await db.prepare(`
     SELECT COUNT(*) AS count FROM nodes
     WHERE id IN (
@@ -359,9 +364,35 @@ async function inspectSession(sessionId: string): Promise<Record<string, unknown
     LIMIT 250
   `).all(sessionId);
 
+  const interactionContexts = await db.prepare(`
+    SELECT
+      id,
+      normalized_url,
+      control_signature,
+      is_stable,
+      captured_at,
+      viewport_width,
+      viewport_height,
+      LENGTH(snapshot_html) AS snapshot_size
+    FROM interaction_contexts
+    WHERE session_id = ?
+    ORDER BY is_stable DESC, captured_at DESC
+    LIMIT 250
+  `).all<{
+    id: string;
+    normalized_url: string;
+    control_signature: string;
+    is_stable: number;
+    captured_at: number;
+    viewport_width: number | null;
+    viewport_height: number | null;
+    snapshot_size: number | null;
+  }>(sessionId);
+
   const recentLogs = await db.prepare(`
     SELECT id, timestamp, component, level, message, data, session_id, trace_id
     FROM debug_logs
+    WHERE session_id = ?
     ORDER BY timestamp DESC
     LIMIT 300
   `).all<{
@@ -373,7 +404,7 @@ async function inspectSession(sessionId: string): Promise<Record<string, unknown
     data: string | null;
     session_id: string | null;
     trace_id: string | null;
-  }>();
+  }>(sessionId);
 
   return {
     session: {
@@ -391,6 +422,7 @@ async function inspectSession(sessionId: string): Promise<Record<string, unknown
       edges: edgeCountRow?.count ?? 0,
       outcomes: outcomeCountRow?.count ?? 0,
       pendingActions: pendingCountRow?.count ?? 0,
+      interactionContexts: interactionContextCountRow?.count ?? 0,
       debugLogs: recentLogs.length,
     },
     recentEvents: recentEvents.map((row) => ({
@@ -408,6 +440,18 @@ async function inspectSession(sessionId: string): Promise<Record<string, unknown
     edges,
     outcomes,
     pendingActions,
+    interactionContexts: interactionContexts.map((row) => ({
+      id: row.id,
+      normalizedUrl: row.normalized_url,
+      controlSignature: row.control_signature,
+      isStable: row.is_stable === 1,
+      capturedAt: row.captured_at,
+      viewport: {
+        width: row.viewport_width,
+        height: row.viewport_height,
+      },
+      snapshotSize: row.snapshot_size ?? 0,
+    })),
     recentLogs: recentLogs.map((row) => ({
       id: row.id,
       timestamp: row.timestamp,
@@ -538,6 +582,7 @@ async function bootstrap() {
     sessionRepo = new SessionRepository(db);
     const outcomeRepo = new OutcomeRepository(db);
     const pendingRepo = new PendingActionRepository(db);
+    const interactionContextRepo = new InteractionContextRepository(db);
     debugLogger = new DebugLogger(db);
 
     graphBuilder = new GraphBuilder(
@@ -548,6 +593,7 @@ async function bootstrap() {
       sessionRepo,
       outcomeRepo,
       pendingRepo,
+      interactionContextRepo,
       StateEngine,
       debugLogger
     );

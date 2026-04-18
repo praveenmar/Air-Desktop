@@ -17,6 +17,29 @@ export class BaselineHandler {
     private stateEngine: typeof StateEngine
   ) {}
 
+  private async logWithContext(
+    level: 'debug' | 'info' | 'warn' | 'error' | 'decision',
+    message: string,
+    data: Record<string, unknown> = {},
+    sessionId: string | null = null,
+    traceId: string | null = null
+  ): Promise<void> {
+    const resolvedSessionId = sessionId ?? null;
+    const resolvedTraceId = traceId ?? null;
+    await this.logger.log(
+      'BaselineHandler',
+      level,
+      message,
+      {
+        ...data,
+        sessionId: resolvedSessionId,
+        traceId: resolvedTraceId,
+      },
+      resolvedSessionId,
+      resolvedTraceId
+    );
+  }
+
   public async upsertNode(event: AIREvent): Promise<string | null> {
     // 1. Get the Snapshot Object
     let snapshot: PageSnapshot | undefined;
@@ -73,11 +96,11 @@ export class BaselineHandler {
           await this.nodeRepo.updateObservation(matchedByControlSig.id, {
             lastObservedAt: event.timestamp
           });
-          await this.logger.log('BaselineHandler', 'info', 'Reused node via controlSignature (exact controls + normalized URL match)', {
+          await this.logWithContext('info', 'Reused node via controlSignature (exact controls + normalized URL match)', {
             nodeId: matchedByControlSig.id,
             controlSignature: snapshot.controlSignature,
             url: normalizedUrl
-          });
+          }, event.sessionId ?? null, event.traceId ?? null);
           return matchedByControlSig.id;
         }
       }
@@ -97,19 +120,19 @@ export class BaselineHandler {
         if (viewportWidth !== null) updates.viewportWidth = viewportWidth;
         if (viewportHeight !== null) updates.viewportHeight = viewportHeight;
         await this.nodeRepo.updateObservation(existing.id, updates);
-        await this.logger.log('BaselineHandler', 'info', 'Reused node via canonical hash (anchor/html fingerprint fallback)', {
+        await this.logWithContext('info', 'Reused node via canonical hash (anchor/html fingerprint fallback)', {
           nodeId: existing.id,
           hash: canonicalHash.substring(0, 8),
           url: normalizedUrl,
-        });
+        }, event.sessionId ?? null, event.traceId ?? null);
         return existing.id;
       }
 
-      await this.logger.log('BaselineHandler', 'info', 'New node - no control-signature or canonical-hash match found', {
+      await this.logWithContext('info', 'New node - no control-signature or canonical-hash match found', {
         controlSignature: snapshot.controlSignature || null,
         hash: canonicalHash.substring(0, 8),
         url: normalizedUrl,
-      });
+      }, event.sessionId ?? null, event.traceId ?? null);
 
       const nodeId = crypto.randomUUID();
       await this.nodeRepo.upsert({
@@ -131,15 +154,15 @@ export class BaselineHandler {
         viewportHeight
       });
       
-      await this.logger.log('BaselineHandler', 'info', 'Created state node', { 
+      await this.logWithContext('info', 'Created state node', {
         nodeId, 
         hash: canonicalHash.substring(0, 8) + '...', 
         strategy: anchors ? 'Anchor' : 'HTML' 
-      });
+      }, event.sessionId ?? null, event.traceId ?? null);
       
       return nodeId;
     } catch (error) {
-      await this.logger.log('BaselineHandler', 'error', 'Failed to upsert state node', { error: (error as Error).message });
+      await this.logWithContext('error', 'Failed to upsert state node', { error: (error as Error).message }, event.sessionId ?? null, event.traceId ?? null);
       return null;
     }
   }
@@ -198,7 +221,7 @@ export class BaselineHandler {
       
       return nodeId;
     } catch (error) {
-      await this.logger.log('BaselineHandler', 'error', 'Failed to upsert fallback node', { error: (error as Error).message });
+      await this.logWithContext('error', 'Failed to upsert fallback node', { error: (error as Error).message }, event.sessionId ?? null, event.traceId ?? null);
       return null;
     }
   }

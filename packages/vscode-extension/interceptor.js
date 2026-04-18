@@ -396,6 +396,11 @@ class AIRInterceptor {
     // Delays follow exponential backoff: 500ms, 1s, 2s, 4s, 8s (cap 30s).
     this._retryState = new Map();
 
+    // Replay dedupe cache for navigation recovery.
+    // Persisted across same-tab navigations via sessionStorage.
+    this.maxReplaySentIds = 1000;
+    this._replaySentEventIds = this._loadSentEventIds();
+
     // Deduplication
     this.recentEventKeys = new Set();
     this.maxRecentKeys = 50;
@@ -502,6 +507,48 @@ class AIRInterceptor {
       this._markStorageUnavailable(error);
       return false;
     }
+  }
+
+  _getSentEventIdsStorageKey() {
+    return `air_sent_event_ids_${this.config?.sessionId || "unknown"}`;
+  }
+
+  _loadSentEventIds() {
+    const key = this._getSentEventIdsStorageKey();
+    const raw = this._safeGetStorage("session", key);
+    if (!raw) return new Set();
+
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return new Set();
+      const valid = parsed.filter((id) => typeof id === "string" && id.length > 0);
+      return new Set(valid.slice(-this.maxReplaySentIds));
+    } catch (_) {
+      this._safeRemoveStorage("session", key);
+      return new Set();
+    }
+  }
+
+  _persistSentEventIds() {
+    const key = this._getSentEventIdsStorageKey();
+    const ids = Array.from(this._replaySentEventIds).slice(-this.maxReplaySentIds);
+    this._safeSetStorage("session", key, JSON.stringify(ids));
+  }
+
+  _rememberSentEventId(eventId) {
+    if (typeof eventId !== "string" || !eventId) return;
+    this._replaySentEventIds.add(eventId);
+    while (this._replaySentEventIds.size > this.maxReplaySentIds) {
+      const oldest = this._replaySentEventIds.values().next().value;
+      if (!oldest) break;
+      this._replaySentEventIds.delete(oldest);
+    }
+    this._persistSentEventIds();
+  }
+
+  _wasEventSent(eventId) {
+    if (typeof eventId !== "string" || !eventId) return false;
+    return this._replaySentEventIds.has(eventId);
   }
 
   init() {
@@ -1002,8 +1049,15 @@ class AIRInterceptor {
     const normalizedUrl = this.normalizeUrl(window.location.href);
     const cacheKey = `${normalizedUrl}|${controlSig}`;
 
-    if (!this._icCaptureCache) this._icCaptureCache = new Set();
-    if (this._icCaptureCache.has(cacheKey)) return null;
+    if (
+      !this._icCaptureCache ||
+      typeof this._icCaptureCache.get !== "function" ||
+      typeof this._icCaptureCache.set !== "function"
+    ) {
+      this._icCaptureCache = new Map();
+    }
+    const cachedState = this._icCaptureCache.get(cacheKey);
+    if (cachedState === "stable") return null;
 
     let result;
     try {
@@ -1014,7 +1068,6 @@ class AIRInterceptor {
     }
 
     if (!result?.html) return null;
-    this._icCaptureCache.add(cacheKey);
 
     let isStable = true;
     if (this.quiescence) {
@@ -1022,6 +1075,9 @@ class AIRInterceptor {
         this.quiescence.activeNetworkCount === 0 &&
         this.quiescence.domMutationTimer === null;
     }
+
+    if (cachedState === "unstable" && !isStable) return null;
+    this._icCaptureCache.set(cacheKey, isStable ? "stable" : "unstable");
 
     return {
       html: result.html,
@@ -1170,6 +1226,10 @@ class AIRInterceptor {
       typeof snapshotObject.controlSignature === "string"
     ) {
       normalizedSnapshot.controlSignature = snapshotObject.controlSignature;
+    }
+
+    if (typeof snapshotObject.isStable === "boolean") {
+      normalizedSnapshot.isStable = snapshotObject.isStable;
     }
 
     return normalizedSnapshot;
@@ -1493,7 +1553,22 @@ class AIRInterceptor {
     // Snapshots are preserved in the stash (Step 2). The beacon carries only
     // the critical fields needed to create the edge: id, traceId, type,
     // fingerprint, pageUrl, sessionId, timestamp.
-    const slimEvents = this.eventQueue.map(ev => ({
+    const sentIds = new Set(this._replaySentEventIds);
+    const queueSeenIds = new Set();
+    const replayableQueueEvents = [];
+    for (const ev of this.eventQueue) {
+      const eventId = typeof ev?.id === "string" ? ev.id : null;
+      if (!eventId) {
+        replayableQueueEvents.push(ev);
+        continue;
+      }
+      if (queueSeenIds.has(eventId)) continue;
+      if (sentIds.has(eventId)) continue;
+      queueSeenIds.add(eventId);
+      replayableQueueEvents.push(ev);
+    }
+
+    const slimEvents = replayableQueueEvents.map(ev => ({
       ...ev,
       pageSnapshot: null,
       pageState:    null,
@@ -1521,8 +1596,20 @@ class AIRInterceptor {
       }
     }
 
-    // Merge: existing non-expired events + current queue events
-    const mergedEvents = [...existingEvents, ...this.eventQueue];
+    // Merge: existing non-expired events + current queue events, deduped by event.id
+    const mergedEvents = [];
+    const mergedIds = new Set();
+    for (const ev of [...existingEvents, ...replayableQueueEvents]) {
+      const eventId = typeof ev?.id === "string" ? ev.id : null;
+      if (!eventId) {
+        mergedEvents.push(ev);
+        continue;
+      }
+      if (mergedIds.has(eventId)) continue;
+      if (sentIds.has(eventId)) continue;
+      mergedIds.add(eventId);
+      mergedEvents.push(ev);
+    }
 
     const stored = this._safeSetStorage("local", stashKey, JSON.stringify({
         events:    mergedEvents,
@@ -1532,7 +1619,7 @@ class AIRInterceptor {
 
     if (stored) {
       stashSuccess = true;
-      this.log(`📦 Stashed ${this.eventQueue.length} events to localStorage (total in stash: ${mergedEvents.length})`);
+      this.log(`📦 Stashed ${replayableQueueEvents.length} events to localStorage (total in stash: ${mergedEvents.length})`);
     }
 
     // ── STEP 3: Always fire stripped beacon (Belt and Suspenders) ─────────────
@@ -1544,13 +1631,19 @@ class AIRInterceptor {
     try {
       if (typeof window.__air_gmBeacon === 'function') {
         // GM beacon (Tampermonkey extension context — bypasses ad blockers)
-        window.__air_gmBeacon(this.apiEndpoint, lightPayload);
-        this.log(`🚀 GM stripped beacon dispatched (${slimEvents.length} events)`);
+        const accepted = window.__air_gmBeacon(this.apiEndpoint, lightPayload);
+        if (accepted !== false) {
+          slimEvents.forEach((ev) => this._rememberSentEventId(ev.id));
+          this.log(`🚀 GM stripped beacon dispatched (${slimEvents.length} events)`);
+        } else {
+          this.log("⚠️ GM stripped beacon rejected payload");
+        }
       } else {
         // Native sendBeacon — slim payload guaranteed under 64KB after snapshot strip
         const blob = new Blob([lightPayload], { type: "application/json" });
         const sent = navigator.sendBeacon(this.apiEndpoint, blob);
         if (sent) {
+          slimEvents.forEach((ev) => this._rememberSentEventId(ev.id));
           this.log(`🚀 Stripped beacon dispatched (${slimEvents.length} events)`);
         } else {
           // Extremely unlikely after stripping — payload would need to be >64KB
@@ -1621,8 +1714,37 @@ class AIRInterceptor {
       // Unshift onto FRONT of queue (not append) — critical for ordering.
       // These events happened BEFORE this page loaded. They must be processed
       // before the outcome that checkPendingOutcome() is about to queue.
-      this.eventQueue.unshift(...validEvents);
-      recovered = validEvents.length;
+      const queuedIds = new Set(
+        this.eventQueue
+          .map((ev) => (typeof ev?.id === "string" ? ev.id : null))
+          .filter((id) => typeof id === "string")
+      );
+      const localSeen = new Set();
+      const acceptedEvents = [];
+
+      for (const ev of validEvents) {
+        const eventId = typeof ev?.id === "string" ? ev.id : null;
+
+        if (eventId && (queuedIds.has(eventId) || localSeen.has(eventId))) {
+          this.log("recovered event skipped because already queued", { eventId });
+          continue;
+        }
+
+        if (eventId && this._wasEventSent(eventId)) {
+          this.log("recovered event skipped because already sent", { eventId });
+          continue;
+        }
+
+        acceptedEvents.push(ev);
+        if (eventId) {
+          localSeen.add(eventId);
+          queuedIds.add(eventId);
+        }
+        this.log("recovered event accepted for replay", { eventId });
+      }
+
+      this.eventQueue.unshift(...acceptedEvents);
+      recovered = acceptedEvents.length;
 
       // Clear stash immediately — events are now in queue and will be sent
       // via normal flushQueue on stable network. If page unloads again before
@@ -1631,8 +1753,8 @@ class AIRInterceptor {
 
       this.log(`📬 Recovered ${recovered} stashed event(s) — prepended to queue`, {
         sessionId: this.config.sessionId,
-        oldestEvent: new Date(validEvents[0].timestamp).toISOString(),
-        newestEvent: new Date(validEvents[validEvents.length - 1].timestamp).toISOString(),
+        oldestEvent: acceptedEvents[0] ? new Date(acceptedEvents[0].timestamp).toISOString() : null,
+        newestEvent: acceptedEvents[acceptedEvents.length - 1] ? new Date(acceptedEvents[acceptedEvents.length - 1].timestamp).toISOString() : null,
       });
 
     } catch (e) {
@@ -2426,6 +2548,10 @@ class AIRInterceptor {
     const primaryHeading   = this.getPrimaryHeading(document);
     const outcomePageUrl = window.location.href;
     const outcomeNormalizedUrl = this.normalizeUrl(outcomePageUrl);
+    const normalizedIcSnapshot = this._normalizeSnapshotForTransport(
+      icSnapshot,
+      200000
+    );
     const outcomeEvent = {
       id: this.generateUUID(),
       type: "outcome",
@@ -2441,7 +2567,7 @@ class AIRInterceptor {
         controlSignature,
         primaryHeading,
       },
-      interactionContext: icSnapshot, // full-page context for D3.5 validation
+      interactionContext: normalizedIcSnapshot, // full-page context for D3.5 validation
       pageSnapshot: finalSnapshot, // State B
       pageState: finalSnapshot,    // Used by DB to identify "To Node"
     };
@@ -3276,6 +3402,7 @@ class AIRInterceptor {
         if (typeof window.__air_gmBeacon === "function") {
           const accepted = window.__air_gmBeacon(this.apiEndpoint, navPayload);
           if (accepted) {
+            this._rememberSentEventId(currentEvent.id);
             this._retryState.delete(currentEvent.id);
             this.eventQueue.shift();
             this.log(`[NAV] Dispatched via GM beacon (${traceLabel})`);
@@ -3291,6 +3418,7 @@ class AIRInterceptor {
         const blob = new Blob([payload], { type: "application/json" });
         const sent = navigator.sendBeacon(this.apiEndpoint, blob);
         if (sent) {
+          this._rememberSentEventId(currentEvent.id);
           this._retryState.delete(currentEvent.id);
           this.eventQueue.shift();
           this.log(`[NAV] Dispatched via sendBeacon (${traceLabel})`);
@@ -3304,7 +3432,7 @@ class AIRInterceptor {
       const payloadSize = new Blob([payload]).size;
 
       // Recovery events must keep snapshot
-      if (payloadSize > 60_000 && currentEvent.pageSnapshot && !currentEvent.meta?.isRecovery) {
+      if (payloadSize > 60_000 && !currentEvent.meta?.isRecovery) {
         this.log(`[FLUSH] Payload too big (${payloadSize}). Reducing snapshot.`);
         const reducedPageSnapshot = this._normalizeSnapshotForTransport(
           currentEvent.pageSnapshot,
@@ -3314,12 +3442,17 @@ class AIRInterceptor {
           currentEvent.pageState,
           30000
         );
+        const reducedInteractionContext = this._normalizeSnapshotForTransport(
+          currentEvent.interactionContext,
+          30000
+        );
 
         // Clone the payload event and keep queue event immutable for retries/debugging.
         const reducedEvent = {
           ...currentEvent,
           pageSnapshot: reducedPageSnapshot,
           pageState: reducedPageState,
+          interactionContext: reducedInteractionContext,
         };
 
         payload = JSON.stringify(reducedEvent);
@@ -3401,6 +3534,7 @@ class AIRInterceptor {
       }
 
       this._retryState.delete(currentEvent.id);
+      this._rememberSentEventId(currentEvent.id);
       this.eventQueue.shift();
       this.log(`[FLUSH] Event sent successfully (${traceLabel})`);
 
@@ -3547,6 +3681,10 @@ class AIRInterceptor {
       try {
         icSnapshot = await this._captureFullPageForIC();
       } catch (_) {}
+      const normalizedIcSnapshot = this._normalizeSnapshotForTransport(
+        icSnapshot,
+        200000
+      );
 
       this.queueEvent({
         id: this.generateUUID(),
@@ -3561,7 +3699,7 @@ class AIRInterceptor {
           primaryHeading,
           isRecovery: true,
         },
-        interactionContext: icSnapshot, // full-page context for D3.5 validation
+        interactionContext: normalizedIcSnapshot, // full-page context for D3.5 validation
         pageSnapshot: snapshot,
         pageState: snapshot,
         pageUrl,
@@ -3595,6 +3733,10 @@ async flushPending() {
         try {
           icSnapshot = await this._captureFullPageForIC();
         } catch (_) {}
+        const normalizedIcSnapshot = this._normalizeSnapshotForTransport(
+          icSnapshot,
+          200000
+        );
         this.queueEvent({
           id: this.generateUUID(),
           type: "outcome",
@@ -3602,7 +3744,7 @@ async flushPending() {
           timestamp: Date.now(),
           sessionId: this.config.sessionId,
           meta: { settleType: "baseline", controlSignature, primaryHeading },
-          interactionContext: icSnapshot, // full-page context for D3.5 validation
+          interactionContext: normalizedIcSnapshot, // full-page context for D3.5 validation
           pageSnapshot: snapshot,
           pageState: snapshot,
           pageUrl,

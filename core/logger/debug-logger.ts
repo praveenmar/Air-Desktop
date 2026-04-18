@@ -32,6 +32,13 @@ export class DebugLogger {
   ): Promise<DebugLog> {
     const logId = crypto.randomUUID();
     const timestamp = Date.now();
+    const resolvedSessionId = sessionId ?? null;
+    const resolvedTraceId = traceId ?? null;
+    const payloadData: Record<string, unknown> = {
+      ...data,
+      sessionId: resolvedSessionId,
+      traceId: resolvedTraceId,
+    };
 
     const colors: Record<string, string> = {
       debug: '[debug]',
@@ -41,7 +48,7 @@ export class DebugLogger {
       decision: '[decision]',
     };
 
-    console.log(`${colors[level] || '[log]'} [${component}] ${message}`, data);
+    console.log(`${colors[level] || '[log]'} [${component}] ${message}`, payloadData);
 
     try {
       await this.db.prepare(`
@@ -53,9 +60,9 @@ export class DebugLogger {
         component,
         level,
         message,
-        JSON.stringify(data),
-        sessionId,
-        traceId
+        JSON.stringify(payloadData),
+        resolvedSessionId,
+        resolvedTraceId
       );
     } catch (err) {
       console.error('Failed to save debug log:', err);
@@ -67,9 +74,9 @@ export class DebugLogger {
       component,
       level,
       message,
-      data,
-      sessionId,
-      traceId,
+      data: payloadData,
+      sessionId: resolvedSessionId,
+      traceId: resolvedTraceId,
     };
   }
 

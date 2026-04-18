@@ -12,6 +12,7 @@ import { EventRepository } from '../../core/db/repositories/event.repository';
 import { SessionRepository } from '../../core/db/repositories/session.repository';
 import { OutcomeRepository } from '../../core/db/repositories/outcome.repository';
 import { PendingActionRepository } from '../../core/db/repositories/pending-action.repository';
+import { InteractionContextRepository } from '../../core/db/repositories/interaction-context.repository';
 import { DebugLogger } from '../../core/logger/debug-logger';
 import { StateEngine } from '../../core/graph/state-engine';
 import { GraphBuilder } from '../../core/graph/graph-builder';
@@ -36,6 +37,7 @@ async function bootstrap() {
   const sessionRepo = new SessionRepository(db);
   const outcomeRepo = new OutcomeRepository(db);
   const pendingRepo = new PendingActionRepository(db);
+  const interactionContextRepo = new InteractionContextRepository(db);
   const logger = new DebugLogger(db);
 
   // 3. Assemble the Core Graph Builder
@@ -47,6 +49,7 @@ async function bootstrap() {
     sessionRepo,
     outcomeRepo,
     pendingRepo,
+    interactionContextRepo,
     StateEngine,
     logger
   );

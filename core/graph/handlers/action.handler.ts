@@ -35,6 +35,29 @@ export class ActionHandler {
     private logger: DebugLogger
   ) {}
 
+  private async logWithContext(
+    level: 'debug' | 'info' | 'warn' | 'error' | 'decision',
+    message: string,
+    data: Record<string, unknown> = {},
+    sessionId: string | null = null,
+    traceId: string | null = null
+  ): Promise<void> {
+    const resolvedSessionId = sessionId ?? null;
+    const resolvedTraceId = traceId ?? null;
+    await this.logger.log(
+      'ActionHandler',
+      level,
+      message,
+      {
+        ...data,
+        sessionId: resolvedSessionId,
+        traceId: resolvedTraceId,
+      },
+      resolvedSessionId,
+      resolvedTraceId
+    );
+  }
+
   public async handleAction(event: AIREvent, traceId: string, currentNodeId: string, lastNodeId: string | null): Promise<void> {
     const fpHash    = this.computeFingerprintHash(event);
     const safeEventId = event.id || crypto.randomUUID();
@@ -44,7 +67,7 @@ export class ActionHandler {
     // 1. Register PENDING ACTION in DB (for future Outcome to resolve)
     if (shouldRegisterPending) {
       await this.registerPendingAction(traceId, event.sessionId, currentNodeId, safeEventId, event.type, fpHash);
-      await this.logger.log('ActionHandler', 'info', 'Registered PENDING ACTION in DB', { traceId, type: event.type });
+      await this.logWithContext('info', 'Registered PENDING ACTION in DB', { type: event.type }, event.sessionId ?? null, traceId ?? null);
     }
 
     // 2. Self-Loop Fix: Ensure immediate actions still create edges
@@ -64,7 +87,7 @@ export class ActionHandler {
     try {
       await this.pendingRepo.register(traceId, sessionId, fromNodeId, triggerEventId, actionType, fingerprintHash);
     } catch (e) {
-      await this.logger.log('ActionHandler', 'error', 'Failed to register pending action', { error: (e as Error).message });
+      await this.logWithContext('error', 'Failed to register pending action', { error: (e as Error).message }, sessionId ?? null, traceId ?? null);
       throw e; // FIX: re-throw so GraphBuilder's transaction rolls back
     }
   }
@@ -129,7 +152,7 @@ export class ActionHandler {
 
       return edgeId;
     } catch (e) {
-      await this.logger.log('ActionHandler', 'error', 'Failed to create edge', { error: (e as Error).message });
+      await this.logWithContext('error', 'Failed to create edge', { error: (e as Error).message }, event.sessionId ?? null, event.traceId ?? null);
       throw e; // FIX: re-throw so GraphBuilder's transaction rolls back
     }
   }

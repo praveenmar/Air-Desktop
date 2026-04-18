@@ -43,6 +43,23 @@ const TABLES: string[] = [
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_project_hash ON nodes(project_id, canonical_hash)`,
   `CREATE INDEX IF NOT EXISTS idx_nodes_hash ON nodes(canonical_hash)`,
 
+  `CREATE TABLE IF NOT EXISTS interaction_contexts (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    normalized_url TEXT NOT NULL,
+    control_signature TEXT NOT NULL DEFAULT '',
+    snapshot_html TEXT,
+    anchors TEXT,
+    is_stable INTEGER DEFAULT 1,
+    viewport_width INTEGER,
+    viewport_height INTEGER,
+    captured_at INTEGER NOT NULL,
+    UNIQUE(session_id, normalized_url, control_signature),
+    FOREIGN KEY(session_id) REFERENCES sessions(id)
+  )`,
+
+  `CREATE INDEX IF NOT EXISTS idx_ic_session_url ON interaction_contexts(session_id, normalized_url)`,
+
   // 🔥 STRICT events table for fresh DBs
   `CREATE TABLE IF NOT EXISTS events (
     id TEXT PRIMARY KEY,

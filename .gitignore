@@ -40,3 +40,7 @@ tests/
 .air/
 
 .last-run.json
+
+air-*.json 
+tmp/
+interceptor logs.txt

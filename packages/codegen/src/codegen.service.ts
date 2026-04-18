@@ -742,8 +742,18 @@ export class CodegenService {
           .filter((nodeId): nodeId is string => typeof nodeId === 'string' && nodeId.length > 0),
       ),
     );
+    const normalizedUrls = Array.from(
+      new Set(
+        session.steps
+          .map(step => step.normalizedUrl || normalizeUrl(step.pageUrl))
+          .filter((url): url is string => typeof url === 'string' && url.length > 0),
+      ),
+    );
 
-    const cache = new Map<string, Document | null>();
+    const nodeCache = new Map<string, Document | null>();
+    const icStableCache = new Map<string, Document | null>();
+    const icAnyCache = new Map<string, Document | null>();
+    const eventFallbackCache = new Map<string, Document | null>();
     const maxBytes = options.maxSnapshotBytesForValidation ?? 2_000_000;
     type JsdomCtor = new (html: string) => { window: { document: Document } };
     let jsdomCtor: JsdomCtor | null = null;
@@ -781,13 +791,144 @@ export class CodegenService {
     if (!snapshotEngineAvailable) {
       console.warn('[AIR] Failed to load jsdom or linkedom. Snapshot validation disabled.');
       console.warn('[AIR] Snapshot engine unavailable — resolver running in degraded mode');
-      for (const nodeId of nodeIds) cache.set(nodeId, null);
+      for (const nodeId of nodeIds) nodeCache.set(nodeId, null);
       return {
         snapshotEngineAvailable,
         get(nodeId: string): Document | null {
-          return cache.get(nodeId) ?? null;
+          return nodeCache.get(nodeId) ?? null;
+        },
+        getSource(): 'unavailable' {
+          return 'unavailable';
         },
       };
+    }
+
+    const parseHtmlToDocument = (html: string, debugLabel: string): Document | null => {
+      if (!html) return null;
+      if (Buffer.byteLength(html, 'utf8') > maxBytes) return null;
+      try {
+        if (jsdomCtor) {
+          const dom = new jsdomCtor(html);
+          return dom.window.document;
+        }
+        if (linkedomParse) {
+          const parsed = linkedomParse(html);
+          return parsed.window.document as Document;
+        }
+        return null;
+      } catch (err) {
+        console.error('[DEBUG] loadSnapshots: parsing error for', debugLabel, err);
+        return null;
+      }
+    };
+
+    if (normalizedUrls.length > 0) {
+      const normalizedPlaceholders = normalizedUrls.map(() => '?').join(', ');
+      const icRows = this.db.prepare(`
+        SELECT
+          normalized_url AS normalizedUrl,
+          snapshot_html AS snapshotHtml,
+          is_stable AS isStable,
+          captured_at AS capturedAt
+        FROM interaction_contexts
+        WHERE session_id = ?
+          AND normalized_url IN (${normalizedPlaceholders})
+        ORDER BY normalized_url ASC, is_stable DESC, captured_at DESC
+      `).all(session.sessionId, ...normalizedUrls) as Array<{
+        normalizedUrl: string;
+        snapshotHtml: string | null;
+        isStable: number;
+        capturedAt: number;
+      }>;
+
+      for (const row of icRows) {
+        const normalizedUrl = row.normalizedUrl;
+        if (!normalizedUrl || !row.snapshotHtml) continue;
+
+        const needsAny = !icAnyCache.has(normalizedUrl);
+        const needsStable = row.isStable === 1 && !icStableCache.has(normalizedUrl);
+        if (!needsAny && !needsStable) continue;
+
+        const doc = parseHtmlToDocument(
+          row.snapshotHtml,
+          `interaction_contexts:${normalizedUrl}:${row.capturedAt}`
+        );
+        if (!doc) continue;
+        if (needsAny) icAnyCache.set(normalizedUrl, doc);
+        if (needsStable) icStableCache.set(normalizedUrl, doc);
+      }
+    }
+
+    const extractSnapshotHtmlFromPayload = (payload: any): string | null => {
+      if (!payload || typeof payload !== 'object') return null;
+
+      const candidates = [
+        payload?.interactionContext?.html,
+        payload?.pageSnapshot?.html,
+        payload?.pageState?.html,
+      ];
+
+      for (const candidate of candidates) {
+        if (typeof candidate === 'string' && candidate.length > 0) {
+          return candidate;
+        }
+      }
+      return null;
+    };
+
+    const normalizePayloadUrl = (payload: any, pageUrl: string | null): string | null => {
+      const candidates = [
+        payload?.interactionContext?.normalizedUrl,
+        payload?.pageSnapshot?.normalizedUrl,
+        payload?.pageState?.normalizedUrl,
+        payload?.normalizedUrl,
+      ];
+
+      for (const candidate of candidates) {
+        if (typeof candidate === 'string' && candidate.length > 0) {
+          return candidate;
+        }
+      }
+      if (typeof pageUrl === 'string' && pageUrl.length > 0) {
+        return normalizeUrl(pageUrl);
+      }
+      return null;
+    };
+
+    if (normalizedUrls.length > 0) {
+      const normalizedUrlSet = new Set(normalizedUrls);
+      const eventRows = this.db.prepare(`
+        SELECT timestamp, page_url AS pageUrl, payload
+        FROM events
+        WHERE session_id = ?
+        ORDER BY timestamp DESC
+      `).all(session.sessionId) as Array<{
+        timestamp: number;
+        pageUrl: string | null;
+        payload: string | null;
+      }>;
+
+      for (const row of eventRows) {
+        if (!row.payload) continue;
+
+        let payload: any;
+        try {
+          payload = JSON.parse(row.payload);
+        } catch {
+          continue;
+        }
+
+        const normalizedUrl = normalizePayloadUrl(payload, row.pageUrl);
+        if (!normalizedUrl || !normalizedUrlSet.has(normalizedUrl)) continue;
+        if (eventFallbackCache.has(normalizedUrl)) continue;
+
+        const html = extractSnapshotHtmlFromPayload(payload);
+        if (!html) continue;
+
+        const doc = parseHtmlToDocument(html, `events:${normalizedUrl}:${row.timestamp}`);
+        if (!doc) continue;
+        eventFallbackCache.set(normalizedUrl, doc);
+      }
     }
 
     const getSnapshotStmt = this.db.prepare(`
@@ -801,31 +942,45 @@ export class CodegenService {
       const row = getSnapshotStmt.get(nodeId) as { snapshotHtml?: string | null } | undefined;
       const snapshotHtml = row?.snapshotHtml;
       console.log(`[DEBUG] loadSnapshots: nodeId=${nodeId}, snapshotHtml length=${snapshotHtml ? snapshotHtml.length : 0}`);
-      if (!snapshotHtml || Buffer.byteLength(snapshotHtml, 'utf8') > maxBytes) {
-        cache.set(nodeId, null);
+      if (!snapshotHtml) {
+        nodeCache.set(nodeId, null);
         continue;
       }
-
-      try {
-        if (jsdomCtor) {
-          const dom = new jsdomCtor(snapshotHtml);
-          cache.set(nodeId, dom.window.document);
-        } else if (linkedomParse) {
-          const parsed = linkedomParse(snapshotHtml);
-          cache.set(nodeId, parsed.window.document as Document);
-        } else {
-          cache.set(nodeId, null);
-        }
-      } catch (err) {
-        console.error('[DEBUG] loadSnapshots: parsing error for nodeId=', nodeId, err);
-        cache.set(nodeId, null);
-      }
+      nodeCache.set(nodeId, parseHtmlToDocument(snapshotHtml, `nodes:${nodeId}`));
     }
+
+    console.log(
+      `[DEBUG] loadSnapshots: icStable=${icStableCache.size}, icAny=${icAnyCache.size}, eventFallback=${eventFallbackCache.size}, nodeFallback=${Array.from(nodeCache.values()).filter(Boolean).length}/${nodeCache.size}`
+    );
 
     return {
       snapshotEngineAvailable,
-      get(nodeId: string): Document | null {
-        return cache.get(nodeId) ?? null;
+      get(nodeId: string, normalizedUrl?: string): Document | null {
+        if (normalizedUrl) {
+          const stable = icStableCache.get(normalizedUrl);
+          if (stable) return stable;
+
+          const any = icAnyCache.get(normalizedUrl);
+          if (any) return any;
+
+          const eventFallback = eventFallbackCache.get(normalizedUrl);
+          if (eventFallback) return eventFallback;
+        }
+
+        if (!nodeId) return null;
+        return nodeCache.get(nodeId) ?? null;
+      },
+      getSource(nodeId: string, normalizedUrl?: string): 'latest' | 'latest-stable' | 'unavailable' {
+        if (normalizedUrl) {
+          if (icStableCache.get(normalizedUrl)) return 'latest-stable';
+          if (icAnyCache.get(normalizedUrl)) return 'latest';
+          if (eventFallbackCache.get(normalizedUrl)) return 'latest';
+        }
+
+        if (nodeId && nodeCache.get(nodeId)) {
+          return 'latest';
+        }
+        return 'unavailable';
       },
     };
     } catch (err) {
@@ -838,6 +993,9 @@ export class CodegenService {
         snapshotEngineAvailable: false,
         get(nodeId: string): Document | null {
           return fallbackCache.get(nodeId) ?? null;
+        },
+        getSource(): 'unavailable' {
+          return 'unavailable';
         },
       };
     }

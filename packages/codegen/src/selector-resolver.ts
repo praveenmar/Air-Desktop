@@ -1,4 +1,10 @@
-import type { CodegenSession, CodegenStep, ResolverMetadata, SelectorPriority } from './types';
+import type {
+  CodegenSession,
+  CodegenStep,
+  ResolverMetadata,
+  SelectorPriority,
+  ResolverSnapshotSource,
+} from './types';
 
 export interface ResolverConfig {
   enableLLMFallback?: boolean;
@@ -19,7 +25,8 @@ export interface ResolvedResolverConfig {
 }
 
 export interface SnapshotCache {
-  get(nodeId: string): Document | null;
+  get(nodeId: string, normalizedUrl?: string): Document | null;
+  getSource?: (nodeId: string, normalizedUrl?: string) => ResolverSnapshotSource;
   snapshotEngineAvailable?: boolean;
 }
 
@@ -674,14 +681,15 @@ function deriveDeterministicResolution(
   step: CodegenStep,
   snapshot: Document | null,
   config: ResolvedResolverConfig,
-  ctx: ResolveContext
+  ctx: ResolveContext,
+  snapshotSource?: ResolverSnapshotSource
 ): StepResolutionDraft {
   const baseMetadata: ResolverMetadata = {
     resolvedSelector: step.selector,
     resolvedBy: 'unresolved',
     bestScore: 0,
     effectiveMatchCount: 0,
-    snapshotSource: snapshot ? 'latest' : 'unavailable',
+    snapshotSource: snapshotSource ?? (snapshot ? 'latest' : 'unavailable'),
     validationMethod: 'css-query-visible-offset-parent-v1',
     llmAttempted: false,
     llmAccepted: false,
@@ -823,23 +831,39 @@ export async function resolveSelectorsForSession(
   const resolvedConfig = resolveConfig(config);
   const snapshotEngineAvailable = snapshotCache.snapshotEngineAvailable ?? true;
   // Debug: count how many snapshots are present in the cache for session steps
-  const stepNodeIds = session.steps.map(s => s.sourceNodeId).filter(Boolean as any) as string[];
+  const stepLookups = session.steps.map(step => ({
+    nodeId: step.sourceNodeId ?? '',
+    normalizedUrl: step.normalizedUrl,
+  }));
   let availableCount = 0;
-  for (const nid of stepNodeIds) {
+  for (const lookup of stepLookups) {
     try {
-      if (snapshotCache.get(nid)) availableCount++;
+      if (snapshotCache.get(lookup.nodeId, lookup.normalizedUrl)) availableCount++;
     } catch (err) {
       // ignore
     }
   }
-  console.log(`[DEBUG] resolveSelectorsForSession: steps=${session.steps.length}, snapshotEngineAvailable=${snapshotEngineAvailable}, snapshotsAvailable=${availableCount}/${stepNodeIds.length}`);
+  console.log(`[DEBUG] resolveSelectorsForSession: steps=${session.steps.length}, snapshotEngineAvailable=${snapshotEngineAvailable}, snapshotsAvailable=${availableCount}/${stepLookups.length}`);
 
   const drafts: StepResolutionDraft[] = [];
   for (const step of session.steps) {
-    const nodeId = step.sourceNodeId;
-    const snapshot = nodeId ? snapshotCache.get(nodeId) : null;
-    console.log(`[DEBUG] resolveSelectorsForSession: step ${step.step}, nodeId=${nodeId}, snapshot=${!!snapshot}`);
-    drafts.push(deriveDeterministicResolution(step, snapshot, resolvedConfig, { snapshotEngineAvailable }));
+    const nodeId = step.sourceNodeId ?? '';
+    const snapshot = snapshotCache.get(nodeId, step.normalizedUrl);
+    const snapshotSource = snapshotCache.getSource
+      ? snapshotCache.getSource(nodeId, step.normalizedUrl)
+      : (snapshot ? 'latest' : 'unavailable');
+    console.log(
+      `[DEBUG] resolveSelectorsForSession: step ${step.step}, nodeId=${nodeId || '<none>'}, normalizedUrl=${step.normalizedUrl || '<none>'}, snapshot=${!!snapshot}, source=${snapshotSource}`
+    );
+    drafts.push(
+      deriveDeterministicResolution(
+        step,
+        snapshot,
+        resolvedConfig,
+        { snapshotEngineAvailable },
+        snapshotSource
+      )
+    );
   }
 
   const hasAnySnapshot = drafts.some(draft => draft.snapshot !== null);

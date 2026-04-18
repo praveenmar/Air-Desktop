@@ -12,18 +12,41 @@ export class SessionManager {
     private logger: DebugLogger
   ) {}
 
+  private async logWithContext(
+    level: 'debug' | 'info' | 'warn' | 'error' | 'decision',
+    message: string,
+    data: Record<string, unknown> = {},
+    sessionId: string | null = null,
+    traceId: string | null = null
+  ): Promise<void> {
+    const resolvedSessionId = sessionId ?? null;
+    const resolvedTraceId = traceId ?? null;
+    await this.logger.log(
+      'SessionManager',
+      level,
+      message,
+      {
+        ...data,
+        sessionId: resolvedSessionId,
+        traceId: resolvedTraceId,
+      },
+      resolvedSessionId,
+      resolvedTraceId
+    );
+  }
+
   public async getOrCreateSession(sessionId: string | null | undefined): Promise<Session | null> {
     if (!sessionId) return null;
 
     const existing = await this.sessionRepo.findById(sessionId);
     if (existing) {
-      await this.logger.log('SessionManager', 'debug', 'Session already active - reusing existing session pointer', { sessionId });
+      await this.logWithContext('debug', 'Session already active - reusing existing session pointer', {}, sessionId, null);
       return existing;
     }
 
     const created = await this.sessionRepo.getOrCreate(sessionId);
     if (created) {
-      await this.logger.log('SessionManager', 'info', 'Session created (first event observed for this recording flow)', { sessionId });
+      await this.logWithContext('info', 'Session created (first event observed for this recording flow)', {}, sessionId, null);
     }
 
     return created;

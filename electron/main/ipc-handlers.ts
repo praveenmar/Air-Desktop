@@ -276,7 +276,7 @@ export function registerIpcHandlers(
   ipcMain.handle('db:reset', async () => {
     const db = dbService.getInstance();
     try {
-      const tables = ['pending_actions', 'outcomes', 'edges', 'events', 'nodes', 'sessions', 'debug_logs'];
+      const tables = ['pending_actions', 'outcomes', 'edges', 'events', 'interaction_contexts', 'nodes', 'sessions', 'debug_logs'];
       return await db.transaction(async () => {
         for (const table of tables) {
           await db.prepare(`DELETE FROM ${table}`).run();
