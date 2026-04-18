@@ -9,7 +9,7 @@ function makeDocument(html: string): Document {
 
 function makeSnapshotCache(entries: Record<string, Document | null>): SnapshotCache {
   return {
-    get(nodeId: string): Document | null {
+    get(nodeId: string, _normalizedUrl?: string, _controlSignature?: string): Document | null {
       return entries[nodeId] ?? null;
     },
   };

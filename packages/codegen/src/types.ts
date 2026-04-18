@@ -70,6 +70,21 @@ export interface ResolverMetadata {
   resolverVersion: 1;
 }
 
+export interface FingerprintData {
+  selector?: string;
+  selectorPriority?: string;
+  selectorRank?: number;
+  tagName?: string;
+  parentSelector?: string | null;
+  textExcerpt?: string | null;
+  context?: {
+    parentTag?: string | null;
+    nearestContainerTag?: string | null;
+  };
+  attributes?: Record<string, string>;
+  attributesHash?: string;
+}
+
 export interface CodegenStep {
   /** 1-based step index — used as the @air-step breadcrumb in generated code */
   step: number;
@@ -102,6 +117,12 @@ export interface CodegenStep {
 
   /** Optional selector quality rank (1 = most stable, 10 = most fragile). */
   selectorRank?: number;
+
+  /** Original captured fingerprint payload for resolver diagnostics and candidate hints. */
+  fingerprint?: FingerprintData;
+
+  /** Optional control signature tied to the captured UI state for IC snapshot lookup. */
+  controlSignature?: string;
 
   /**
    * Input value for 'input' and 'custom-select' actions.

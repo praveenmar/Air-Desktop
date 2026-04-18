@@ -30,6 +30,7 @@ export type {
   AssertionSource,
   OutcomeType,
   SelectorPriority,
+  FingerprintData,
   ResolverMetadata,
   ResolverResolvedBy,
   ResolverSnapshotSource,

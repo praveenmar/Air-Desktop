@@ -38,8 +38,8 @@ export class LlmOrchestrator {
   ): Promise<void> {
     const resolverConfig = options.resolverConfig ?? {};
     const snapshotCache = options.snapshotCache ?? {
-      get: () => null,
-      getSource: () => 'unavailable',
+      get: (_nodeId: string, _normalizedUrl?: string, _controlSignature?: string) => null,
+      getSource: (_nodeId: string, _normalizedUrl?: string, _controlSignature?: string) => 'unavailable',
     } as SnapshotCache & { snapshotEngineAvailable?: boolean };
     console.log('[DEBUG] snapshotCache received, engineAvailable:', !!(snapshotCache as any).snapshotEngineAvailable);
     const debugTrace = /^(1|true|yes)$/i.test(process.env.AIR_DEBUG_RESOLVER_TRACE || '');
@@ -57,7 +57,7 @@ export class LlmOrchestrator {
       console.log('--- SNAPSHOT AVAILABILITY ---');
       for (const step of session.steps) {
         const nodeId = step.sourceNodeId;
-        const snapshot = snapshotCache.get(nodeId ?? '', step.normalizedUrl);
+        const snapshot = snapshotCache.get(nodeId ?? '', step.normalizedUrl, step.controlSignature);
         console.log(`Step ${step.step} snapshot:`, snapshot ? 'YES' : 'NO');
       }
     }

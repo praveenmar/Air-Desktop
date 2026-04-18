@@ -25,8 +25,12 @@ export interface ResolvedResolverConfig {
 }
 
 export interface SnapshotCache {
-  get(nodeId: string, normalizedUrl?: string): Document | null;
-  getSource?: (nodeId: string, normalizedUrl?: string) => ResolverSnapshotSource;
+  get(nodeId: string, normalizedUrl?: string, controlSignature?: string): Document | null;
+  getSource?: (
+    nodeId: string,
+    normalizedUrl?: string,
+    controlSignature?: string
+  ) => ResolverSnapshotSource;
   snapshotEngineAvailable?: boolean;
 }
 
@@ -48,6 +52,7 @@ export interface RawCandidate {
     | 'placeholder'
     | 'role+name'
     | 'class'
+    | 'text'
     | 'parent-scope';
   rank: number;
 }
@@ -192,6 +197,11 @@ function isLikelyCssSelector(selector: string): boolean {
   return true;
 }
 
+function isTextSelector(selector: string): boolean {
+  const trimmed = selector.trim();
+  return trimmed.startsWith('text=') || /:has-text\((?:"[^"]*"|'[^']*')\)/i.test(trimmed);
+}
+
 function extractAttributeValue(selector: string, attribute: string): string | null {
   const escaped = attribute.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const match = selector.match(new RegExp(`\\[${escaped}=(?:"([^"]*)"|'([^']*)')\\]`, 'i'));
@@ -232,19 +242,34 @@ interface StepSignalAttributes {
   placeholder?: string;
   role?: string;
   class?: string;
+  tagName?: string;
+  parentSelector?: string | null;
 }
 
 function inferStepSignalAttributes(step: CodegenStep): StepSignalAttributes {
   const attrs: StepSignalAttributes = {};
   const selector = step.selector || '';
+  const fingerprint = step.fingerprint;
+  const fpAttrs = fingerprint?.attributes;
 
-  attrs.id = extractId(selector) ?? undefined;
-  attrs.name = extractAttributeValue(selector, 'name') ?? undefined;
-  attrs.dataTestId = extractAttributeValue(selector, 'data-testid') ?? undefined;
-  attrs.ariaLabel = extractAttributeValue(selector, 'aria-label') ?? undefined;
-  attrs.placeholder = extractAttributeValue(selector, 'placeholder') ?? undefined;
-  attrs.role = extractAttributeValue(selector, 'role') ?? undefined;
+  attrs.id = fpAttrs?.id || extractId(selector) || undefined;
+  attrs.name = fpAttrs?.name || extractAttributeValue(selector, 'name') || undefined;
+  attrs.dataTestId =
+    fpAttrs?.dataTestId ||
+    fpAttrs?.['data-testid'] ||
+    extractAttributeValue(selector, 'data-testid') ||
+    undefined;
+  attrs.ariaLabel =
+    fpAttrs?.ariaLabel ||
+    fpAttrs?.['aria-label'] ||
+    extractAttributeValue(selector, 'aria-label') ||
+    undefined;
+  attrs.placeholder =
+    fpAttrs?.placeholder || extractAttributeValue(selector, 'placeholder') || undefined;
+  attrs.role = fpAttrs?.role || extractAttributeValue(selector, 'role') || undefined;
   attrs.class = extractClass(selector) ?? undefined;
+  attrs.tagName = fingerprint?.tagName?.toLowerCase();
+  attrs.parentSelector = fingerprint?.parentSelector ?? undefined;
 
   return attrs;
 }
@@ -349,7 +374,35 @@ function isDynamicText(text: string): boolean {
   return false;
 }
 
-function extractStableParentSelector(step: CodegenStep): string | null {
+function normalizeTextForMatch(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function unquoteTextLiteral(value: string): string {
+  const trimmed = value.trim();
+  if (
+    trimmed.length >= 2 &&
+    ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+      (trimmed.startsWith("'") && trimmed.endsWith("'")))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function escapeTextSelectorValue(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractStableParentSelector(step: CodegenStep, attrs?: StepSignalAttributes): string | null {
+  if (attrs?.parentSelector && isLikelyCssSelector(attrs.parentSelector)) {
+    return attrs.parentSelector;
+  }
+
   const selector = step.selector;
   if (!selector) return null;
 
@@ -410,14 +463,107 @@ export function validateCSSCandidate(selector: string, snapshot: Document): Cand
   };
 }
 
+export function validateTextCandidate(selector: string, snapshot: Document): CandidateValidation {
+  const trimmed = selector.trim();
+  let pool: Element[] = [];
+  let targetText = '';
+
+  if (trimmed.startsWith('text=')) {
+    targetText = unquoteTextLiteral(trimmed.slice(5));
+    if (!targetText) {
+      return {
+        totalMatchCount: 0,
+        visibleMatchCount: 0,
+        effectiveMatchCount: 0,
+        reason: 'invalid-selector',
+      };
+    }
+    try {
+      pool = Array.from(snapshot.querySelectorAll('*'));
+    } catch {
+      return {
+        totalMatchCount: 0,
+        visibleMatchCount: 0,
+        effectiveMatchCount: 0,
+        reason: 'invalid-selector',
+      };
+    }
+  } else {
+    const hasTextMatch = trimmed.match(/^(.*?):has-text\((?:"([^"]*)"|'([^']*)')\)$/i);
+    if (!hasTextMatch) {
+      return {
+        totalMatchCount: 0,
+        visibleMatchCount: 0,
+        effectiveMatchCount: 0,
+        reason: 'invalid-selector',
+      };
+    }
+
+    const baseSelector = hasTextMatch[1].trim() || '*';
+    targetText = hasTextMatch[2] ?? hasTextMatch[3] ?? '';
+    if (!targetText.trim()) {
+      return {
+        totalMatchCount: 0,
+        visibleMatchCount: 0,
+        effectiveMatchCount: 0,
+        reason: 'invalid-selector',
+      };
+    }
+
+    try {
+      pool = Array.from(snapshot.querySelectorAll(baseSelector));
+    } catch {
+      return {
+        totalMatchCount: 0,
+        visibleMatchCount: 0,
+        effectiveMatchCount: 0,
+        reason: 'invalid-selector',
+      };
+    }
+  }
+
+  const normalizedNeedle = normalizeTextForMatch(targetText);
+  if (!normalizedNeedle) {
+    return {
+      totalMatchCount: 0,
+      visibleMatchCount: 0,
+      effectiveMatchCount: 0,
+      reason: 'invalid-selector',
+    };
+  }
+
+  const matches = pool.filter(element => {
+    const haystack = normalizeTextForMatch(element.textContent || '');
+    return haystack.includes(normalizedNeedle);
+  });
+  const visibleMatches = matches.filter(isVisibleElement);
+  const effective = visibleMatches.length;
+
+  return {
+    totalMatchCount: matches.length,
+    visibleMatchCount: visibleMatches.length,
+    effectiveMatchCount: effective,
+    reason: effective === 1 ? 'unique-visible' : effective === 0 ? 'no-visible-match' : 'non-unique',
+  };
+}
+
+function validateCandidate(selector: string, snapshot: Document): CandidateValidation {
+  return isTextSelector(selector)
+    ? validateTextCandidate(selector, snapshot)
+    : validateCSSCandidate(selector, snapshot);
+}
+
 export function shouldKeepOriginal(step: CodegenStep, snapshot: Document, config: ResolverConfig): boolean {
   if (!step.selector) return false;
-  const validation = validateCSSCandidate(step.selector, snapshot);
+  const validation = validateCandidate(step.selector, snapshot);
   if (validation.effectiveMatchCount !== 1) return false;
   const rank = getSelectorRank(step.selector, step.selectorPriority, step.selectorRank);
   const score = rankScore(rank) + 0.3;
   const minScore = config.resolverMinScore ?? DEFAULT_CONFIG.resolverMinScore;
-  return score >= minScore;
+  const effectiveMinScore = isTextSelector(step.selector)
+    ? Math.min(minScore, 0.65)
+    : minScore;
+  return (score + 1e-9) >= effectiveMinScore;
 }
 
 export function generateCandidates(step: CodegenStep, snapshot: Document): RawCandidate[] {
@@ -477,13 +623,34 @@ export function generateCandidates(step: CodegenStep, snapshot: Document): RawCa
     candidates.push({ selector: `.${cssEscape(stableClass)}`, source: 'class', rank: 7 });
   }
 
-  // V1: text-based selectors are intentionally disabled until a text-aware
-  // validation pipeline is added (CSS validation cannot validate `text=` syntax).
   if (textExcerpt && !isDynamicText(textExcerpt)) {
-    void textExcerpt;
+    const escapedText = escapeTextSelectorValue(textExcerpt);
+    if (escapedText) {
+      candidates.push({
+        selector: `text=${escapedText}`,
+        source: 'text',
+        rank: 6,
+      });
+
+      if (selector && isLikelyCssSelector(selector)) {
+        candidates.push({
+          selector: `${selector}:has-text("${escapedText}")`,
+          source: 'text',
+          rank: 6,
+        });
+      }
+
+      if (attrs.tagName && /^[a-z][a-z0-9-]*$/i.test(attrs.tagName)) {
+        candidates.push({
+          selector: `${attrs.tagName}:has-text("${escapedText}")`,
+          source: 'text',
+          rank: 6,
+        });
+      }
+    }
   }
 
-  const stableParent = extractStableParentSelector(step);
+  const stableParent = extractStableParentSelector(step, attrs);
   if (stableParent && selector) {
     candidates.push({
       selector: `${stableParent} ${selector}`,
@@ -576,6 +743,30 @@ function compareCandidates(a: CandidateScore, b: CandidateScore): number {
   }
 
   return a.candidate.selector.localeCompare(b.candidate.selector);
+}
+
+function normalizeSelectorForShellCheck(selector: string): string {
+  return selector.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function isKnownShellSelector(selector: string): boolean {
+  const normalized = normalizeSelectorForShellCheck(selector);
+  if (!normalized) return false;
+
+  if (normalized === 'html' || normalized === 'body') return true;
+  if (normalized === '#app' || normalized === '#root') return true;
+  if (normalized === '[id="app"]' || normalized === "[id='app']") return true;
+  if (normalized === '[id="root"]' || normalized === "[id='root']") return true;
+  if (normalized === '.oxd-layout' || normalized === '.oxd-layout-container') return true;
+
+  return false;
+}
+
+function shouldBlockGenericShellOverride(originalSelector: string, candidateSelector: string): boolean {
+  if (!candidateSelector || candidateSelector === originalSelector) return false;
+  if (!isKnownShellSelector(candidateSelector)) return false;
+  if (isKnownShellSelector(originalSelector)) return false;
+  return true;
 }
 
 export function matchesIntent(el: Element, intent: string): boolean {
@@ -724,7 +915,7 @@ function deriveDeterministicResolution(
     };
   }
 
-  const originalValidation = validateCSSCandidate(step.selector, snapshot);
+  const originalValidation = validateCandidate(step.selector, snapshot);
   if (shouldKeepOriginal(step, snapshot, config)) {
     const rank = getSelectorRank(step.selector, step.selectorPriority, step.selectorRank);
     const score = rankScore(rank) + 0.3;
@@ -744,7 +935,7 @@ function deriveDeterministicResolution(
   }
 
   const candidateScores: CandidateScore[] = generateCandidates(step, snapshot).map(candidate => {
-    const validation = validateCSSCandidate(candidate.selector, snapshot);
+    const validation = validateCandidate(candidate.selector, snapshot);
     return {
       candidate,
       validation,
@@ -769,6 +960,22 @@ function deriveDeterministicResolution(
       metadata: {
         ...baseMetadata,
         effectiveMatchCount: originalValidation.effectiveMatchCount,
+      },
+      llmEligible: true,
+    };
+  }
+
+  if (winner.candidate.selector !== step.selector &&
+      shouldBlockGenericShellOverride(step.selector, winner.candidate.selector)) {
+    return {
+      step,
+      snapshot,
+      resolvedSelector: step.selector,
+      metadata: {
+        ...baseMetadata,
+        resolvedSelector: step.selector,
+        effectiveMatchCount: originalValidation.effectiveMatchCount,
+        warningCodes: [...baseMetadata.warningCodes, 'blocked-generic-shell-override'],
       },
       llmEligible: true,
     };
@@ -834,11 +1041,12 @@ export async function resolveSelectorsForSession(
   const stepLookups = session.steps.map(step => ({
     nodeId: step.sourceNodeId ?? '',
     normalizedUrl: step.normalizedUrl,
+    controlSignature: step.controlSignature,
   }));
   let availableCount = 0;
   for (const lookup of stepLookups) {
     try {
-      if (snapshotCache.get(lookup.nodeId, lookup.normalizedUrl)) availableCount++;
+      if (snapshotCache.get(lookup.nodeId, lookup.normalizedUrl, lookup.controlSignature)) availableCount++;
     } catch (err) {
       // ignore
     }
@@ -848,9 +1056,9 @@ export async function resolveSelectorsForSession(
   const drafts: StepResolutionDraft[] = [];
   for (const step of session.steps) {
     const nodeId = step.sourceNodeId ?? '';
-    const snapshot = snapshotCache.get(nodeId, step.normalizedUrl);
+    const snapshot = snapshotCache.get(nodeId, step.normalizedUrl, step.controlSignature);
     const snapshotSource = snapshotCache.getSource
-      ? snapshotCache.getSource(nodeId, step.normalizedUrl)
+      ? snapshotCache.getSource(nodeId, step.normalizedUrl, step.controlSignature)
       : (snapshot ? 'latest' : 'unavailable');
     console.log(
       `[DEBUG] resolveSelectorsForSession: step ${step.step}, nodeId=${nodeId || '<none>'}, normalizedUrl=${step.normalizedUrl || '<none>'}, snapshot=${!!snapshot}, source=${snapshotSource}`

@@ -5,13 +5,16 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "air": "dist/bin/air-review.js"
+    "air": "dist/bin/air-review.js",
+    "air-trace": "dist/bin/air-trace.js"
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "review": "ts-node bin/air-review.ts",
-    "review:list": "ts-node bin/air-review.ts --list"
+    "review": "node bin/run-ts-cli.cjs air-review.ts",
+    "review:list": "node bin/run-ts-cli.cjs air-review.ts --list",
+    "trace": "node bin/run-ts-cli.cjs air-trace.ts",
+    "trace:list": "node bin/run-ts-cli.cjs air-trace.ts --list"
   },
   "dependencies": {
     "@air/shared": "0.1.0",

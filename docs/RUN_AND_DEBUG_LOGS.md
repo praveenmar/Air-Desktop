@@ -200,3 +200,30 @@ If live event rows look empty, rely on:
 - `Sessions -> View Graph`
 - `session.getDebugLogs(...)` / DB queries above
 
+## 9) Resolver Trace Audit (CSV/JSON)
+
+Use this when you want per-step evidence of how snapshot lookup behaved during generation.
+
+Run (from repo root):
+
+```powershell
+npm run trace --workspace @air/codegen -- --list
+npm run trace --workspace @air/codegen -- session-<id>
+```
+
+Optional output formats:
+
+```powershell
+npm run trace --workspace @air/codegen -- session-<id> --json --out air-trace.json
+npm run trace --workspace @air/codegen -- session-<id> --csv  --out air-trace.csv
+```
+
+Important columns in output:
+- `snapshotSource`: resolver-level source (`latest-stable`, `latest`, `unavailable`)
+- `icLookupMode`: `exact_key_match | url_fallback | event_fallback | node_fallback | none`
+- `controlSignatureUsed`: signature used in IC lookup key
+- `controlSignatureMissing`: true when lookup used empty signature
+- `snapshotSizeBytes`: size of the selected snapshot payload
+- `icIsStable`: IC row stability flag when source is IC
+- `snapshotRejectedReason`: shows `*_too_large` when candidates were skipped for size
+

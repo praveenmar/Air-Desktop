@@ -30,6 +30,8 @@ export const ElementFingerprintSchema = z.object({
   selector: z.string(),
   selectorPriority: SelectorPrioritySchema,
   selectorRank: z.number().int().min(1).max(10).optional(),
+  tagName: z.string().optional(),
+  parentSelector: z.string().nullable().optional(),
   textExcerpt: z.string().nullable(),
   context: FingerprintContextSchema,
   attributes: z.record(z.string(), z.string().optional()),

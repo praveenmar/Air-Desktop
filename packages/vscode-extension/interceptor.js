@@ -1103,26 +1103,26 @@ class AIRInterceptor {
       bestHtml = container.outerHTML;
     }
 
-    // If element/container is small enough, return it
-    if (bestHtml.length <= maxChars) return bestHtml;
-
-    // Try to expand to parent (up to 2 levels) for more context
-    let depth = 0;
-    let current = element.parentElement;
-    while (current && depth < 2) {
-      const parentHtml = current.outerHTML;
-      if (parentHtml.length <= maxChars) {
-        bestHtml = parentHtml;
-      } else {
-        break;
-      }
-      current = current.parentElement;
-      depth++;
-    }
-
-    // If still too large, truncate
+    // Keep existing behavior: only attempt parent expansion when current html is too large.
     if (bestHtml.length > maxChars) {
-      bestHtml = bestHtml.slice(0, maxChars) + '<!-- truncated -->';
+      // Try to expand to parent (up to 2 levels) for more context
+      let depth = 0;
+      let current = element.parentElement;
+      while (current && depth < 2) {
+        const parentHtml = current.outerHTML;
+        if (parentHtml.length <= maxChars) {
+          bestHtml = parentHtml;
+        } else {
+          break;
+        }
+        current = current.parentElement;
+        depth++;
+      }
+
+      // If still too large, truncate
+      if (bestHtml.length > maxChars) {
+        bestHtml = bestHtml.slice(0, maxChars) + '<!-- truncated -->';
+      }
     }
 
     let anchors = [];
@@ -2311,6 +2311,10 @@ class AIRInterceptor {
     const triggerFp        = session?.triggerFingerprint || null;
     const durationMs       = session ? Date.now() - session.openTimestamp : null;
     const optionFingerprint = this.generateFingerprint(el);
+    const snapshotTarget = el || session?.triggerEl || clickEvent?.target || null;
+    const subtreeSnapshot = snapshotTarget
+      ? this._captureSubtreeSnapshot(snapshotTarget)
+      : null;
 
     const pageUrl = window.location.href;
     const normalizedUrl = this.normalizeUrl(pageUrl);
@@ -2341,6 +2345,8 @@ class AIRInterceptor {
         durationMs,                            // time between open and select
         hadExplicitSession: !!session,         // did we track the trigger click?
       },
+      pageSnapshot: subtreeSnapshot || undefined,
+      pageState: subtreeSnapshot || undefined,
     });
 
     this._closeDropdownSession();
@@ -3191,14 +3197,26 @@ class AIRInterceptor {
   }
 
   extractText(element) {
-    // Use textContent instead of innerText for consistency
-    const text = element.textContent || element.innerText || "";
-    return (
-      text
-        .trim()
-        .replace(/\s+/g, " ")
-        .substring(0, this.config.maxTextLength) || null
-    );
+    // Use textContent instead of innerText for consistency.
+    const rawText = element.textContent || element.innerText || "";
+    const normalizedText = rawText.trim().replace(/\s+/g, " ");
+    if (normalizedText) {
+      return normalizedText.substring(0, this.config.maxTextLength);
+    }
+
+    // Icon-only controls often carry the visible intent via aria-label/title/alt.
+    const fallbackLabel = (
+      element.getAttribute("aria-label") ||
+      element.getAttribute("title") ||
+      element.getAttribute("alt") ||
+      ""
+    )
+      .trim()
+      .replace(/\s+/g, " ");
+
+    return fallbackLabel
+      ? fallbackLabel.substring(0, this.config.maxTextLength)
+      : null;
   }
 
   extractContext(element) {

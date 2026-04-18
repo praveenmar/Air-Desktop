@@ -39,6 +39,7 @@ import {
   ActionType,
   SelectorPriority,
   AssertionType,
+  FingerprintData,
 } from './types';
 import type { ResolverConfig, SnapshotCache } from './selector-resolver';
 import {
@@ -194,15 +195,6 @@ function parseAnchorsToAssertions(
 // Fingerprint is stored as JSON in event payload.
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface FingerprintData {
-  selector?: string;
-  selectorPriority?: string;
-  selectorRank?: number;
-  textExcerpt?: string | null;
-  attributes?: Record<string, string>;
-  attributesHash?: string;
-}
-
 function extractFingerprint(payloadJson: string | null): FingerprintData | null {
   if (!payloadJson) return null;
   try {
@@ -239,6 +231,28 @@ function extractValue(payloadJson: string | null, eventType: string): string | u
       if (payload.inputLength) return '*'.repeat(Math.min(payload.inputLength, 20));
     }
 
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function extractControlSignature(payloadJson: string | null): string | undefined {
+  if (!payloadJson) return undefined;
+  try {
+    const payload = JSON.parse(payloadJson);
+    const candidates = [
+      payload?.interactionContext?.controlSignature,
+      payload?.pageSnapshot?.controlSignature,
+      payload?.pageState?.controlSignature,
+      payload?.controlSignature,
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.length > 0) {
+        return candidate;
+      }
+    }
     return undefined;
   } catch {
     return undefined;
@@ -286,8 +300,9 @@ function computeFpHash(fp: FingerprintData | null, eventType: string): string {
 // Priority order:
 //   1. textExcerpt (visible label — most meaningful)
 //   2. aria-label attribute (accessibility label)
-//   3. name attribute (form field names)
-//   4. selector string (last resort)
+//   3. title/alt attribute (icon and tooltip labels)
+//   4. name attribute (form field names)
+//   5. selector string (last resort)
 // ─────────────────────────────────────────────────────────────────────────────
 
 function buildIntent(eventType: string, fp: FingerprintData): string {
@@ -295,6 +310,8 @@ function buildIntent(eventType: string, fp: FingerprintData): string {
     fp.textExcerpt,
     fp.attributes?.['ariaLabel'],
     fp.attributes?.['aria-label'],
+    fp.attributes?.['title'],
+    fp.attributes?.['alt'],
     fp.attributes?.['name'],
   ];
 
@@ -601,10 +618,37 @@ export class CodegenService {
       for (const node of nodes) nodeMap.set(node.id, node);
     }
 
+    // Source-node fallback for control signature when payload lacks it.
+    // This is additive and preserves current behavior when payload already carries signature.
+    const nodeControlSignatureStmt = this.db.prepare(`
+      SELECT control_signature AS controlSignature
+      FROM nodes
+      WHERE id = ?
+      LIMIT 1
+    `);
+    const controlSignatureByNodeId = new Map<string, string | undefined>();
+    const getNodeControlSignature = (nodeId?: string): string | undefined => {
+      if (!nodeId) return undefined;
+      if (controlSignatureByNodeId.has(nodeId)) {
+        return controlSignatureByNodeId.get(nodeId);
+      }
+
+      const row = nodeControlSignatureStmt.get(nodeId) as
+        | { controlSignature?: string | null }
+        | undefined;
+      const resolved =
+        typeof row?.controlSignature === 'string' && row.controlSignature.length > 0
+          ? row.controlSignature
+          : undefined;
+      controlSignatureByNodeId.set(nodeId, resolved);
+      return resolved;
+    };
+
     // ── 5. Build raw steps ───────────────────────────────────────────────────
     const rawSteps: CodegenStep[] = [];
     let stepNum = 0;
     const minConfidence = this.options.minConfidence ?? 0.0;
+    let lastResolvedSourceNodeId: string | undefined;
 
     for (const ev of events) {
       if (!ACTIONABLE_TYPES.has(ev.eventType)) continue;
@@ -626,15 +670,29 @@ export class CodegenService {
       const intent = buildIntent(ev.eventType, fingerprint);
       const selectorPriority = normalizeSelectorPriority(fingerprint.selectorPriority);
       const selectorRank = fingerprint.selectorRank ?? rankFromPriority(selectorPriority);
+      const directSourceNodeId = getSourceNodeId(ev, edge) ?? undefined;
+      // Submit events can arrive without node linkage from the event payload/edge.
+      // Keep graph truth untouched, but anchor generation to the latest known node
+      // so resolver can still fetch a meaningful snapshot.
+      const sourceNodeId = directSourceNodeId ?? (
+        ev.eventType === 'submit'
+          ? lastResolvedSourceNodeId
+          : undefined
+      );
+      const controlSignature =
+        extractControlSignature(ev.payload) ??
+        getNodeControlSignature(sourceNodeId);
 
       const step: CodegenStep = {
         step:             stepNum,
         intent,
         action:           ev.eventType as ActionType,
         selector:         fingerprint.selector,
-        sourceNodeId:     getSourceNodeId(ev, edge) ?? undefined,
+        sourceNodeId,
         selectorPriority,
         selectorRank,
+        fingerprint:      fingerprint ?? undefined,
+        controlSignature,
         pageUrl:          ev.pageUrl || '',
         normalizedUrl:    extractNormalizedUrl(ev.payload, ev.pageUrl || ''),
         confidence,
@@ -642,6 +700,10 @@ export class CodegenService {
         assertions:       [],
         userAssertions:   [],
       };
+
+      if (sourceNodeId) {
+        lastResolvedSourceNodeId = sourceNodeId;
+      }
 
       const value = extractValue(ev.payload, ev.eventType);
       if (value) step.value = value;
@@ -753,10 +815,15 @@ export class CodegenService {
     const nodeCache = new Map<string, Document | null>();
     const icStableCache = new Map<string, Document | null>();
     const icAnyCache = new Map<string, Document | null>();
+    const icStableByUrlFallback = new Map<string, { doc: Document; capturedAt: number }>();
+    const icAnyByUrlFallback = new Map<string, { doc: Document; capturedAt: number }>();
     const eventFallbackCache = new Map<string, Document | null>();
     const maxBytes = options.maxSnapshotBytesForValidation ?? 2_000_000;
     type JsdomCtor = new (html: string) => { window: { document: Document } };
     let jsdomCtor: JsdomCtor | null = null;
+
+    const buildIcKey = (normalizedUrl: string, controlSignature?: string | null): string =>
+      `${normalizedUrl}|${controlSignature ?? ''}`;
 
     const dynamicImport = new Function(
       'specifier',
@@ -794,10 +861,10 @@ export class CodegenService {
       for (const nodeId of nodeIds) nodeCache.set(nodeId, null);
       return {
         snapshotEngineAvailable,
-        get(nodeId: string): Document | null {
+        get(nodeId: string, _normalizedUrl?: string, _controlSignature?: string): Document | null {
           return nodeCache.get(nodeId) ?? null;
         },
-        getSource(): 'unavailable' {
+        getSource(_nodeId?: string, _normalizedUrl?: string, _controlSignature?: string): 'unavailable' {
           return 'unavailable';
         },
       };
@@ -827,15 +894,17 @@ export class CodegenService {
       const icRows = this.db.prepare(`
         SELECT
           normalized_url AS normalizedUrl,
+          control_signature AS controlSignature,
           snapshot_html AS snapshotHtml,
           is_stable AS isStable,
           captured_at AS capturedAt
         FROM interaction_contexts
         WHERE session_id = ?
           AND normalized_url IN (${normalizedPlaceholders})
-        ORDER BY normalized_url ASC, is_stable DESC, captured_at DESC
+        ORDER BY normalized_url ASC, control_signature ASC, is_stable DESC, captured_at DESC
       `).all(session.sessionId, ...normalizedUrls) as Array<{
         normalizedUrl: string;
+        controlSignature: string;
         snapshotHtml: string | null;
         isStable: number;
         capturedAt: number;
@@ -844,18 +913,31 @@ export class CodegenService {
       for (const row of icRows) {
         const normalizedUrl = row.normalizedUrl;
         if (!normalizedUrl || !row.snapshotHtml) continue;
+        const cacheKey = buildIcKey(normalizedUrl, row.controlSignature ?? '');
 
-        const needsAny = !icAnyCache.has(normalizedUrl);
-        const needsStable = row.isStable === 1 && !icStableCache.has(normalizedUrl);
+        const needsAny = !icAnyCache.has(cacheKey);
+        const needsStable = row.isStable === 1 && !icStableCache.has(cacheKey);
         if (!needsAny && !needsStable) continue;
 
         const doc = parseHtmlToDocument(
           row.snapshotHtml,
-          `interaction_contexts:${normalizedUrl}:${row.capturedAt}`
+          `interaction_contexts:${normalizedUrl}:${row.controlSignature}:${row.capturedAt}`
         );
         if (!doc) continue;
-        if (needsAny) icAnyCache.set(normalizedUrl, doc);
-        if (needsStable) icStableCache.set(normalizedUrl, doc);
+        if (needsAny) icAnyCache.set(cacheKey, doc);
+        if (needsStable) icStableCache.set(cacheKey, doc);
+
+        const existingAny = icAnyByUrlFallback.get(normalizedUrl);
+        if (!existingAny || row.capturedAt > existingAny.capturedAt) {
+          icAnyByUrlFallback.set(normalizedUrl, { doc, capturedAt: row.capturedAt });
+        }
+
+        if (row.isStable === 1) {
+          const existingStable = icStableByUrlFallback.get(normalizedUrl);
+          if (!existingStable || row.capturedAt > existingStable.capturedAt) {
+            icStableByUrlFallback.set(normalizedUrl, { doc, capturedAt: row.capturedAt });
+          }
+        }
       }
     }
 
@@ -955,13 +1037,20 @@ export class CodegenService {
 
     return {
       snapshotEngineAvailable,
-      get(nodeId: string, normalizedUrl?: string): Document | null {
+      get(nodeId: string, normalizedUrl?: string, controlSignature?: string): Document | null {
         if (normalizedUrl) {
-          const stable = icStableCache.get(normalizedUrl);
+          const key = buildIcKey(normalizedUrl, controlSignature ?? '');
+          const stable = icStableCache.get(key);
           if (stable) return stable;
 
-          const any = icAnyCache.get(normalizedUrl);
+          const any = icAnyCache.get(key);
           if (any) return any;
+
+          const stableByUrl = icStableByUrlFallback.get(normalizedUrl)?.doc;
+          if (stableByUrl) return stableByUrl;
+
+          const anyByUrl = icAnyByUrlFallback.get(normalizedUrl)?.doc;
+          if (anyByUrl) return anyByUrl;
 
           const eventFallback = eventFallbackCache.get(normalizedUrl);
           if (eventFallback) return eventFallback;
@@ -970,10 +1059,13 @@ export class CodegenService {
         if (!nodeId) return null;
         return nodeCache.get(nodeId) ?? null;
       },
-      getSource(nodeId: string, normalizedUrl?: string): 'latest' | 'latest-stable' | 'unavailable' {
+      getSource(nodeId: string, normalizedUrl?: string, controlSignature?: string): 'latest' | 'latest-stable' | 'unavailable' {
         if (normalizedUrl) {
-          if (icStableCache.get(normalizedUrl)) return 'latest-stable';
-          if (icAnyCache.get(normalizedUrl)) return 'latest';
+          const key = buildIcKey(normalizedUrl, controlSignature ?? '');
+          if (icStableCache.get(key)) return 'latest-stable';
+          if (icAnyCache.get(key)) return 'latest';
+          if (icStableByUrlFallback.get(normalizedUrl)) return 'latest-stable';
+          if (icAnyByUrlFallback.get(normalizedUrl)) return 'latest';
           if (eventFallbackCache.get(normalizedUrl)) return 'latest';
         }
 
@@ -991,10 +1083,10 @@ export class CodegenService {
       }
       return {
         snapshotEngineAvailable: false,
-        get(nodeId: string): Document | null {
+        get(nodeId: string, _normalizedUrl?: string, _controlSignature?: string): Document | null {
           return fallbackCache.get(nodeId) ?? null;
         },
-        getSource(): 'unavailable' {
+        getSource(_nodeId?: string, _normalizedUrl?: string, _controlSignature?: string): 'unavailable' {
           return 'unavailable';
         },
       };

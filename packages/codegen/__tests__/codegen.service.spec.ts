@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { 
+  CodegenService,
   normalizeSelectorPriority,
   rankFromPriority,
   suppressPreNavSetupClicks,
@@ -182,5 +183,380 @@ describe('CodegenService - Shared Assertion Deduplication', () => {
     // URL assertions are never stripped
     expect(filtered[0].assertions).toHaveLength(1);
     expect(filtered[1].assertions).toHaveLength(1);
+  });
+});
+
+describe('CodegenService - Step Metadata Preservation', () => {
+  it('buildSession populates step.controlSignature and step.fingerprint', () => {
+    const eventPayload = JSON.stringify({
+      normalizedUrl: 'https://app.test/profile',
+      interactionContext: {
+        controlSignature: 'sig-profile-v1',
+      },
+      fingerprint: {
+        selector: '[data-testid="save"]',
+        selectorPriority: 'data-testid',
+        selectorRank: 1,
+        tagName: 'button',
+        parentSelector: '#profile-form',
+        textExcerpt: 'Save',
+        context: {
+          parentTag: 'div',
+          nearestContainerTag: 'form',
+        },
+        attributes: {
+          dataTestId: 'save',
+        },
+        attributesHash: 'abc123',
+      },
+    });
+
+    const fakeDb = {
+      prepare(sql: string) {
+        if (sql.includes('FROM sessions')) {
+          return {
+            get: () => ({
+              id: 'session-test',
+              started_at: 1_700_000_000_000,
+            }),
+          };
+        }
+
+        if (sql.includes('FROM events e')) {
+          return {
+            all: () => ([
+              {
+                eventId: 'ev-1',
+                eventType: 'click',
+                timestamp: 1_700_000_000_100,
+                pageUrl: 'https://app.test/profile',
+                traceId: 'trace-1',
+                nodeId: 'node-1',
+                payload: eventPayload,
+              },
+            ]),
+          };
+        }
+
+        if (sql.includes('WHERE ed.fingerprint_hash IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('WHERE ed.trigger_event_id IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('SELECT control_signature AS controlSignature')) {
+          return { get: () => undefined };
+        }
+
+        if (sql.includes('FROM nodes')) {
+          return {
+            all: () => [],
+            get: () => undefined,
+          };
+        }
+
+        return {
+          get: () => undefined,
+          all: () => [],
+        };
+      },
+      close() {
+        return undefined;
+      },
+    };
+
+    const service = Object.create(CodegenService.prototype) as any;
+    service.db = fakeDb;
+    service.options = {
+      dbPath: ':memory:',
+      minConfidence: 0,
+      includeScrollSteps: false,
+      includeHoverSteps: false,
+    };
+
+    const session = (service as CodegenService).buildSession('session-test');
+    expect(session.steps).toHaveLength(1);
+    expect(session.steps[0].controlSignature).toBe('sig-profile-v1');
+    expect(session.steps[0].fingerprint?.tagName).toBe('button');
+    expect(session.steps[0].fingerprint?.parentSelector).toBe('#profile-form');
+  });
+
+  it('falls back to source-node control_signature when payload signature is missing', () => {
+    const eventPayload = JSON.stringify({
+      normalizedUrl: 'https://app.test/profile',
+      fingerprint: {
+        selector: '[name="email"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'input',
+        textExcerpt: 'Email',
+        attributes: {
+          name: 'email',
+        },
+        attributesHash: 'def456',
+      },
+    });
+
+    const fakeDb = {
+      prepare(sql: string) {
+        if (sql.includes('FROM sessions')) {
+          return {
+            get: () => ({
+              id: 'session-test',
+              started_at: 1_700_000_000_000,
+            }),
+          };
+        }
+
+        if (sql.includes('FROM events e')) {
+          return {
+            all: () => ([
+              {
+                eventId: 'ev-1',
+                eventType: 'click',
+                timestamp: 1_700_000_000_100,
+                pageUrl: 'https://app.test/profile',
+                traceId: 'trace-1',
+                nodeId: 'node-1',
+                payload: eventPayload,
+              },
+            ]),
+          };
+        }
+
+        if (sql.includes('WHERE ed.fingerprint_hash IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('WHERE ed.trigger_event_id IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('SELECT control_signature AS controlSignature')) {
+          return { get: () => ({ controlSignature: 'node-sig-v1' }) };
+        }
+
+        if (sql.includes('FROM nodes')) {
+          return {
+            all: () => [],
+            get: () => undefined,
+          };
+        }
+
+        return {
+          get: () => undefined,
+          all: () => [],
+        };
+      },
+      close() {
+        return undefined;
+      },
+    };
+
+    const service = Object.create(CodegenService.prototype) as any;
+    service.db = fakeDb;
+    service.options = {
+      dbPath: ':memory:',
+      minConfidence: 0,
+      includeScrollSteps: false,
+      includeHoverSteps: false,
+    };
+
+    const session = (service as CodegenService).buildSession('session-test');
+    expect(session.steps).toHaveLength(1);
+    expect(session.steps[0].sourceNodeId).toBe('node-1');
+    expect(session.steps[0].controlSignature).toBe('node-sig-v1');
+  });
+
+  it('buildSession intent falls back to fingerprint title for icon-only clicks', () => {
+    const eventPayload = JSON.stringify({
+      normalizedUrl: 'https://app.test/dashboard',
+      fingerprint: {
+        selector: '.icon-settings',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        textExcerpt: null,
+        attributes: {
+          title: 'Settings',
+        },
+        attributesHash: 'icon-title-hash',
+      },
+    });
+
+    const fakeDb = {
+      prepare(sql: string) {
+        if (sql.includes('FROM sessions')) {
+          return {
+            get: () => ({
+              id: 'session-test',
+              started_at: 1_700_000_000_000,
+            }),
+          };
+        }
+
+        if (sql.includes('FROM events e')) {
+          return {
+            all: () => ([
+              {
+                eventId: 'ev-1',
+                eventType: 'click',
+                timestamp: 1_700_000_000_100,
+                pageUrl: 'https://app.test/dashboard',
+                traceId: 'trace-1',
+                nodeId: 'node-1',
+                payload: eventPayload,
+              },
+            ]),
+          };
+        }
+
+        if (sql.includes('WHERE ed.fingerprint_hash IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('WHERE ed.trigger_event_id IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('SELECT control_signature AS controlSignature')) {
+          return { get: () => undefined };
+        }
+
+        if (sql.includes('FROM nodes')) {
+          return {
+            all: () => [],
+            get: () => undefined,
+          };
+        }
+
+        return {
+          get: () => undefined,
+          all: () => [],
+        };
+      },
+      close() {
+        return undefined;
+      },
+    };
+
+    const service = Object.create(CodegenService.prototype) as any;
+    service.db = fakeDb;
+    service.options = {
+      dbPath: ':memory:',
+      minConfidence: 0,
+      includeScrollSteps: false,
+      includeHoverSteps: false,
+    };
+
+    const session = (service as CodegenService).buildSession('session-test');
+    expect(session.steps).toHaveLength(1);
+    expect(session.steps[0].intent).toBe('click_Settings');
+  });
+
+  it('anchors submit step to last resolved node when submit node is missing', () => {
+    const clickPayload = JSON.stringify({
+      normalizedUrl: 'https://app.test/profile',
+      fingerprint: {
+        selector: '[name="email"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        attributes: { name: 'email' },
+        attributesHash: 'click-hash',
+      },
+    });
+
+    const submitPayload = JSON.stringify({
+      normalizedUrl: 'https://app.test/profile',
+      fingerprint: {
+        selector: 'form',
+        selectorPriority: 'path',
+        selectorRank: 10,
+        attributes: {},
+        attributesHash: 'submit-hash',
+      },
+    });
+
+    const fakeDb = {
+      prepare(sql: string) {
+        if (sql.includes('FROM sessions')) {
+          return {
+            get: () => ({
+              id: 'session-test',
+              started_at: 1_700_000_000_000,
+            }),
+          };
+        }
+
+        if (sql.includes('FROM events e')) {
+          return {
+            all: () => ([
+              {
+                eventId: 'ev-1',
+                eventType: 'click',
+                timestamp: 1_700_000_000_100,
+                pageUrl: 'https://app.test/profile',
+                traceId: 'trace-1',
+                nodeId: 'node-click',
+                payload: clickPayload,
+              },
+              {
+                eventId: 'ev-2',
+                eventType: 'submit',
+                timestamp: 1_700_000_000_200,
+                pageUrl: 'https://app.test/profile',
+                traceId: 'trace-2',
+                nodeId: null,
+                payload: submitPayload,
+              },
+            ]),
+          };
+        }
+
+        if (sql.includes('WHERE ed.fingerprint_hash IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('WHERE ed.trigger_event_id IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('SELECT control_signature AS controlSignature')) {
+          return { get: () => undefined };
+        }
+
+        if (sql.includes('FROM nodes')) {
+          return {
+            all: () => [],
+            get: () => undefined,
+          };
+        }
+
+        return {
+          get: () => undefined,
+          all: () => [],
+        };
+      },
+      close() {
+        return undefined;
+      },
+    };
+
+    const service = Object.create(CodegenService.prototype) as any;
+    service.db = fakeDb;
+    service.options = {
+      dbPath: ':memory:',
+      minConfidence: 0,
+      includeScrollSteps: false,
+      includeHoverSteps: false,
+    };
+
+    const session = (service as CodegenService).buildSession('session-test');
+    expect(session.steps).toHaveLength(2);
+    expect(session.steps[0].action).toBe('click');
+    expect(session.steps[0].sourceNodeId).toBe('node-click');
+    expect(session.steps[1].action).toBe('submit');
+    expect(session.steps[1].sourceNodeId).toBe('node-click');
   });
 });
