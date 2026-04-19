@@ -35,6 +35,24 @@ export class PendingActionRepository {
     return mapPendingActionRow(row); // Run the row through the mapper before returning
   }
 
+  public async findRecentPendingForSession(
+    sessionId: string,
+    createdAfterMs: number,
+    limit: number = 2
+  ): Promise<PendingAction[]> {
+    const safeLimit = Math.max(1, Math.floor(limit));
+    const stmt = this.db.prepare(`
+      SELECT * FROM pending_actions
+      WHERE session_id = ? AND status = 'pending' AND created_at >= ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `);
+    const rows = await stmt.all(sessionId, createdAfterMs, safeLimit);
+    return rows
+      .map(row => mapPendingActionRow(row))
+      .filter((row): row is PendingAction => !!row);
+  }
+
   public async resolve(traceId: string): Promise<void> {
     const stmt = this.db.prepare('UPDATE pending_actions SET status = ?, resolved_at = ? WHERE trace_id = ?');
     await stmt.run('resolved', Date.now(), traceId);

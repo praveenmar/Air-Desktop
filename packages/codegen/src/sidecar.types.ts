@@ -1,4 +1,4 @@
-import type { ResolverMetadata } from './types';
+import type { ActionType, ResolverMetadata, SelectorPriority } from './types';
 
 export interface AirMethodMeta {
   step: number;
@@ -6,6 +6,10 @@ export interface AirMethodMeta {
   checksum: string;
   originalSelector: string;
   resolver?: ResolverMetadata;
+  selectorUsed?: string;
+  selectorType?: SelectorPriority;
+  actionType?: ActionType;
+  locatorFlavor?: 'css' | 'text' | 'xpath' | 'playwright' | 'unknown';
 }
 
 export interface AirMetadata {

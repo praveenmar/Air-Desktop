@@ -3,6 +3,7 @@ import {
   CodegenService,
   normalizeSelectorPriority,
   rankFromPriority,
+  collapseRedundantClickBeforeInput,
   suppressPreNavSetupClicks,
   deduplicateSharedAssertions,
 } from '../src/codegen.service';
@@ -114,6 +115,100 @@ describe('CodegenService - Pre‑Navigation Suppression', () => {
 
     const filtered = suppressPreNavSetupClicks(steps);
     expect(filtered).toHaveLength(2); // both kept
+  });
+});
+
+describe('CodegenService - Click/Input Collapse', () => {
+  it('collapses immediate click->input on same selector/page/node', () => {
+    const steps: CodegenStep[] = [
+      createStep({
+        step: 1,
+        action: 'click',
+        selector: 'input[name="username"]',
+        selectorPriority: 'attribute',
+        sourceNodeId: 'node-1',
+        normalizedUrl: 'https://example.com/login',
+      }),
+      createStep({
+        step: 2,
+        action: 'input',
+        selector: 'input[name="username"]',
+        selectorPriority: 'attribute',
+        sourceNodeId: 'node-1',
+        normalizedUrl: 'https://example.com/login',
+        value: '*****',
+      }),
+      createStep({
+        step: 3,
+        action: 'click',
+        selector: 'button[type="submit"]',
+        selectorPriority: 'attribute',
+        sourceNodeId: 'node-1',
+        normalizedUrl: 'https://example.com/login',
+      }),
+    ];
+
+    const collapsed = collapseRedundantClickBeforeInput(steps);
+    expect(collapsed).toHaveLength(2);
+    expect(collapsed[0].action).toBe('input');
+    expect(collapsed[0].selector).toBe('input[name="username"]');
+    expect(collapsed[1].action).toBe('click');
+    expect(collapsed[1].selector).toBe('button[type="submit"]');
+  });
+
+  it('keeps click when next step selector differs', () => {
+    const steps: CodegenStep[] = [
+      createStep({
+        step: 1,
+        action: 'click',
+        selector: 'input[name="username"]',
+        selectorPriority: 'attribute',
+        sourceNodeId: 'node-1',
+        normalizedUrl: 'https://example.com/login',
+      }),
+      createStep({
+        step: 2,
+        action: 'input',
+        selector: 'input[name="password"]',
+        selectorPriority: 'attribute',
+        sourceNodeId: 'node-1',
+        normalizedUrl: 'https://example.com/login',
+        value: '*****',
+      }),
+    ];
+
+    const collapsed = collapseRedundantClickBeforeInput(steps);
+    expect(collapsed).toHaveLength(2);
+    expect(collapsed[0].action).toBe('click');
+    expect(collapsed[1].action).toBe('input');
+  });
+
+  it('keeps click when click has navigation semantics', () => {
+    const steps: CodegenStep[] = [
+      createStep({
+        step: 1,
+        action: 'click',
+        selector: 'a[href="/dashboard"]',
+        selectorPriority: 'attribute',
+        sourceNodeId: 'node-1',
+        normalizedUrl: 'https://example.com/home',
+        outcomeType: 'navigation',
+        navigatesTo: 'https://example.com/dashboard',
+      }),
+      createStep({
+        step: 2,
+        action: 'input',
+        selector: 'a[href="/dashboard"]',
+        selectorPriority: 'attribute',
+        sourceNodeId: 'node-1',
+        normalizedUrl: 'https://example.com/home',
+        value: '*****',
+      }),
+    ];
+
+    const collapsed = collapseRedundantClickBeforeInput(steps);
+    expect(collapsed).toHaveLength(2);
+    expect(collapsed[0].action).toBe('click');
   });
 });
 

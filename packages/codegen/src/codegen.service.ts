@@ -407,6 +407,51 @@ export function suppressPreNavSetupClicks(steps: CodegenStep[]): CodegenStep[] {
 // genuinely specific to its destination page.
 // ─────────────────────────────────────────────────────────────────────────────
 
+function isLikelyTextEntryStep(step: CodegenStep): boolean {
+  if (step.action !== 'input') return false;
+  const selector = (step.selector || '').toLowerCase();
+  const tagName = (step.fingerprint?.tagName || '').toLowerCase();
+
+  if (['input', 'textarea', 'select'].includes(tagName)) return true;
+  if (selector.startsWith('input') || selector.startsWith('textarea') || selector.startsWith('select')) {
+    return true;
+  }
+  if (/\[(?:name|placeholder|type)=/i.test(selector)) return true;
+  return false;
+}
+
+/**
+ * Collapses redundant focus-click steps when the next step is an input on the
+ * same element in the same page context.
+ */
+export function collapseRedundantClickBeforeInput(steps: CodegenStep[]): CodegenStep[] {
+  const out: CodegenStep[] = [];
+
+  for (let i = 0; i < steps.length; i++) {
+    const current = steps[i];
+    const next = steps[i + 1];
+
+    const shouldCollapse =
+      current?.action === 'click' &&
+      next?.action === 'input' &&
+      current.selector === next.selector &&
+      getStepNormalizedUrl(current) === getStepNormalizedUrl(next) &&
+      (current.sourceNodeId ?? null) === (next.sourceNodeId ?? null) &&
+      !current.navigatesTo &&
+      (current.assertions?.length ?? 0) === 0 &&
+      current.outcomeType !== 'navigation' &&
+      isLikelyTextEntryStep(next);
+
+    if (shouldCollapse) {
+      continue;
+    }
+
+    out.push(current);
+  }
+
+  return out;
+}
+
 export function deduplicateSharedAssertions(steps: CodegenStep[]): CodegenStep[] {
   // Count how many NAV steps each anchor selector appears in
   const selectorPageCount = new Map<string, number>();
@@ -743,7 +788,8 @@ export class CodegenService {
     // ── 6. FIX B: suppress pre-navigation setup clicks ──────────────────────
     // Removes hamburger-expand and container-tap noise clicks that precede
     // every SPA sidebar navigation (e.g. .oxd-icon and div > div:nth-of-type).
-    const afterSetupFilter = suppressPreNavSetupClicks(rawSteps);
+    const afterClickInputCollapse = collapseRedundantClickBeforeInput(rawSteps);
+    const afterSetupFilter = suppressPreNavSetupClicks(afterClickInputCollapse);
 
     // ── 7. FIX C: strip assertions shared across multiple destination pages ──
     // Removes global layout elements (Add, Reset, Search buttons) that appear

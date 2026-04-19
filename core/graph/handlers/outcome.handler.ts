@@ -11,6 +11,9 @@ import { DebugLogger } from '../../logger/debug-logger';
 import { OutcomeEventSchema, PendingAction, OutcomeType } from '../../types';
 
 type OutcomeEvent = z.infer<typeof OutcomeEventSchema>;
+const BASELINE_TRACE_PREFIX = 'baseline-';
+const FALLBACK_PENDING_LOOKBACK_MS = 15_000;
+const FALLBACK_PENDING_MAX_CANDIDATES = 2;
 
 export class OutcomeHandler {
   constructor(
@@ -58,12 +61,90 @@ export class OutcomeHandler {
       return;
     }
 
-    // Baseline outcomes naturally have no pending action.
-    if (traceId.startsWith('baseline-')) {
+    const recovered = await this.tryRecoverPendingForCrossContextOutcome(event, traceId, currentNodeId);
+    if (recovered) {
+      return;
+    }
+
+    // Baseline outcomes naturally may have no pending action.
+    if (traceId.startsWith(BASELINE_TRACE_PREFIX)) {
       return;
     }
 
     await this.logWithContext('warn', 'Orphaned OUTCOME event - no pending action found', {}, event.sessionId ?? null, traceId ?? null);
+  }
+
+  private getOutcomeUrl(event: OutcomeEvent): string | null {
+    return event.normalizedUrl || event.meta?.urlAfter || event.pageUrl || null;
+  }
+
+  private isExplicitNavigationOutcome(event: OutcomeEvent): boolean {
+    const settleType = event.meta?.settleType;
+    return typeof settleType === 'string' && settleType.toLowerCase() === 'navigation';
+  }
+
+  private async tryRecoverPendingForCrossContextOutcome(
+    event: OutcomeEvent,
+    traceId: string,
+    currentNodeId: string
+  ): Promise<boolean> {
+    const sessionId = event.sessionId ?? null;
+    if (!sessionId) return false;
+
+    const eventTimestamp = Number.isFinite(event.timestamp) ? event.timestamp : Date.now();
+    const createdAfterMs = eventTimestamp - FALLBACK_PENDING_LOOKBACK_MS;
+    const recentPending = await this.pendingRepo.findRecentPendingForSession(
+      sessionId,
+      createdAfterMs,
+      FALLBACK_PENDING_MAX_CANDIDATES
+    );
+
+    if (recentPending.length === 0) {
+      return false;
+    }
+
+    if (recentPending.length > 1) {
+      await this.logWithContext('warn', 'Skipped fallback pending recovery due to ambiguity', {
+        candidates: recentPending.map(candidate => candidate.traceId),
+      }, sessionId, traceId ?? null);
+      return false;
+    }
+
+    const candidate = recentPending[0];
+    const triggerEventRow = await this.eventRepo.findById(candidate.triggerEventId);
+    const triggerUrl = triggerEventRow?.page_url || null;
+    const outcomeUrl = this.getOutcomeUrl(event);
+    const normalizedTriggerUrl = triggerUrl ? normalizeUrl(triggerUrl) : null;
+    const normalizedOutcomeUrl = outcomeUrl ? normalizeUrl(outcomeUrl) : null;
+    const explicitNavigation = this.isExplicitNavigationOutcome(event);
+    const urlChanged = !!(
+      normalizedTriggerUrl &&
+      normalizedOutcomeUrl &&
+      normalizedTriggerUrl !== normalizedOutcomeUrl
+    );
+
+    if (!explicitNavigation && !urlChanged) {
+      await this.logWithContext('debug', 'Skipped fallback pending recovery - not a cross-context outcome', {
+        candidateTraceId: candidate.traceId,
+        normalizedTriggerUrl,
+        normalizedOutcomeUrl,
+      }, sessionId, traceId ?? null);
+      return false;
+    }
+
+    await this.logWithContext('decision', 'Recovered pending action for cross-context outcome', {
+      fallbackTraceId: candidate.traceId,
+      fromNode: candidate.fromNodeId,
+      toNode: currentNodeId,
+      normalizedTriggerUrl,
+      normalizedOutcomeUrl,
+      explicitNavigation,
+      urlChanged,
+    }, sessionId, traceId ?? null);
+
+    await this.createExplicitEdge(candidate.fromNodeId, currentNodeId, candidate, event);
+    await this.pendingRepo.resolve(candidate.traceId);
+    return true;
   }
 
   public async createExplicitEdge(

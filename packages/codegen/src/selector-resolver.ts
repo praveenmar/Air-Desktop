@@ -83,8 +83,14 @@ interface ResolveContext {
 export interface LlmFallbackStep {
   stepNumber: number;
   intent: string;
+  action: CodegenStep['action'];
   originalSelector: string;
   snapshotExcerpt: string;
+  normalizedUrl?: string;
+  snapshotSource?: ResolverSnapshotSource;
+  excerptChars?: number;
+  excerptMode?: 'target-selector' | 'seed-element' | 'document-fallback';
+  selectorPriority?: SelectorPriority;
 }
 
 export interface LlmFallbackSuggestion {
@@ -319,31 +325,146 @@ function enrichSignalAttributesFromElement(attrs: StepSignalAttributes, element:
 }
 
 function findSeedElements(step: CodegenStep, snapshot: Document): Element[] {
-  const seeds: Element[] = [];
+  const MAX_SEEDS = 5;
+  const seen = new Set<Element>();
+
+  const pushSeed = (element: Element): void => {
+    if (!element) return;
+    if (seen.has(element)) return;
+    if (isOverlyBroadSeedElement(element)) return;
+    seen.add(element);
+  };
+
+  const byIntentTokens = tokenizeIntentText(step.intent || '').filter(
+    token => token.length >= 3 && !INTENT_STOP_TOKENS.has(token),
+  );
+
+  const tokenMatchScore = (element: Element): number => {
+    if (byIntentTokens.length === 0) return 0;
+    const haystack = [
+      textFromElement(element) || '',
+      element.getAttribute('aria-label') || '',
+      element.getAttribute('name') || '',
+      element.getAttribute('placeholder') || '',
+      element.getAttribute('id') || '',
+      element.getAttribute('class') || '',
+      element.getAttribute('role') || '',
+      element.getAttribute('href') || '',
+      element.getAttribute('title') || '',
+      element.getAttribute('data-testid') || '',
+    ]
+      .join(' ')
+      .toLowerCase();
+    let matched = 0;
+    for (const token of byIntentTokens) {
+      if (haystack.includes(token)) matched += 1;
+    }
+    return matched / byIntentTokens.length;
+  };
+
+  const attributeSignalScore = (element: Element): number => {
+    let score = 0;
+    if (element.getAttribute('data-testid')) score += 0.4;
+    if (element.getAttribute('id')) score += 0.3;
+    if (element.getAttribute('name')) score += 0.25;
+    if (element.getAttribute('aria-label')) score += 0.25;
+    if (element.getAttribute('placeholder')) score += 0.2;
+    if (element.getAttribute('href')) score += 0.15;
+    if (element.getAttribute('role')) score += 0.1;
+    return Math.min(score, 0.7);
+  };
+
+  const seedScore = (element: Element): number => {
+    const intentScore = evaluateIntentMatch(element, step).score;
+    const tokenScore = tokenMatchScore(element);
+    const interactiveBonus = elementLooksInteractive(element) ? 0.2 : 0;
+    const inputBonus = step.action === 'input' && elementLooksInputLike(element) ? 0.3 : 0;
+    const selectBonus = step.action === 'custom-select' && elementLooksInteractive(element) ? 0.15 : 0;
+    const attrsBonus = attributeSignalScore(element);
+    return (tokenScore * 0.5) + (intentScore * 0.35) + interactiveBonus + inputBonus + selectBonus + attrsBonus;
+  };
+
   if (step.selector && isLikelyCssSelector(step.selector)) {
     try {
-      seeds.push(...Array.from(snapshot.querySelectorAll(step.selector)).slice(0, 5));
+      for (const element of Array.from(snapshot.querySelectorAll(step.selector)).slice(0, MAX_SEEDS)) {
+        pushSeed(element);
+      }
     } catch {
       // ignore invalid selector
     }
   }
 
-  if (seeds.length > 0) return seeds;
+  const hintedAttrs = inferStepSignalAttributes(step);
+  const hintedSelectors: string[] = [];
+  if (hintedAttrs.dataTestId) hintedSelectors.push(`[data-testid="${cssEscape(hintedAttrs.dataTestId)}"]`);
+  if (hintedAttrs.id) hintedSelectors.push(`#${cssEscape(hintedAttrs.id)}`);
+  if (hintedAttrs.name) hintedSelectors.push(`[name="${cssEscape(hintedAttrs.name)}"]`);
+  if (hintedAttrs.ariaLabel) hintedSelectors.push(`[aria-label="${cssEscape(hintedAttrs.ariaLabel)}"]`);
+  if (hintedAttrs.placeholder) hintedSelectors.push(`[placeholder="${cssEscape(hintedAttrs.placeholder)}"]`);
+  if (hintedAttrs.role) hintedSelectors.push(`[role="${cssEscape(hintedAttrs.role)}"]`);
 
-  const tokens = step.intent.toLowerCase().split(/[^a-z0-9]+/).filter(token => token.length >= 3);
-  if (tokens.length === 0) return seeds;
-
-  const pool = Array.from(snapshot.querySelectorAll('*')).slice(0, 200);
-  for (const element of pool) {
-    const text = (element.textContent || '').toLowerCase();
-    const aria = (element.getAttribute('aria-label') || '').toLowerCase();
-    if (tokens.some(token => text.includes(token) || aria.includes(token))) {
-      seeds.push(element);
-      if (seeds.length >= 5) break;
+  for (const selector of hintedSelectors) {
+    if (seen.size >= MAX_SEEDS) break;
+    try {
+      for (const element of Array.from(snapshot.querySelectorAll(selector)).slice(0, 2)) {
+        pushSeed(element);
+      }
+    } catch {
+      // ignore selector errors
     }
   }
 
-  return seeds;
+  if (seen.size >= MAX_SEEDS) {
+    return Array.from(seen).slice(0, MAX_SEEDS);
+  }
+
+  let pool: Element[] = [];
+  try {
+    pool = Array.from(snapshot.querySelectorAll('*')).slice(0, 350);
+  } catch {
+    pool = [];
+  }
+  const ranked = pool
+    .filter(element => !isOverlyBroadSeedElement(element))
+    .map(element => ({ element, score: seedScore(element), tokenScore: tokenMatchScore(element) }))
+    .filter(candidate => {
+      if (byIntentTokens.length === 0) {
+        return candidate.score >= 0.45;
+      }
+      return candidate.tokenScore > 0 || candidate.score >= 0.6;
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, MAX_SEEDS);
+
+  for (const candidate of ranked) {
+    if (seen.size >= MAX_SEEDS) break;
+    pushSeed(candidate.element);
+  }
+
+  return Array.from(seen).slice(0, MAX_SEEDS);
+}
+
+function isOverlyBroadSeedElement(element: Element): boolean {
+  const tag = ((element as HTMLElement).tagName || '').toLowerCase();
+  if (tag === 'html' || tag === 'body' || tag === 'head') {
+    return true;
+  }
+
+  const textLength = (element.textContent || '').replace(/\s+/g, ' ').trim().length;
+  const childCount = element.children?.length ?? 0;
+  let descendantCount = 0;
+  try {
+    descendantCount = element.querySelectorAll('*').length;
+  } catch {
+    descendantCount = childCount;
+  }
+
+  if (['main', 'section', 'article', 'div', 'ul', 'ol', 'table'].includes(tag)) {
+    if (descendantCount > 60) return true;
+    if (textLength > 1500 && descendantCount > 20) return true;
+  }
+
+  return false;
 }
 
 function findStableClassFromAttributes(classAttr?: string): string | null {
@@ -695,6 +816,56 @@ function validateCandidate(selector: string, snapshot: Document): CandidateValid
   return isTextSelector(selector)
     ? validateTextCandidate(selector, snapshot)
     : validateCSSCandidate(selector, snapshot);
+}
+
+function hasStrongAttributeSignal(selector: string): boolean {
+  const patterns = [
+    /\[data-testid=(?:"[^"]+"|'[^']+')\]/i,
+    /\[id=(?:"[^"]+"|'[^']+')\]/i,
+    /\[name=(?:"[^"]+"|'[^']+')\]/i,
+    /\[aria-label=(?:"[^"]+"|'[^']+')\]/i,
+    /\[placeholder=(?:"[^"]+"|'[^']+')\]/i,
+    /\[type=(?:"submit"|'submit')\]/i,
+    /\[href=(?:"[^"]+"|'[^']+')\]/i,
+    /\[role=(?:"[^"]+"|'[^']+')\]/i,
+  ];
+  return patterns.some(pattern => pattern.test(selector));
+}
+
+function shouldTrustOriginalOnSnapshotMiss(
+  step: CodegenStep,
+  originalValidation: CandidateValidation
+): boolean {
+  const selector = step.selector || '';
+  if (!selector) return false;
+  if (!isLikelyCssSelector(selector)) return false;
+  if (isKnownShellSelector(selector)) return false;
+  if (originalValidation.effectiveMatchCount !== 0) return false;
+  if (isTextSelector(selector)) return false;
+
+  const strongPriority = step.selectorPriority === 'data-testid' || step.selectorPriority === 'id';
+  const strongSignal = strongPriority || hasStrongAttributeSignal(selector) || selector.startsWith('#');
+  if (!strongSignal) return false;
+
+  const normalized = selector.toLowerCase();
+  if (step.action === 'input') {
+    return normalized.startsWith('input') ||
+      normalized.startsWith('textarea') ||
+      normalized.startsWith('select') ||
+      /\[(?:name|id|placeholder)=/i.test(selector);
+  }
+
+  if (step.action === 'submit') {
+    return normalized.startsWith('button') ||
+      normalized.startsWith('input') ||
+      /\[type=(?:"submit"|'submit')\]/i.test(selector);
+  }
+
+  if (step.action === 'click' || step.action === 'custom-select' || step.action === 'hover') {
+    return true;
+  }
+
+  return false;
 }
 
 export function shouldKeepOriginal(step: CodegenStep, snapshot: Document, config: ResolverConfig): boolean {
@@ -1327,78 +1498,94 @@ export function matchesIntent(el: Element, intent: string | CodegenStep): boolea
  */
 function serializeSnapshotExcerpt(
   snapshot: Document,
-  targetSelector: string,
+  step: CodegenStep,
   maxChars: number
-): string {
-  // Helper to strip noise (scripts, styles)
+): {
+  excerpt: string;
+  mode: 'target-selector' | 'seed-element' | 'document-fallback';
+} {
   const stripNoise = (html: string): string => {
-  if (typeof html !== 'string') {
-    return '';
-  }
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[\s\S]*?<\/style>/gi, '');
-};
+    if (typeof html !== 'string') {
+      return '';
+    }
+    return html
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '');
+  };
 
-  // Guard: ensure we have a valid CSS selector
-  if (!targetSelector || !isLikelyCssSelector(targetSelector)) {
-    // Fallback to whole document
-    const fullHtml = snapshot.documentElement?.outerHTML || snapshot.body?.outerHTML || '';
+  const serializeFromElement = (targetElement: Element): string => {
+    const candidates: string[] = [];
+    candidates.push(targetElement.outerHTML);
+
+    let parent = targetElement.parentElement;
+    let depth = 0;
+    while (parent && depth < 2) {
+      candidates.push(parent.outerHTML);
+      parent = parent.parentElement;
+      depth++;
+    }
+
+    const cleanedCandidates = candidates.map(stripNoise);
+
+    let bestHtml = '';
+    for (const html of cleanedCandidates) {
+      const redacted = redactSnapshot(html);
+      if (redacted.length <= maxChars && redacted.length > bestHtml.length) {
+        bestHtml = redacted;
+      }
+    }
+
+    if (!bestHtml) {
+      const firstRedacted = redactSnapshot(cleanedCandidates[0] || '');
+      bestHtml = firstRedacted.slice(0, maxChars);
+    }
+
+    return bestHtml;
+  };
+
+  const fallbackDocumentExcerpt = (): string => {
+    const fullHtml = snapshot.body?.outerHTML || snapshot.documentElement?.outerHTML || '';
     const cleaned = stripNoise(fullHtml);
     const redacted = redactSnapshot(cleaned);
     return redacted.slice(0, maxChars);
-  }
+  };
 
-  let targetElement: Element | null = null;
-  try {
-    targetElement = snapshot.querySelector(targetSelector);
-  } catch {
-    // Invalid selector – fallback to whole document
-    const fullHtml = snapshot.documentElement?.outerHTML || snapshot.body?.outerHTML || '';
-    const cleaned = stripNoise(fullHtml);
-    const redacted = redactSnapshot(cleaned);
-    return redacted.slice(0, maxChars);
-  }
-
-  if (!targetElement) {
-    // Element not found – fallback to whole document
-    const fullHtml = snapshot.documentElement?.outerHTML || snapshot.body?.outerHTML || '';
-    const cleaned = stripNoise(fullHtml);
-    const redacted = redactSnapshot(cleaned);
-    return redacted.slice(0, maxChars);
-  }
-
-  // Collect candidate snippets: element itself, then up to 2 parents
-  const candidates: string[] = [];
-  candidates.push(targetElement.outerHTML);
-
-  let parent = targetElement.parentElement;
-  let depth = 0;
-  while (parent && depth < 2) {
-    candidates.push(parent.outerHTML);
-    parent = parent.parentElement;
-    depth++;
-  }
-
-  // Strip noise from each candidate
-  const cleanedCandidates = candidates.map(stripNoise);
-
-  // Pick the largest candidate that fits within maxChars (after redaction)
-  let bestHtml = '';
-  for (const html of cleanedCandidates) {
-    const redacted = redactSnapshot(html);
-    if (redacted.length <= maxChars && redacted.length > bestHtml.length) {
-      bestHtml = redacted;
+  const targetSelector = step.selector || '';
+  if (targetSelector && isLikelyCssSelector(targetSelector)) {
+    try {
+      const targetElement = snapshot.querySelector(targetSelector);
+      if (targetElement) {
+        return {
+          excerpt: serializeFromElement(targetElement),
+          mode: 'target-selector',
+        };
+      }
+    } catch {
+      // Ignore and continue with seed search.
     }
   }
 
-  // If none fit (unlikely but possible), fall back to first candidate truncated
-  if (!bestHtml) {
-    const firstRedacted = redactSnapshot(cleanedCandidates[0]);
-    bestHtml = firstRedacted.slice(0, maxChars);
+  const seedElements = findSeedElements(step, snapshot);
+  if (seedElements.length > 0) {
+    const rankedSeed = seedElements
+      .map(element => ({
+        element,
+        score: evaluateIntentMatch(element, step).score,
+      }))
+      .sort((a, b) => b.score - a.score)[0]?.element;
+
+    if (rankedSeed) {
+      return {
+        excerpt: serializeFromElement(rankedSeed),
+        mode: 'seed-element',
+      };
+    }
   }
 
-  return bestHtml;
+  return {
+    excerpt: fallbackDocumentExcerpt(),
+    mode: 'document-fallback',
+  };
 }
 
 function redactSnapshot(html: string): string {
@@ -1457,6 +1644,25 @@ function deriveDeterministicResolution(
   }
 
   const originalValidation = validateCandidate(step.selector, snapshot);
+  if (shouldTrustOriginalOnSnapshotMiss(step, originalValidation)) {
+    const rank = getSelectorRank(step.selector, step.selectorPriority, step.selectorRank);
+    const score = Math.max(rankScore(rank), 0.65);
+    return {
+      step,
+      snapshot,
+      resolvedSelector: step.selector,
+      metadata: {
+        ...baseMetadata,
+        resolvedSelector: step.selector,
+        resolvedBy: 'kept-original',
+        bestScore: score,
+        effectiveMatchCount: originalValidation.effectiveMatchCount,
+        warningCodes: [...baseMetadata.warningCodes, 'trusted-original-snapshot-miss'],
+      },
+      llmEligible: false,
+    };
+  }
+
   if (shouldKeepOriginal(step, snapshot, config)) {
     const rank = getSelectorRank(step.selector, step.selectorPriority, step.selectorRank);
     const score = rankScore(rank) + 0.3;
@@ -1739,16 +1945,68 @@ export async function resolveSelectorsForSession(
     });
 
     const request: LlmFallbackRequest = {
-      steps: llmTargets.map(draft => ({
-        stepNumber: draft.step.step,
-        intent: draft.step.intent,
-        originalSelector: draft.step.selector,
-        snapshotExcerpt: redactSnapshot(
-          serializeSnapshotExcerpt(draft.snapshot as Document, draft.step.selector, resolvedConfig.maxSnapshotExcerptChars),
-        ),
-      })),
+      steps: llmTargets.map(draft => {
+        const excerptInfo = serializeSnapshotExcerpt(
+          draft.snapshot as Document,
+          draft.step,
+          resolvedConfig.maxSnapshotExcerptChars,
+        );
+        const snapshotExcerpt = excerptInfo.excerpt;
+        return {
+          stepNumber: draft.step.step,
+          intent: draft.step.intent,
+          action: draft.step.action,
+          originalSelector: draft.step.selector,
+          snapshotExcerpt,
+          normalizedUrl: draft.step.normalizedUrl,
+          snapshotSource: draft.metadata.snapshotSource,
+          excerptChars: snapshotExcerpt.length,
+          excerptMode: excerptInfo.mode,
+          selectorPriority: draft.step.selectorPriority,
+        };
+      }),
       config: resolvedConfig,
     };
+
+    const excerptLengths = request.steps.map(step => step.excerptChars ?? step.snapshotExcerpt.length);
+    const minExcerptChars = excerptLengths.length > 0 ? Math.min(...excerptLengths) : 0;
+    const maxExcerptChars = excerptLengths.length > 0 ? Math.max(...excerptLengths) : 0;
+    const avgExcerptChars = excerptLengths.length > 0
+      ? Number((excerptLengths.reduce((sum, value) => sum + value, 0) / excerptLengths.length).toFixed(1))
+      : 0;
+    const sourceBreakdown = request.steps.reduce<Record<string, number>>((acc, step) => {
+      const source = step.snapshotSource ?? 'unknown';
+      acc[source] = (acc[source] ?? 0) + 1;
+      return acc;
+    }, {});
+    const excerptModeBreakdown = request.steps.reduce<Record<string, number>>((acc, step) => {
+      const mode = step.excerptMode ?? 'unknown';
+      acc[mode] = (acc[mode] ?? 0) + 1;
+      return acc;
+    }, {});
+    console.log('[AIR] [RESOLVER] LLM request snapshot context', {
+      targetSteps: request.steps.length,
+      minExcerptChars,
+      maxExcerptChars,
+      avgExcerptChars,
+      sourceBreakdown,
+      excerptModeBreakdown,
+    });
+
+    const debugSnapshotContext = /^(1|true|yes)$/i.test(process.env.AIR_DEBUG_LLM_SNAPSHOT_CONTEXT || '');
+    if (debugSnapshotContext) {
+      for (const step of request.steps) {
+        const preview = step.snapshotExcerpt.slice(0, 200);
+        console.log('[AIR] [RESOLVER] LLM step context', {
+          step: step.stepNumber,
+          source: step.snapshotSource ?? 'unknown',
+          mode: step.excerptMode ?? 'unknown',
+          normalizedUrl: step.normalizedUrl ?? null,
+          excerptChars: step.excerptChars ?? step.snapshotExcerpt.length,
+          excerptPreview: preview,
+        });
+      }
+    }
 
     try {
       const suggestionsRaw = await withTimeout(
@@ -1930,3 +2188,4 @@ export async function resolveSelectorsForSession(
     llmAcceptedStepNumbers,
   };
 }
+

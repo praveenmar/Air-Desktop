@@ -362,16 +362,16 @@ describe('selector-resolver', () => {
   it('blocks deterministic override to generic shell selector and keeps original unresolved', async () => {
     const appShell = makeElement({ id: 'app' }, { id: 'app', text: 'username password login' });
     const step = makeStep(1, {
-      selector: '[name="username"]',
-      selectorPriority: 'attribute',
-      selectorRank: 3,
+      selector: '.btn',
+      selectorPriority: 'class',
+      selectorRank: 7,
       intent: 'click_username',
       sourceNodeId: 'node-1',
     });
 
     const snapshotCache = makeSnapshotCache({
       'node-1': makeDocument({
-        '[name="username"]': [],
+        '.btn': [],
         '[id="app"]': [appShell],
         '*': [appShell],
       }),
@@ -384,9 +384,44 @@ describe('selector-resolver', () => {
     );
 
     const resolution = result.resolutions[0];
-    expect(resolution.resolvedSelector).toBe('[name="username"]');
+    expect(resolution.resolvedSelector).toBe('.btn');
     expect(resolution.resolverMetadata.resolvedBy).toBe('unresolved');
     expect(resolution.resolverMetadata.warningCodes).toContain('blocked-generic-shell-override');
+  });
+
+  it('trusts strong original selector when snapshot misses control', async () => {
+    const step = makeStep(1, {
+      selector: 'input[name="username"]',
+      selectorPriority: 'attribute',
+      selectorRank: 3,
+      intent: 'input_username',
+      action: 'input',
+      sourceNodeId: 'node-1',
+    });
+
+    const shell = makeElement({ class: 'orangehrm-login-layout' }, { text: 'Login shell' });
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        'input[name="username"]': [],
+        '.orangehrm-login-layout': [shell],
+        '*': [shell],
+      }),
+    });
+
+    const llmProvider = vi.fn(async () => [{ stepNumber: 1, selector: '.orangehrm-login-layout' }]);
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      { enableLLMFallback: true },
+      llmProvider,
+    );
+
+    const resolution = result.resolutions[0];
+    expect(resolution.resolvedSelector).toBe('input[name="username"]');
+    expect(resolution.resolverMetadata.resolvedBy).toBe('kept-original');
+    expect(resolution.resolverMetadata.warningCodes).toContain('trusted-original-snapshot-miss');
+    expect(result.llmAttemptedStepNumbers).toHaveLength(0);
+    expect(llmProvider).not.toHaveBeenCalled();
   });
 
   it('treats hidden matches as non-visible during validation', () => {
