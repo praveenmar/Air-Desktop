@@ -96,7 +96,7 @@ $candidates = @(
 $candidates | Where-Object { Test-Path $_ }
 ```
 
-## 4) Useful DB queries (copy/paste via Node + better-sqlite3)
+## 4) Useful DB queries (copy/paste via Node + node:sqlite)
 
 Set DB path first:
 
@@ -107,25 +107,25 @@ $env:AIR_DB_PATH = "C:\Users\<you>\AppData\Roaming\air-desktop\air-data.db"
 Latest sessions:
 
 ```powershell
-node -e "const Database=require('better-sqlite3');const db=new Database(process.env.AIR_DB_PATH);console.table(db.prepare('SELECT id,status,event_count,started_at,last_event_at FROM sessions ORDER BY started_at DESC LIMIT 10').all());"
+node -e "const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(process.env.AIR_DB_PATH); console.table(db.prepare('SELECT id,status,event_count,started_at,last_event_at FROM sessions ORDER BY started_at DESC LIMIT 10').all());"
 ```
 
 Latest events:
 
 ```powershell
-node -e "const Database=require('better-sqlite3');const db=new Database(process.env.AIR_DB_PATH);console.table(db.prepare('SELECT id,type,session_id,trace_id,node_id,timestamp FROM events ORDER BY timestamp DESC LIMIT 25').all());"
+node -e "const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(process.env.AIR_DB_PATH); console.table(db.prepare('SELECT id,type,session_id,trace_id,node_id,timestamp FROM events ORDER BY timestamp DESC LIMIT 25').all());"
 ```
 
 Latest debug logs:
 
 ```powershell
-node -e "const Database=require('better-sqlite3');const db=new Database(process.env.AIR_DB_PATH);console.table(db.prepare('SELECT timestamp,component,level,message,session_id,trace_id FROM debug_logs ORDER BY timestamp DESC LIMIT 50').all());"
+node -e "const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(process.env.AIR_DB_PATH); console.table(db.prepare('SELECT timestamp,component,level,message,session_id,trace_id FROM debug_logs ORDER BY timestamp DESC LIMIT 50').all());"
 ```
 
 Debug logs for one session:
 
 ```powershell
-node -e "const Database=require('better-sqlite3');const db=new Database(process.env.AIR_DB_PATH);const sid=process.argv[1];console.table(db.prepare('SELECT timestamp,component,level,message,trace_id FROM debug_logs WHERE session_id=? ORDER BY timestamp DESC LIMIT 200').all(sid));" "session-<id>"
+node -e "const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(process.env.AIR_DB_PATH); const sid = process.argv[1]; console.table(db.prepare('SELECT timestamp,component,level,message,trace_id FROM debug_logs WHERE session_id=? ORDER BY timestamp DESC LIMIT 200').all(sid));" "session-<id>"
 ```
 
 ## 5) Component-by-component log meaning

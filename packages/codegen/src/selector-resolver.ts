@@ -9,19 +9,23 @@ import type {
 export interface ResolverConfig {
   enableLLMFallback?: boolean;
   resolverMinScore?: number;
+  intentMinScore?: number;
   maxSnapshotBytesForValidation?: number;
   maxSnapshotExcerptChars?: number;
   llmTimeoutMs?: number;
   maxLLMFallbackPerSession?: number;
+  llmMaxRetriesPerStep?: number;
 }
 
 export interface ResolvedResolverConfig {
   enableLLMFallback: boolean;
   resolverMinScore: number;
+  intentMinScore: number;
   maxSnapshotBytesForValidation: number;
   maxSnapshotExcerptChars: number;
   llmTimeoutMs: number;
   maxLLMFallbackPerSession?: number;
+  llmMaxRetriesPerStep: number;
 }
 
 export interface SnapshotCache {
@@ -69,6 +73,7 @@ interface StepResolutionDraft {
   resolvedSelector: string;
   metadata: ResolverMetadata;
   llmEligible: boolean;
+  lowScoreFallback?: CandidateScore;
 }
 
 interface ResolveContext {
@@ -85,6 +90,7 @@ export interface LlmFallbackStep {
 export interface LlmFallbackSuggestion {
   stepNumber: number;
   selector: string;
+  selectors?: string[];
 }
 
 export interface LlmFallbackRequest {
@@ -136,19 +142,23 @@ const RANK_SCORES: Record<number, number> = {
 const DEFAULT_CONFIG: ResolvedResolverConfig = {
   enableLLMFallback: false,
   resolverMinScore: 0.7,
+  intentMinScore: 0.6,
   maxSnapshotBytesForValidation: 2_000_000,
   maxSnapshotExcerptChars: 2000,
   llmTimeoutMs: 20_000,
+  llmMaxRetriesPerStep: 2,
 };
 
 function resolveConfig(config?: ResolverConfig): ResolvedResolverConfig {
   return {
     enableLLMFallback: config?.enableLLMFallback ?? DEFAULT_CONFIG.enableLLMFallback,
     resolverMinScore: config?.resolverMinScore ?? DEFAULT_CONFIG.resolverMinScore,
+    intentMinScore: config?.intentMinScore ?? DEFAULT_CONFIG.intentMinScore,
     maxSnapshotBytesForValidation: config?.maxSnapshotBytesForValidation ?? DEFAULT_CONFIG.maxSnapshotBytesForValidation,
     maxSnapshotExcerptChars: config?.maxSnapshotExcerptChars ?? DEFAULT_CONFIG.maxSnapshotExcerptChars,
     llmTimeoutMs: config?.llmTimeoutMs ?? DEFAULT_CONFIG.llmTimeoutMs,
     maxLLMFallbackPerSession: config?.maxLLMFallbackPerSession,
+    llmMaxRetriesPerStep: config?.llmMaxRetriesPerStep ?? DEFAULT_CONFIG.llmMaxRetriesPerStep,
   };
 }
 
@@ -365,11 +375,15 @@ function findStableClassFromAttributes(classAttr?: string): string | null {
   return filtered[0] ?? null;
 }
 
-function isDynamicText(text: string): boolean {
+function isDynamicText(text: string, options?: { allowNumericText?: boolean }): boolean {
   const trimmed = text.trim();
   if (!trimmed) return true;
   if (trimmed.length > 80) return true;
-  if (/\d{4,}/.test(trimmed)) return true;
+  if (options?.allowNumericText) {
+    if (/\d{6,}/.test(trimmed)) return true;
+  } else if (/\d{4,}/.test(trimmed)) {
+    return true;
+  }
   if (/(?:uuid|guid|session|token|timestamp)/i.test(trimmed)) return true;
   return false;
 }
@@ -417,6 +431,136 @@ function extractStableParentSelector(step: CodegenStep, attrs?: StepSignalAttrib
   }
 
   return null;
+}
+
+const CALENDAR_INTENT_HINTS = new Set([
+  'calendar',
+  'date',
+  'day',
+  'month',
+  'year',
+  'timesheet',
+  'time',
+  'today',
+  'tomorrow',
+  'yesterday',
+]);
+
+const CALENDAR_SELECTOR_HINTS = [
+  'calendar',
+  'datepicker',
+  'date-picker',
+  'dateinput',
+  'date-input',
+  'date-input',
+  'oxd-date-input',
+  'oxd-calendar',
+  'timesheet',
+];
+
+const CALENDAR_SCOPE_SELECTORS = [
+  '.oxd-date-input',
+  '.oxd-date-input-container',
+  '.oxd-calendar-wrapper',
+  '.oxd-calendar-selector',
+  '.oxd-calendar-selector-year',
+  '.oxd-calendar-selector-month',
+  '.oxd-calendar-dropdown',
+  '.oxd-calendar-dates-grid',
+  '.react-datepicker',
+  '.datepicker',
+  '[role="dialog"]',
+];
+
+function containsCalendarHint(value?: string | null): boolean {
+  if (!value) return false;
+  const normalized = value.toLowerCase();
+  return CALENDAR_SELECTOR_HINTS.some(hint => normalized.includes(hint));
+}
+
+function isNumericIntentToken(token: string): boolean {
+  return /^\d{1,4}$/.test(token);
+}
+
+function intentTokensForStep(step: CodegenStep): string[] {
+  return tokenizeIntentText(step.intent || '');
+}
+
+function hasCalendarIntent(step: CodegenStep): boolean {
+  const tokens = intentTokensForStep(step);
+  if (tokens.some(token => CALENDAR_INTENT_HINTS.has(token))) return true;
+  if (tokens.some(isNumericIntentToken) && (step.action === 'click' || step.action === 'input')) return true;
+  return false;
+}
+
+function hasCalendarSnapshotMarkers(snapshot: Document): boolean {
+  return CALENDAR_SCOPE_SELECTORS.some(selector => {
+    try {
+      return !!snapshot.querySelector(selector);
+    } catch {
+      return false;
+    }
+  });
+}
+
+function isCalendarContext(step: CodegenStep, snapshot: Document, attrs: StepSignalAttributes, seedElements: Element[]): boolean {
+  if (hasCalendarIntent(step)) return true;
+  if (containsCalendarHint(step.selector)) return true;
+  if (containsCalendarHint(attrs.class)) return true;
+  if (containsCalendarHint(attrs.parentSelector)) return true;
+  if (containsCalendarHint(step.fingerprint?.selector)) return true;
+  if (containsCalendarHint(step.fingerprint?.parentSelector || undefined)) return true;
+
+  for (const element of seedElements) {
+    const className = (element.getAttribute('class') || '').toLowerCase();
+    const id = (element.getAttribute('id') || '').toLowerCase();
+    const aria = (element.getAttribute('aria-label') || '').toLowerCase();
+    if (containsCalendarHint(className) || containsCalendarHint(id) || containsCalendarHint(aria)) {
+      return true;
+    }
+  }
+
+  if (step.action === 'click' || step.action === 'input') {
+    return hasCalendarSnapshotMarkers(snapshot);
+  }
+
+  return false;
+}
+
+function getCalendarScopeSelectors(step: CodegenStep, attrs: StepSignalAttributes): string[] {
+  const scopes: string[] = [];
+  const stableParent = extractStableParentSelector(step, attrs);
+  const maybeScoped = [attrs.parentSelector, stableParent];
+  for (const selector of maybeScoped) {
+    if (!selector) continue;
+    if (!isLikelyCssSelector(selector)) continue;
+    if (!containsCalendarHint(selector)) continue;
+    scopes.push(selector);
+  }
+  scopes.push(...CALENDAR_SCOPE_SELECTORS);
+
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const scope of scopes) {
+    if (!scope) continue;
+    if (seen.has(scope)) continue;
+    seen.add(scope);
+    unique.push(scope);
+  }
+  return unique.slice(0, 8);
+}
+
+function extractCalendarTextTarget(step: CodegenStep, textExcerpt?: string | null): string | null {
+  const raw = textExcerpt?.trim() || '';
+  if (raw) return raw;
+  const numericToken = intentTokensForStep(step).find(isNumericIntentToken);
+  return numericToken ?? null;
+}
+
+function looksDateValue(value?: string): boolean {
+  if (!value) return false;
+  const trimmed = value.trim();
+  return /^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(trimmed);
 }
 
 export function isVisibleElement(el: Element): boolean {
@@ -579,6 +723,9 @@ export function generateCandidates(step: CodegenStep, snapshot: Document): RawCa
       if (extracted) textExcerpt = extracted;
     }
   }
+  const calendarContext = isCalendarContext(step, snapshot, attrs, seedElements);
+  const calendarScopes = calendarContext ? getCalendarScopeSelectors(step, attrs) : [];
+  const calendarTextTarget = calendarContext ? extractCalendarTextTarget(step, textExcerpt) : null;
 
   const selector = step.selector;
 
@@ -623,7 +770,7 @@ export function generateCandidates(step: CodegenStep, snapshot: Document): RawCa
     candidates.push({ selector: `.${cssEscape(stableClass)}`, source: 'class', rank: 7 });
   }
 
-  if (textExcerpt && !isDynamicText(textExcerpt)) {
+  if (textExcerpt && !isDynamicText(textExcerpt, { allowNumericText: calendarContext })) {
     const escapedText = escapeTextSelectorValue(textExcerpt);
     if (escapedText) {
       candidates.push({
@@ -647,6 +794,62 @@ export function generateCandidates(step: CodegenStep, snapshot: Document): RawCa
           rank: 6,
         });
       }
+    }
+  }
+
+  if (calendarContext && selector && isLikelyCssSelector(selector)) {
+    for (const scope of calendarScopes) {
+      candidates.push({
+        selector: `${scope} ${selector}`,
+        source: 'parent-scope',
+        rank: 3,
+      });
+    }
+  }
+
+  if (calendarContext && calendarTextTarget) {
+    const escapedCalendarText = escapeTextSelectorValue(calendarTextTarget);
+    if (escapedCalendarText) {
+      candidates.push({
+        selector: `text=${escapedCalendarText}`,
+        source: 'text',
+        rank: 3,
+      });
+
+      if (selector && isLikelyCssSelector(selector)) {
+        candidates.push({
+          selector: `${selector}:has-text("${escapedCalendarText}")`,
+          source: 'text',
+          rank: 3,
+        });
+      }
+
+      for (const scope of calendarScopes) {
+        if (selector && isLikelyCssSelector(selector)) {
+          candidates.push({
+            selector: `${scope} ${selector}:has-text("${escapedCalendarText}")`,
+            source: 'parent-scope',
+            rank: 2,
+          });
+        }
+        candidates.push({
+          selector: `${scope} *:has-text("${escapedCalendarText}")`,
+          source: 'text',
+          rank: 3,
+        });
+      }
+    }
+  }
+
+  if (calendarContext && step.action === 'input') {
+    for (const scope of calendarScopes) {
+      candidates.push({ selector: `${scope} input`, source: 'parent-scope', rank: 2 });
+      candidates.push({ selector: `${scope} .oxd-input`, source: 'parent-scope', rank: 3 });
+    }
+    if (looksDateValue(step.value)) {
+      candidates.push({ selector: 'input[placeholder*="yyyy"]', source: 'placeholder', rank: 3 });
+      candidates.push({ selector: 'input[placeholder*="mm"]', source: 'placeholder', rank: 4 });
+      candidates.push({ selector: 'input[placeholder*="dd"]', source: 'placeholder', rank: 4 });
     }
   }
 
@@ -681,7 +884,7 @@ export function generateCandidates(step: CodegenStep, snapshot: Document): RawCa
     if (seen.has(candidate.selector)) return false;
     seen.add(candidate.selector);
     return true;
-  }).slice(0, 10);
+  }).slice(0, 20);
 }
 
 export function complexityPenalty(selector: string): number {
@@ -769,12 +972,350 @@ function shouldBlockGenericShellOverride(originalSelector: string, candidateSele
   return true;
 }
 
-export function matchesIntent(el: Element, intent: string): boolean {
-  const tokens = intent.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-  if (tokens.length === 0) return true;
-  const text = (el.textContent || '').toLowerCase();
-  const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-  return tokens.some(token => text.includes(token) || aria.includes(token));
+type IntentActionHint =
+  | 'click'
+  | 'input'
+  | 'submit'
+  | 'custom-select'
+  | 'hover'
+  | 'scroll'
+  | 'navigate'
+  | 'unknown';
+
+interface IntentScore {
+  score: number;
+  tokenScore: number;
+  roleScore: number;
+  tagScore: number;
+  matchedTokens: string[];
+  tokens: string[];
+  actionHint: IntentActionHint;
+}
+
+const INTENT_STOP_TOKENS = new Set([
+  'click',
+  'input',
+  'type',
+  'custom',
+  'select',
+  'hover',
+  'scroll',
+  'navigate',
+  'navigation',
+  'immediate',
+  'action',
+  'state',
+  'refresh',
+  'no',
+  'change',
+  'page',
+  'root',
+  'icon',
+  'btn',
+  'button',
+  'menu',
+  'item',
+  'node',
+  'step',
+  'oxd',
+  'focus',
+  'active',
+  'field',
+  'open',
+  'close',
+]);
+
+function tokenizeIntentText(value: string): string[] {
+  return value
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map(token => token.trim())
+    .filter(Boolean)
+    .filter(token => token.length >= 2);
+}
+
+function inferActionHint(step: CodegenStep, tokens: string[]): IntentActionHint {
+  if (step.action) return step.action;
+  if (tokens.includes('custom') && tokens.includes('select')) return 'custom-select';
+  if (tokens.includes('submit')) return 'submit';
+  if (tokens.includes('hover')) return 'hover';
+  if (tokens.includes('scroll')) return 'scroll';
+  if (tokens.includes('navigate') || tokens.includes('navigation')) return 'navigate';
+  if (tokens.includes('input') || tokens.includes('type')) return 'input';
+  if (tokens.includes('click')) return 'click';
+  return 'unknown';
+}
+
+function actionTagHints(actionHint: IntentActionHint, calendarMode = false): Set<string> {
+  switch (actionHint) {
+    case 'click':
+      return calendarMode
+        ? new Set(['button', 'a', 'label', 'input', 'option', 'summary', 'i', 'svg'])
+        : new Set(['button', 'a', 'label', 'input', 'option', 'summary']);
+    case 'input':
+      return new Set(['input', 'textarea', 'select']);
+    case 'submit':
+      return new Set(['button', 'input']);
+    case 'custom-select':
+      return new Set(['select', 'option', 'input', 'button', 'a']);
+    case 'hover':
+      return new Set(['button', 'a', 'label', 'div', 'li']);
+    default:
+      return new Set();
+  }
+}
+
+function collectIntentHaystack(el: Element): string {
+  const attrs = [
+    'aria-label',
+    'name',
+    'placeholder',
+    'id',
+    'data-testid',
+    'href',
+    'value',
+    'data-value',
+    'data-id',
+    'title',
+    'role',
+    'class',
+  ];
+  const text = (el.textContent || '').trim();
+  const attrValues = attrs
+    .map(name => el.getAttribute(name) || '')
+    .filter(Boolean);
+  return `${text} ${attrValues.join(' ')}`.toLowerCase();
+}
+
+function computeTokenScore(tokens: string[], haystack: string): { score: number; matchedTokens: string[] } {
+  if (tokens.length === 0) {
+    return { score: 0.5, matchedTokens: [] };
+  }
+
+  const matchedTokens = tokens.filter(token => haystack.includes(token));
+  const ratio = matchedTokens.length / tokens.length;
+  return {
+    score: Math.max(0, Math.min(1, ratio)),
+    matchedTokens,
+  };
+}
+
+function computeRoleScore(actionHint: IntentActionHint, role: string, tagName: string, calendarMode = false): number {
+  const roleLower = role.toLowerCase();
+  const tagLower = tagName.toLowerCase();
+  if (!roleLower && !tagLower) return 0.5;
+
+  if (actionHint === 'unknown' || actionHint === 'navigate' || actionHint === 'scroll') {
+    return 0.5;
+  }
+
+  if (actionHint === 'input') {
+    if (['textbox', 'searchbox', 'combobox', 'spinbutton'].includes(roleLower)) return 1;
+    if (['input', 'textarea', 'select'].includes(tagLower)) return 1;
+    return 0.2;
+  }
+
+  if (actionHint === 'submit') {
+    if (roleLower === 'button' || tagLower === 'button') return 1;
+    if (tagLower === 'input') return 0.8;
+    return 0.2;
+  }
+
+  if (actionHint === 'custom-select') {
+    if (['option', 'listbox', 'combobox', 'menuitem'].includes(roleLower)) return 1;
+    if (['select', 'option', 'input', 'button', 'a'].includes(tagLower)) return 0.9;
+    return 0.3;
+  }
+
+  if (actionHint === 'click' || actionHint === 'hover') {
+    if (['button', 'link', 'menuitem', 'tab', 'option', 'checkbox', 'radio', 'switch'].includes(roleLower)) return 1;
+    if (calendarMode && ['img', 'presentation'].includes(roleLower)) return 0.75;
+    if (['button', 'a', 'label', 'input', 'option', 'summary'].includes(tagLower)) return 0.85;
+    if (calendarMode && ['i', 'svg'].includes(tagLower)) return 0.8;
+    return 0.3;
+  }
+
+  return 0.5;
+}
+
+function computeTagScore(actionHint: IntentActionHint, tagName: string, calendarMode = false): number {
+  if (!tagName) return 0.5;
+  const expected = actionTagHints(actionHint, calendarMode);
+  if (expected.size === 0) return 0.5;
+  return expected.has(tagName.toLowerCase()) ? 1 : 0;
+}
+
+function evaluateIntentMatch(el: Element, step: CodegenStep): IntentScore {
+  const rawTokens = tokenizeIntentText(step.intent || '');
+  const semanticTokens = rawTokens.filter(token => !INTENT_STOP_TOKENS.has(token));
+  const calendarMode = hasCalendarIntent(step) || containsCalendarHint(step.selector);
+  const actionHint = inferActionHint(step, rawTokens);
+  const haystack = collectIntentHaystack(el);
+  const tagName = ((el as HTMLElement).tagName || '').toLowerCase();
+  const role = (el.getAttribute('role') || '').toLowerCase();
+  const token = computeTokenScore(semanticTokens, haystack);
+  const roleScore = computeRoleScore(actionHint, role, tagName, calendarMode);
+  const tagScore = computeTagScore(actionHint, tagName, calendarMode);
+  let score = Math.max(0, Math.min(1, (token.score * 0.6) + (roleScore * 0.2) + (tagScore * 0.2)));
+
+  // Prevent LLM false positives that pass only on role/tag shape without any intent-token evidence.
+  if (semanticTokens.length > 0 && token.matchedTokens.length === 0 && !calendarMode) {
+    score = Math.min(score, 0.49);
+  }
+
+  return {
+    score,
+    tokenScore: token.score,
+    roleScore,
+    tagScore,
+    matchedTokens: token.matchedTokens,
+    tokens: semanticTokens,
+    actionHint,
+  };
+}
+
+function selectorLooksInputLike(selector: string): boolean {
+  const normalized = selector.trim().toLowerCase();
+  return (
+    normalized.startsWith('input') ||
+    normalized.startsWith('textarea') ||
+    normalized.startsWith('select') ||
+    normalized.includes('[name=') ||
+    normalized.includes('[placeholder=') ||
+    normalized.includes('[type=')
+  );
+}
+
+function selectorLooksInteractive(selector: string): boolean {
+  const normalized = selector.trim().toLowerCase();
+  return (
+    normalized.startsWith('button') ||
+    normalized.startsWith('a') ||
+    normalized.startsWith('input') ||
+    normalized.startsWith('textarea') ||
+    normalized.startsWith('select') ||
+    normalized.includes('[role=') ||
+    normalized.includes('[href=') ||
+    normalized.includes('[aria-label=') ||
+    normalized.includes(':has-text(') ||
+    normalized.startsWith('text=')
+  );
+}
+
+function elementLooksInputLike(el: Element | null): boolean {
+  if (!el) return false;
+  const tagName = ((el as HTMLElement).tagName || '').toLowerCase();
+  const role = (el.getAttribute('role') || '').toLowerCase();
+  const contentEditable = (el.getAttribute('contenteditable') || '').toLowerCase();
+  return (
+    ['input', 'textarea', 'select'].includes(tagName) ||
+    ['textbox', 'searchbox', 'combobox', 'spinbutton'].includes(role) ||
+    contentEditable === 'true'
+  );
+}
+
+function elementLooksInteractive(el: Element | null): boolean {
+  if (!el) return false;
+  const tagName = ((el as HTMLElement).tagName || '').toLowerCase();
+  const role = (el.getAttribute('role') || '').toLowerCase();
+  const href = el.getAttribute('href');
+  const onclick = el.getAttribute('onclick');
+  const tabIndex = el.getAttribute('tabindex');
+
+  if (elementLooksInputLike(el)) return true;
+  if (['button', 'a', 'label', 'summary', 'option'].includes(tagName)) return true;
+  if (
+    ['button', 'link', 'menuitem', 'tab', 'option', 'checkbox', 'radio', 'switch', 'combobox', 'listbox'].includes(role)
+  ) {
+    return true;
+  }
+  if (href || onclick) return true;
+  if (typeof tabIndex === 'string' && tabIndex.trim() !== '' && tabIndex.trim() !== '-1') return true;
+  return false;
+}
+
+function hasFieldIntent(step: CodegenStep): boolean {
+  const tokens = tokenizeIntentText(step.intent || '');
+  const fieldHints = new Set([
+    'username',
+    'password',
+    'email',
+    'search',
+    'date',
+    'first',
+    'last',
+    'name',
+    'phone',
+    'mobile',
+    'otp',
+    'pin',
+    'code',
+  ]);
+  return tokens.some(token => fieldHints.has(token));
+}
+
+function getCandidateElement(snapshot: Document, selector: string): Element | null {
+  try {
+    return snapshot.querySelector(selector);
+  } catch {
+    return null;
+  }
+}
+
+function isLowScoreFallbackCandidateSafe(
+  step: CodegenStep,
+  snapshot: Document,
+  candidate: CandidateScore,
+  config: ResolvedResolverConfig
+): boolean {
+  const selector = candidate.candidate.selector;
+  if (!selector || selector === step.selector) return false;
+
+  const source = candidate.candidate.source;
+  const element = getCandidateElement(snapshot, selector);
+  const intentScore = element ? evaluateIntentMatch(element, step).score : 0;
+  const inputLike = selectorLooksInputLike(selector) || elementLooksInputLike(element);
+  const interactive = selectorLooksInteractive(selector) || elementLooksInteractive(element);
+
+  if (step.action === 'input') {
+    return inputLike;
+  }
+
+  if (step.action === 'submit') {
+    return interactive;
+  }
+
+  if (step.action === 'custom-select') {
+    return interactive || intentScore >= config.intentMinScore;
+  }
+
+  if (step.action === 'click' && hasFieldIntent(step)) {
+    return inputLike;
+  }
+
+  if (source === 'class' || source === 'parent-scope') {
+    return interactive && intentScore >= config.intentMinScore;
+  }
+
+  return interactive || intentScore >= config.intentMinScore;
+}
+
+export function matchesIntent(el: Element, intent: string | CodegenStep): boolean {
+  const step = typeof intent === 'string'
+    ? ({
+      step: 0,
+      intent,
+      action: 'click',
+      selector: '',
+      selectorPriority: 'unknown',
+      assertions: [],
+      userAssertions: [],
+      confidence: 1,
+      sampleSize: 1,
+      pageUrl: '',
+    } as CodegenStep)
+    : intent;
+  return evaluateIntentMatch(el, step).score >= DEFAULT_CONFIG.intentMinScore;
 }
 
 // selector-resolver.ts
@@ -943,13 +1484,53 @@ function deriveDeterministicResolution(
     };
   });
 
-  const winner = candidateScores
+  const uniqueCandidates = candidateScores
     .filter(candidate => candidate.validation.effectiveMatchCount === 1)
-    .filter(candidate => candidate.score >= config.resolverMinScore)
-    .sort(compareCandidates)[0];
+    .sort(compareCandidates);
+
+  const highScoreCandidates = uniqueCandidates
+    .filter(candidate => candidate.score >= config.resolverMinScore);
+
+  const winner = highScoreCandidates[0];
+
+  const lowScoreFallbackCandidates = uniqueCandidates.filter(candidate =>
+    candidate.candidate.selector !== step.selector &&
+    !shouldBlockGenericShellOverride(step.selector, candidate.candidate.selector),
+  );
+
+  const lowScoreFallback = lowScoreFallbackCandidates.find(candidate =>
+    isLowScoreFallbackCandidateSafe(step, snapshot, candidate, config),
+  );
+
+  const hadRejectedLowScoreFallback = lowScoreFallbackCandidates.length > 0 && !lowScoreFallback;
+
+  if (winner && shouldBlockGenericShellOverride(step.selector, winner.candidate.selector)) {
+    return {
+      step,
+      snapshot,
+      resolvedSelector: step.selector,
+      metadata: {
+        ...baseMetadata,
+        resolvedSelector: step.selector,
+        effectiveMatchCount: originalValidation.effectiveMatchCount,
+        warningCodes: [...baseMetadata.warningCodes, 'blocked-generic-shell-override'],
+      },
+      llmEligible: true,
+      lowScoreFallback,
+    };
+  }
 
   if (!winner) {
-    baseMetadata.warningCodes.push('no-unique-candidate');
+    if (uniqueCandidates.length === 0) {
+      baseMetadata.warningCodes.push('no-unique-candidate');
+    } else {
+      baseMetadata.warningCodes.push('deterministic-below-threshold');
+      if (lowScoreFallback) {
+        baseMetadata.warningCodes.push('deterministic-low-score-available');
+      } else if (hadRejectedLowScoreFallback) {
+        baseMetadata.warningCodes.push('deterministic-low-score-rejected');
+      }
+    }
     if (originalValidation.reason === 'invalid-selector') {
       baseMetadata.warningCodes.push('invalid-original-selector');
     }
@@ -962,22 +1543,7 @@ function deriveDeterministicResolution(
         effectiveMatchCount: originalValidation.effectiveMatchCount,
       },
       llmEligible: true,
-    };
-  }
-
-  if (winner.candidate.selector !== step.selector &&
-      shouldBlockGenericShellOverride(step.selector, winner.candidate.selector)) {
-    return {
-      step,
-      snapshot,
-      resolvedSelector: step.selector,
-      metadata: {
-        ...baseMetadata,
-        resolvedSelector: step.selector,
-        effectiveMatchCount: originalValidation.effectiveMatchCount,
-        warningCodes: [...baseMetadata.warningCodes, 'blocked-generic-shell-override'],
-      },
-      llmEligible: true,
+      lowScoreFallback,
     };
   }
 
@@ -1027,6 +1593,64 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
       }
     );
   });
+}
+
+function normalizeSuggestedSelector(selector: string): string {
+  return selector.trim().replace(/\s+/g, ' ');
+}
+
+function dedupeSelectors(selectors: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const selector of selectors) {
+    const normalized = normalizeSuggestedSelector(selector);
+    if (!normalized) continue;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    unique.push(normalized);
+  }
+  return unique;
+}
+
+function selectorsFromSuggestion(suggestion: LlmFallbackSuggestion): string[] {
+  const raw: string[] = [];
+  if (Array.isArray(suggestion.selectors)) {
+    for (const value of suggestion.selectors) {
+      if (typeof value === 'string') raw.push(value);
+    }
+  }
+  if (typeof suggestion.selector === 'string' && suggestion.selector.trim()) {
+    raw.push(suggestion.selector);
+  }
+  return dedupeSelectors(raw);
+}
+
+function pushWarningCode(metadata: ResolverMetadata, warningCode: string): void {
+  if (!metadata.warningCodes.includes(warningCode)) {
+    metadata.warningCodes.push(warningCode);
+  }
+}
+
+function applyLowScoreFallback(target: StepResolutionDraft, triggerReason: string): boolean {
+  if (!target.lowScoreFallback) return false;
+
+  const fallbackSelector = target.lowScoreFallback.candidate.selector;
+  target.resolvedSelector = fallbackSelector;
+  target.metadata.resolvedSelector = fallbackSelector;
+  target.metadata.resolvedBy = 'deterministic-override';
+  target.metadata.bestScore = target.lowScoreFallback.score;
+  target.metadata.effectiveMatchCount = target.lowScoreFallback.validation.effectiveMatchCount;
+  target.metadata.rejectReason = triggerReason;
+  pushWarningCode(target.metadata, 'deterministic-low-score-fallback');
+  pushWarningCode(target.metadata, 'llm-retries-exhausted');
+
+  console.warn('[AIR] [RESOLVER] Applied low-score deterministic fallback', {
+    step: target.step.step,
+    selector: fallbackSelector,
+    score: Number(target.lowScoreFallback.score.toFixed(3)),
+    triggerReason,
+  });
+  return true;
 }
 
 export async function resolveSelectorsForSession(
@@ -1081,6 +1705,7 @@ export async function resolveSelectorsForSession(
 
   const llmAttemptedStepNumbers: number[] = [];
   const llmAcceptedStepNumbers: number[] = [];
+  const llmFallbackStepNumbers: number[] = [];
 
   const llmEnabled = resolvedConfig.enableLLMFallback && typeof llmFallbackProvider === 'function';
   const llmEligible = drafts.filter(draft => draft.llmEligible && !!draft.snapshot);
@@ -1094,10 +1719,24 @@ export async function resolveSelectorsForSession(
   }
 
   if (llmEnabled && llmTargets.length > 0) {
+    const maxAttemptsPerStep = Math.max(1, resolvedConfig.llmMaxRetriesPerStep + 1);
+    const llmRetryCounts = new Map<number, number>();
+    const llmTargetMap = new Map<number, StepResolutionDraft>(
+      llmTargets.map(target => [target.step.step, target]),
+    );
+
     for (const draft of llmTargets) {
       draft.metadata.llmAttempted = true;
       llmAttemptedStepNumbers.push(draft.step.step);
     }
+
+    console.log('[AIR] [RESOLVER] LLM fallback started', {
+      targets: llmTargets.length,
+      cap: llmCap,
+      maxRetriesPerStep: resolvedConfig.llmMaxRetriesPerStep,
+      maxAttemptsPerStep,
+      intentMinScore: resolvedConfig.intentMinScore,
+    });
 
     const request: LlmFallbackRequest = {
       steps: llmTargets.map(draft => ({
@@ -1112,65 +1751,161 @@ export async function resolveSelectorsForSession(
     };
 
     try {
-      const suggestions = await withTimeout(
+      const suggestionsRaw = await withTimeout(
         (llmFallbackProvider as SelectorFallbackProvider)(request),
         resolvedConfig.llmTimeoutMs
       );
-      const seenSteps = new Set<number>();
 
-      for (const suggestion of suggestions) {
-        if (seenSteps.has(suggestion.stepNumber)) continue;
-        seenSteps.add(suggestion.stepNumber);
+      const suggestionsByStep = new Map<number, string[]>();
+      for (const suggestion of suggestionsRaw) {
+        if (!Number.isFinite(suggestion.stepNumber)) continue;
+        if (!llmTargetMap.has(suggestion.stepNumber)) continue;
+        const current = suggestionsByStep.get(suggestion.stepNumber) ?? [];
+        const merged = dedupeSelectors([...current, ...selectorsFromSuggestion(suggestion)]);
+        suggestionsByStep.set(suggestion.stepNumber, merged);
+      }
 
-        const target = llmTargets.find(draft => draft.step.step === suggestion.stepNumber);
-        if (!target || !target.snapshot) continue;
+      for (const target of llmTargets) {
+        if (!target.snapshot) continue;
+        const stepNumber = target.step.step;
+        const selectorQueue = suggestionsByStep.get(stepNumber) ?? [];
 
-        target.metadata.llmAlternative = suggestion.selector || null;
-
-        if (!suggestion.selector || typeof suggestion.selector !== 'string') {
-          target.metadata.rejectReason = 'invalid-llm-selector';
-          target.metadata.warningCodes.push('llm-invalid-selector');
+        if (selectorQueue.length === 0) {
+          target.metadata.rejectReason = 'llm-no-valid-suggestion';
+          pushWarningCode(target.metadata, 'llm-no-valid-suggestion');
+          console.warn('[AIR] [RESOLVER] No valid LLM suggestions for step', { step: stepNumber });
+          if (applyLowScoreFallback(target, target.metadata.rejectReason)) {
+            llmFallbackStepNumbers.push(stepNumber);
+          }
           continue;
         }
 
-        const validation = validateCSSCandidate(suggestion.selector, target.snapshot);
-        if (validation.effectiveMatchCount !== 1) {
-          target.metadata.rejectReason = 'llm-selector-not-unique';
-          target.metadata.warningCodes.push('llm-non-unique');
-          continue;
+        if (selectorQueue.length > maxAttemptsPerStep) {
+          pushWarningCode(target.metadata, 'llm-retry-cap-reached');
         }
 
-        const match = target.snapshot.querySelector(suggestion.selector);
-        if (!match || !matchesIntent(match, target.step.intent)) {
-          target.metadata.rejectReason = 'llm-intent-mismatch';
-          target.metadata.warningCodes.push('llm-intent-mismatch');
-          continue;
+        let accepted = false;
+        let attemptCount = 0;
+
+        for (const suggestedSelector of selectorQueue) {
+          if (attemptCount >= maxAttemptsPerStep) {
+            break;
+          }
+          attemptCount += 1;
+          llmRetryCounts.set(stepNumber, Math.max(0, attemptCount - 1));
+          target.metadata.llmAlternative = suggestedSelector;
+
+          console.log('[AIR] [RESOLVER] Validating LLM selector', {
+            step: stepNumber,
+            attempt: attemptCount,
+            maxAttemptsPerStep,
+            selector: suggestedSelector,
+          });
+
+          try {
+            const validation = validateCSSCandidate(suggestedSelector, target.snapshot);
+            if (validation.reason === 'invalid-selector') {
+              target.metadata.rejectReason = 'invalid-llm-selector';
+              pushWarningCode(target.metadata, 'llm-invalid-selector');
+              continue;
+            }
+
+            if (validation.effectiveMatchCount !== 1) {
+              target.metadata.rejectReason = 'llm-selector-not-unique';
+              pushWarningCode(target.metadata, 'llm-non-unique');
+              continue;
+            }
+
+            const match = target.snapshot.querySelector(suggestedSelector);
+            if (!match) {
+              target.metadata.rejectReason = 'llm-selector-not-found';
+              pushWarningCode(target.metadata, 'llm-selector-not-found');
+              continue;
+            }
+
+            const intentScore = evaluateIntentMatch(match, target.step);
+            if (intentScore.score < resolvedConfig.intentMinScore) {
+              target.metadata.rejectReason = 'llm-intent-mismatch';
+              pushWarningCode(target.metadata, 'llm-intent-mismatch');
+              console.warn('[AIR] [RESOLVER] LLM selector rejected by intent score', {
+                step: stepNumber,
+                selector: suggestedSelector,
+                score: Number(intentScore.score.toFixed(3)),
+                tokenScore: Number(intentScore.tokenScore.toFixed(3)),
+                roleScore: Number(intentScore.roleScore.toFixed(3)),
+                tagScore: Number(intentScore.tagScore.toFixed(3)),
+                threshold: resolvedConfig.intentMinScore,
+                matchedTokens: intentScore.matchedTokens,
+              });
+              continue;
+            }
+
+            target.resolvedSelector = suggestedSelector;
+            target.metadata = {
+              ...target.metadata,
+              resolvedSelector: suggestedSelector,
+              resolvedBy: 'llm-accepted',
+              bestScore: Math.max(target.metadata.bestScore, 0.95),
+              effectiveMatchCount: validation.effectiveMatchCount,
+              llmAccepted: true,
+              rejectReason: null,
+            };
+            llmAcceptedStepNumbers.push(stepNumber);
+            accepted = true;
+            console.log('[AIR] [RESOLVER] LLM selector accepted', {
+              step: stepNumber,
+              attempt: attemptCount,
+              selector: suggestedSelector,
+            });
+            break;
+          } catch (error) {
+            target.metadata.rejectReason = 'llm-validation-error';
+            pushWarningCode(target.metadata, 'llm-validation-error');
+            console.warn('[AIR] [RESOLVER] LLM selector validation failed', {
+              step: stepNumber,
+              attempt: attemptCount,
+              selector: suggestedSelector,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
         }
 
-        target.resolvedSelector = suggestion.selector;
-        target.metadata = {
-          ...target.metadata,
-          resolvedSelector: suggestion.selector,
-          resolvedBy: 'llm-accepted',
-          bestScore: Math.max(target.metadata.bestScore, 0.95),
-          effectiveMatchCount: validation.effectiveMatchCount,
-          llmAccepted: true,
-          rejectReason: null,
-        };
-        llmAcceptedStepNumbers.push(target.step.step);
+        if (!accepted) {
+          if (!target.metadata.rejectReason) {
+            target.metadata.rejectReason = 'llm-no-valid-suggestion';
+            pushWarningCode(target.metadata, 'llm-no-valid-suggestion');
+          }
+          if (applyLowScoreFallback(target, target.metadata.rejectReason)) {
+            llmFallbackStepNumbers.push(stepNumber);
+          }
+        }
       }
 
       for (const target of llmTargets) {
         if (!target.metadata.llmAccepted && !target.metadata.rejectReason) {
           target.metadata.rejectReason = 'llm-no-valid-suggestion';
-          target.metadata.warningCodes.push('llm-no-valid-suggestion');
+          pushWarningCode(target.metadata, 'llm-no-valid-suggestion');
+          if (applyLowScoreFallback(target, target.metadata.rejectReason)) {
+            llmFallbackStepNumbers.push(target.step.step);
+          }
         }
       }
+
+      console.log('[AIR] [RESOLVER] LLM fallback completed', {
+        attemptedSteps: llmAttemptedStepNumbers.length,
+        acceptedSteps: llmAcceptedStepNumbers.length,
+        deterministicFallbackSteps: llmFallbackStepNumbers.length,
+        retriesByStep: Object.fromEntries(llmRetryCounts),
+      });
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      console.error('[AIR] [RESOLVER] LLM fallback failed', { error: reason });
       for (const target of llmTargets) {
         target.metadata.rejectReason = reason;
-        target.metadata.warningCodes.push('llm-error');
+        pushWarningCode(target.metadata, 'llm-error');
+        if (applyLowScoreFallback(target, reason)) {
+          llmFallbackStepNumbers.push(target.step.step);
+        }
       }
     }
   }

@@ -19,11 +19,11 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import Database from 'better-sqlite3';
 import { CodegenService } from '../src/codegen.service.ts';
 import { resolveSelectorsForSession } from '../src/selector-resolver.ts';
 import type { ResolverConfig, SelectorResolution } from '../src/selector-resolver.ts';
 import type { CodegenStep } from '../src/types.ts';
+import { openSqliteReadonlyDatabase, type SqliteDatabase } from '../src/sqlite-client.ts';
 
 type OutputFormat = 'csv' | 'json';
 type IcLookupMode =
@@ -276,7 +276,7 @@ function printSessionList(
 }
 
 function fetchSnapshotRows(
-  db: Database.Database,
+  db: SqliteDatabase,
   sessionId: string,
   normalizedUrls: string[]
 ): SnapshotRow[] {
@@ -296,7 +296,7 @@ function fetchSnapshotRows(
   `).all(sessionId, ...normalizedUrls) as SnapshotRow[];
 }
 
-function fetchEventRows(db: Database.Database, sessionId: string): EventRow[] {
+function fetchEventRows(db: SqliteDatabase, sessionId: string): EventRow[] {
   return db.prepare(`
     SELECT timestamp, page_url AS pageUrl, payload
     FROM events
@@ -305,7 +305,7 @@ function fetchEventRows(db: Database.Database, sessionId: string): EventRow[] {
   `).all(sessionId) as EventRow[];
 }
 
-function fetchNodeSnapshotRows(db: Database.Database, nodeIds: string[]): NodeSnapshotRow[] {
+function fetchNodeSnapshotRows(db: SqliteDatabase, nodeIds: string[]): NodeSnapshotRow[] {
   if (nodeIds.length === 0) return [];
   const placeholders = nodeIds.map(() => '?').join(', ');
   return db.prepare(`
@@ -611,7 +611,7 @@ async function main(): Promise<void> {
       resolutionByStep.set(resolution.stepNumber, resolution);
     }
 
-    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    const db = openSqliteReadonlyDatabase(dbPath);
     const normalizedUrls = Array.from(
       new Set(
         session.steps

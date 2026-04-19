@@ -29,7 +29,6 @@
  * This fits comfortably in any AI context window alongside the prompt.
  */
 
-import Database from 'better-sqlite3';
 import * as crypto from 'crypto';
 import {
   CodegenSession,
@@ -47,6 +46,7 @@ import {
   hasUserAssertionSupport,
 } from './assertion.stub';
 import { normalizeUrl } from '@air/shared';
+import { openSqliteReadonlyDatabase, SqliteDatabase } from './sqlite-client';
 
 export const SELECTOR_RANK_MAP: Record<string, number> = {
   'data-testid': 1,
@@ -445,10 +445,10 @@ export function deduplicateSharedAssertions(steps: CodegenStep[]): CodegenStep[]
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class CodegenService {
-  private db: Database.Database;
+  private db: SqliteDatabase;
 
   constructor(private options: CodegenServiceOptions) {
-    this.db = new Database(options.dbPath, { readonly: true });
+    this.db = openSqliteReadonlyDatabase(options.dbPath);
   }
 
   /**

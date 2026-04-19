@@ -251,6 +251,114 @@ describe('selector-resolver', () => {
     expect(resolution.resolverMetadata.resolvedBy).toBe('deterministic-override');
   });
 
+  it('resolves calendar year selection deterministically from numeric intent', async () => {
+    const year1981 = makeElement({ class: 'oxd-calendar-dropdown--option' }, { text: '1981' });
+    const year2026 = makeElement({ class: 'oxd-calendar-dropdown--option' }, { text: '2026' });
+    const step = makeStep(1, {
+      selector: '.oxd-calendar-dropdown--option',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_1981',
+      sourceNodeId: 'node-1',
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.oxd-calendar-dropdown--option': [year1981, year2026],
+        '.oxd-calendar-dropdown--option:has-text("1981")': [year1981],
+        '*': [year1981, year2026],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      { enableLLMFallback: false },
+    );
+
+    const resolution = result.resolutions[0];
+    expect(resolution.resolvedSelector).not.toBe('.oxd-calendar-dropdown--option');
+    expect(resolution.resolvedSelector).toContain('1981');
+    expect(resolution.resolverMetadata.resolvedBy).toBe('deterministic-override');
+  });
+
+  it('resolves calendar date input with scoped deterministic selector', async () => {
+    const calendarContainer = makeElement({ class: 'oxd-date-input' }, { text: '' });
+    const dateInput = makeElement(
+      { class: 'oxd-input oxd-input--focus', placeholder: 'yyyy-dd-mm' },
+      { text: '' },
+    );
+    const otherInput = makeElement(
+      { class: 'oxd-input oxd-input--focus', placeholder: 'Search' },
+      { text: '' },
+    );
+    const step = makeStep(1, {
+      selector: '.oxd-input--focus',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'input_oxd_input_focus',
+      action: 'input',
+      value: '2026-01-20',
+      sourceNodeId: 'node-1',
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.oxd-date-input': [calendarContainer],
+        '.oxd-input--focus': [dateInput, otherInput],
+        '.oxd-date-input .oxd-input--focus': [dateInput],
+        '.oxd-date-input input': [dateInput],
+        '.oxd-date-input .oxd-input': [dateInput],
+        'input[placeholder*="yyyy"]': [dateInput],
+        '*': [calendarContainer, dateInput, otherInput],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      { enableLLMFallback: false },
+    );
+
+    const resolution = result.resolutions[0];
+    expect(resolution.resolvedSelector).not.toBe('.oxd-input--focus');
+    expect(resolution.resolvedSelector).toContain('.oxd-date-input');
+    expect(resolution.resolverMetadata.resolvedBy).toBe('deterministic-override');
+  });
+
+  it('resolves calendar icon click via calendar-scoped selector', async () => {
+    const calendarContainer = makeElement({ class: 'oxd-date-input' }, { text: '' });
+    const calendarIcon = makeElement({ class: 'oxd-icon' }, { text: '' });
+    const otherIcon = makeElement({ class: 'oxd-icon' }, { text: '' });
+    const step = makeStep(1, {
+      selector: '.oxd-icon',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_oxd_icon',
+      action: 'click',
+      sourceNodeId: 'node-1',
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.oxd-date-input': [calendarContainer],
+        '.oxd-icon': [calendarIcon, otherIcon],
+        '.oxd-date-input .oxd-icon': [calendarIcon],
+        '*': [calendarContainer, calendarIcon, otherIcon],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      { enableLLMFallback: false },
+    );
+
+    const resolution = result.resolutions[0];
+    expect(resolution.resolvedSelector).toBe('.oxd-date-input .oxd-icon');
+    expect(resolution.resolverMetadata.resolvedBy).toBe('deterministic-override');
+  });
+
   it('blocks deterministic override to generic shell selector and keeps original unresolved', async () => {
     const appShell = makeElement({ id: 'app' }, { id: 'app', text: 'username password login' });
     const step = makeStep(1, {
@@ -428,6 +536,150 @@ describe('selector-resolver', () => {
     expect(llmProvider).toHaveBeenCalledTimes(1);
     expect(result.resolutions.filter(r => r.resolverMetadata.warningCodes.includes('llm-circuit-breaker')).length)
       .toBeGreaterThan(0);
+  });
+
+  it('caps LLM retries per step and falls back to deterministic candidate after rejection', async () => {
+    const step = makeStep(1, {
+      selector: 'button',
+      selectorPriority: 'unknown',
+      selectorRank: 10,
+      intent: 'click_submit',
+      sourceNodeId: 'node-1',
+    });
+
+    const submit = makeElement({ 'aria-label': 'submit' }, { text: 'Submit' });
+    const cancelOne = makeElement({ 'aria-label': 'cancel-1' }, { text: 'Cancel' });
+    const cancelTwo = makeElement({ 'aria-label': 'cancel-2' }, { text: 'Cancel' });
+    const cancelThree = makeElement({ 'aria-label': 'cancel-3' }, { text: 'Cancel' });
+    const cancelFour = makeElement({ 'aria-label': 'cancel-4' }, { text: 'Cancel' });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        button: [submit, cancelOne],
+        '[aria-label="submit"]': [submit],
+        '[aria-label="cancel-1"]': [cancelOne],
+        '[aria-label="cancel-2"]': [cancelTwo],
+        '[aria-label="cancel-3"]': [cancelThree],
+        '[aria-label="cancel-4"]': [cancelFour],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      {
+        enableLLMFallback: true,
+        resolverMinScore: 1.1,
+      },
+      async () => [
+        {
+          stepNumber: 1,
+          selector: '[aria-label="cancel-1"]',
+          selectors: [
+            '[aria-label="cancel-1"]',
+            '[aria-label="cancel-2"]',
+            '[aria-label="cancel-3"]',
+            '[aria-label="cancel-4"]',
+          ],
+        },
+      ],
+    );
+
+    const resolution = result.resolutions[0];
+    expect(result.llmAttemptedStepNumbers).toEqual([1]);
+    expect(result.llmAcceptedStepNumbers).toHaveLength(0);
+    expect(resolution.resolvedSelector).toBe('[aria-label="submit"]');
+    expect(resolution.resolverMetadata.resolvedBy).toBe('deterministic-override');
+    expect(resolution.resolverMetadata.warningCodes).toContain('llm-retry-cap-reached');
+    expect(resolution.resolverMetadata.warningCodes).toContain('deterministic-low-score-fallback');
+    expect(resolution.resolverMetadata.warningCodes).toContain('llm-retries-exhausted');
+    expect(resolution.resolverMetadata.llmAccepted).toBe(false);
+    expect(resolution.resolverMetadata.rejectReason).toBe('llm-intent-mismatch');
+  });
+
+  it('does not use non-interactive container as low-score fallback for field click intent', async () => {
+    const step = makeStep(1, {
+      selector: 'input[name="username"]',
+      selectorPriority: 'attribute',
+      selectorRank: 3,
+      intent: 'click_username',
+      action: 'click',
+      sourceNodeId: 'node-1',
+    });
+
+    const loginContainer = makeElement({ class: 'orangehrm-login-layout' }, { text: 'Username Password Login' });
+    const duplicateOne = makeElement({ name: 'username' }, { text: '' });
+    const duplicateTwo = makeElement({ name: 'username' }, { text: '' });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        'input[name="username"]': [duplicateOne, duplicateTwo],
+        '.orangehrm-login-layout': [loginContainer],
+        '*': [loginContainer, duplicateOne, duplicateTwo],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      {
+        enableLLMFallback: true,
+        resolverMinScore: 1.1,
+      },
+      async () => [
+        { stepNumber: 1, selector: 'input[name="username"]' },
+      ],
+    );
+
+    const resolution = result.resolutions[0];
+    expect(resolution.resolvedSelector).toBe('input[name="username"]');
+    expect(resolution.resolverMetadata.resolvedBy).toBe('unresolved');
+    expect(resolution.resolverMetadata.warningCodes).toContain('deterministic-low-score-rejected');
+    expect(resolution.resolverMetadata.warningCodes).not.toContain('deterministic-low-score-fallback');
+    expect(result.llmAcceptedStepNumbers).toHaveLength(0);
+  });
+
+  it('rejects false-positive LLM selector when intent token does not match target element context', async () => {
+    const step = makeStep(1, {
+      selector: '.oxd-text',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_2026',
+      action: 'click',
+      sourceNodeId: 'node-1',
+    });
+
+    const yearOption = makeElement({ class: 'oxd-calendar-dropdown--option' }, { text: '2026' });
+    const adminLink = makeElement({ href: '/web/index.php/admin/viewAdminModule' }, { text: 'Admin' });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.oxd-text': [yearOption, adminLink],
+        'a[href="/web/index.php/admin/viewAdminModule"]': [adminLink],
+        '*': [yearOption, adminLink],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      {
+        enableLLMFallback: true,
+        resolverMinScore: 1.1,
+      },
+      async () => [
+        { stepNumber: 1, selector: 'a[href="/web/index.php/admin/viewAdminModule"]' },
+      ],
+    );
+
+    const resolution = result.resolutions[0];
+    expect(result.llmAttemptedStepNumbers).toEqual([1]);
+    expect(result.llmAcceptedStepNumbers).toHaveLength(0);
+    expect(resolution.resolverMetadata.resolvedSelector).not.toBe('a[href="/web/index.php/admin/viewAdminModule"]');
+    expect(['unresolved', 'deterministic-override']).toContain(resolution.resolverMetadata.resolvedBy);
+    expect(resolution.resolverMetadata.rejectReason).toBe('llm-intent-mismatch');
+    expect(resolution.resolverMetadata.warningCodes).toContain('llm-intent-mismatch');
+    expect(resolution.resolverMetadata.llmAlternative).toBe('a[href="/web/index.php/admin/viewAdminModule"]');
   });
 
   it('uses controlSignature-specific snapshots for same normalized URL', async () => {

@@ -30,6 +30,15 @@ export interface GeneratePageObjectsOptions {
 }
 
 export class LlmOrchestrator {
+  private static sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private static isRetryableGeminiError(error: unknown): boolean {
+    const status = (error as { status?: number })?.status;
+    return status === 429 || status === 503 || status === 504;
+  }
+
   static async generatePageObjects(
     session: CodegenSession,
     outputDir: string,
@@ -70,6 +79,12 @@ export class LlmOrchestrator {
         ? (request: LlmFallbackRequest) => this.requestSelectorFallback(request)
         : undefined,
     );
+    console.log('[AIR] Resolver summary', {
+      totalSteps: session.steps.length,
+      unresolved: resolverResult.unresolvedStepNumbers.length,
+      llmAttempted: resolverResult.llmAttemptedStepNumbers.length,
+      llmAccepted: resolverResult.llmAcceptedStepNumbers.length,
+    });
     const resolutionMap = new Map(
       resolverResult.resolutions.map(resolution => [resolution.stepNumber, resolution]),
     );
@@ -242,17 +257,20 @@ ${JSON.stringify(this.toPromptSteps(steps), null, 2)}
   }
 
   private static buildSelectorFallbackPrompt(request: LlmFallbackRequest): string {
+    const selectorsPerStep = Math.max(1, (request.config.llmMaxRetriesPerStep ?? 2) + 1);
     return `
 You are a selector recovery assistant for Playwright code generation.
 
 Return ONLY a JSON array (no markdown) with objects shaped exactly as:
-[{ "stepNumber": 1, "selector": "button[type=\\"submit\\"]" }]
+[{ "stepNumber": 1, "selectors": ["button[type=\\"submit\\"]", "[aria-label=\\"submit\\"]", "#submit"] }]
 
 Rules:
 1. Include only steps that you are confident about.
-2. selector must be CSS only (no XPath, no text= syntax).
+2. selectors must be CSS only (no XPath, no text= syntax).
 3. Prefer stable attributes (data-testid, id, aria-label, name, role).
-4. Keep selectors concise.
+4. Return up to ${selectorsPerStep} selectors per step ordered from best to worst.
+5. Deduplicate selectors for each step.
+6. Keep selectors concise.
 
 UNRESOLVED STEPS:
 ${JSON.stringify(request.steps, null, 2)}
@@ -266,13 +284,40 @@ ${JSON.stringify(request.steps, null, 2)}
       const parsed = JSON.parse(responseJson);
       if (!Array.isArray(parsed)) return [];
 
+      const dedupeSelectors = (values: string[]): string[] => {
+        const seen = new Set<string>();
+        const unique: string[] = [];
+        for (const value of values) {
+          const normalized = value.trim().replace(/\s+/g, ' ');
+          if (!normalized || seen.has(normalized)) continue;
+          seen.add(normalized);
+          unique.push(normalized);
+        }
+        return unique;
+      };
+
       return parsed
         .filter(item => item && typeof item === 'object')
-        .map(item => ({
-          stepNumber: Number((item as any).stepNumber),
-          selector: String((item as any).selector ?? ''),
-        }))
-        .filter(item => Number.isFinite(item.stepNumber) && item.stepNumber > 0 && item.selector.length > 0);
+        .map(item => {
+          const selectorsRaw: string[] = [];
+          if (Array.isArray((item as any).selectors)) {
+            for (const selector of (item as any).selectors) {
+              if (typeof selector === 'string') {
+                selectorsRaw.push(selector);
+              }
+            }
+          }
+          if (typeof (item as any).selector === 'string') {
+            selectorsRaw.push((item as any).selector);
+          }
+          const selectors = dedupeSelectors(selectorsRaw);
+          return {
+            stepNumber: Number((item as any).stepNumber),
+            selector: selectors[0] ?? '',
+            selectors,
+          };
+        })
+        .filter(item => Number.isFinite(item.stepNumber) && item.stepNumber > 0 && item.selectors.length > 0);
     } catch (error) {
       console.warn('[AIR] Selector fallback parsing failed:', error);
       return [];
@@ -326,21 +371,47 @@ ${JSON.stringify(request.steps, null, 2)}
   private static async callGeminiApi(payload: string): Promise<string> {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error('[AIR] GEMINI_API_KEY environment variable is missing.');
+    const modelName = process.env.AIR_GEMINI_MODEL || 'gemini-2.5-flash';
+    const maxAttempts = 4;
 
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
+      model: modelName,
       generationConfig: {
         responseMimeType: 'application/json',
         temperature: 0.1,
       },
     });
 
-    console.log('[AIR] Sending session data to Gemini...');
-    const result = await model.generateContent(payload);
-    const text = result.response.text();
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        console.log('[AIR] Sending session data to Gemini...', {
+          model: modelName,
+          attempt,
+          maxAttempts,
+        });
+        const result = await model.generateContent(payload);
+        const text = result.response.text();
 
-    if (!text) throw new Error('[AIR] Gemini returned an empty response.');
-    return text;
+        if (!text) throw new Error('[AIR] Gemini returned an empty response.');
+        return text;
+      } catch (error) {
+        lastError = error;
+        if (!this.isRetryableGeminiError(error) || attempt === maxAttempts) {
+          break;
+        }
+
+        const waitMs = Math.min(2000 * 2 ** (attempt - 1), 8000) + Math.floor(Math.random() * 400);
+        console.warn('[AIR] Gemini temporarily unavailable, retrying...', {
+          attempt,
+          nextRetryInMs: waitMs,
+          status: (error as { status?: number })?.status,
+        });
+        await this.sleep(waitMs);
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 }

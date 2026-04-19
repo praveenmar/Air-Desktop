@@ -23,15 +23,17 @@ function parseNumberEnv(name: string): number | undefined {
 }
 
 function resolveResolverConfig(): ResolverConfig {
-  const enabledRaw = (process.env['AIR_ENABLE_LLM_SELECTOR_FALLBACK'] || '').toLowerCase();
+  const enabledRaw = (process.env['AIR_ENABLE_LLM_SELECTOR_FALLBACK'] || '').trim().toLowerCase();
 
   return {
     enableLLMFallback: enabledRaw === '1' || enabledRaw === 'true' || enabledRaw === 'yes',
     resolverMinScore: parseNumberEnv('AIR_RESOLVER_MIN_SCORE'),
+    intentMinScore: parseNumberEnv('AIR_INTENT_MIN_SCORE'),
     maxSnapshotBytesForValidation: parseNumberEnv('AIR_MAX_SNAPSHOT_BYTES'),
     maxSnapshotExcerptChars: parseNumberEnv('AIR_MAX_SNAPSHOT_EXCERPT_CHARS'),
     llmTimeoutMs: parseNumberEnv('AIR_SELECTOR_LLM_TIMEOUT_MS'),
     maxLLMFallbackPerSession: parseNumberEnv('AIR_MAX_LLM_FALLBACK_PER_SESSION'),
+    llmMaxRetriesPerStep: parseNumberEnv('AIR_LLM_MAX_RETRIES_PER_STEP'),
   };
 }
 
@@ -54,6 +56,16 @@ async function main() {
     console.log(`\n[AIR] Building Semantic Timeline for session: ${sessionId}...`);
     const session = service.buildSession(sessionId);
     const resolverConfig = resolveResolverConfig();
+    console.log('[AIR] Resolver config', {
+      enableLLMFallback: !!resolverConfig.enableLLMFallback,
+      resolverMinScore: resolverConfig.resolverMinScore ?? null,
+      intentMinScore: resolverConfig.intentMinScore ?? null,
+      maxSnapshotBytesForValidation: resolverConfig.maxSnapshotBytesForValidation ?? null,
+      maxSnapshotExcerptChars: resolverConfig.maxSnapshotExcerptChars ?? null,
+      llmTimeoutMs: resolverConfig.llmTimeoutMs ?? null,
+      maxLLMFallbackPerSession: resolverConfig.maxLLMFallbackPerSession ?? null,
+      llmMaxRetriesPerStep: resolverConfig.llmMaxRetriesPerStep ?? null,
+    });
     const snapshotCache = await service.loadSnapshots(session, resolverConfig);
 
     const projectRoot = process.cwd();

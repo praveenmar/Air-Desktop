@@ -12,7 +12,7 @@
     "declaration": true,
     "declarationMap": true,
 
-    "types": ["node", "better-sqlite3", "vitest"],
+    "types": ["node", "vitest"],
 
     "paths": {
       "@air/shared": ["../shared/src/index.ts"],
