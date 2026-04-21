@@ -306,10 +306,63 @@ class AIRInterceptor {
       snapshotTimeoutMs: config.snapshotTimeoutMs ?? 5000,
       snapshotMaxNodes: config.snapshotMaxNodes ?? 5000,
       snapshotMaxTextLength: config.snapshotMaxTextLength ?? 5000,
+      snapshotAdaptiveBoostEnabled: config.snapshotAdaptiveBoostEnabled ?? true,
+      snapshotProductMaxNodes: config.snapshotProductMaxNodes ?? 15000,
+      snapshotProductMaxTextLength: config.snapshotProductMaxTextLength ?? 15000,
       snapshotUseIdleCallback: config.snapshotUseIdleCallback ?? true,
       snapshotCaptureVueAttrs: config.snapshotCaptureVueAttrs ?? true,
       snapshotCaptureReactAttrs: config.snapshotCaptureReactAttrs ?? true,
       snapshotWaitForSPA: config.snapshotWaitForSPA ?? true,
+      snapshotContentReadyTimeoutMs: config.snapshotContentReadyTimeoutMs ?? 8000,
+      snapshotContentReadyPollMs: config.snapshotContentReadyPollMs ?? 200,
+      snapshotMinInteractiveCount: config.snapshotMinInteractiveCount ?? 6,
+      snapshotMinTextLength: config.snapshotMinTextLength ?? 120,
+      snapshotProductMinInteractiveCount: config.snapshotProductMinInteractiveCount ?? 4,
+      snapshotProductMinTextLength: config.snapshotProductMinTextLength ?? 80,
+      snapshotProductRootSelectors: config.snapshotProductRootSelectors ?? [
+        "main",
+        '[role="main"]',
+        '[data-testid*="product"]',
+        '[class*="product"]',
+        '[id*="product"]',
+      ],
+      snapshotProductReadySelectors: config.snapshotProductReadySelectors ?? [
+        '[data-testid*="add-to-cart"]',
+        '[data-testid*="addtocart"]',
+        '[data-testid*="buy-now"]',
+        '[data-testid*="buy"]',
+        '[itemprop="price"]',
+        '[data-testid*="price"]',
+        '[class*="price"]',
+        'button[type="submit"]',
+      ],
+      snapshotProductReadyKeywords: config.snapshotProductReadyKeywords ?? [
+        "add to cart",
+        "buy now",
+        "go to cart",
+        "add to bag",
+        "wishlist",
+        "price",
+        "in stock",
+      ],
+      snapshotInteractiveSelectors: config.snapshotInteractiveSelectors ?? [
+        "a[href]",
+        "button",
+        'input:not([type="hidden"])',
+        "select",
+        "textarea",
+        '[role="button"]',
+        '[role="link"]',
+        "[data-testid]",
+        "[data-id]",
+      ],
+      snapshotSkeletonSelectors: config.snapshotSkeletonSelectors ?? [
+        '[class*="skeleton"]',
+        '[class*="placeholder"]',
+        '[class*="loading"]',
+        '[aria-busy="true"]',
+      ],
+      snapshotDebugPreviewChars: config.snapshotDebugPreviewChars ?? 220,
       debugEnabled: config.debugMode || false,
       serverUrl: configServerUrl || config.serverUrl || "http://localhost:3000",
       sessionId: currentSessionId, // <--- CRITICAL: Use the resolved ID
@@ -334,6 +387,8 @@ class AIRInterceptor {
     this.pendingTraceId = null; // <-- Consolidated from both versions
     this.lastActionTraceId = null;
     this.lastActionTraceAt = 0;
+    this.crossTabPendingTtlMs = config.crossTabPendingTtlMs ?? 45000;
+    this.crossTabPendingMaxEntries = config.crossTabPendingMaxEntries ?? 20;
 
     // API Endpoint Construction
     const base = this.config.serverUrl.replace(/\/+$/, "");
@@ -507,6 +562,114 @@ class AIRInterceptor {
       this._markStorageUnavailable(error);
       return false;
     }
+  }
+
+  _getCrossTabPendingKey() {
+    return `air_pending_trace_cross_tab_${this.config?.sessionId || "unknown"}`;
+  }
+
+  _pruneCrossTabPendingEntries(entries, now = Date.now()) {
+    if (!Array.isArray(entries)) return [];
+    const ttlMs = Math.max(1000, Number(this.crossTabPendingTtlMs) || 45000);
+    return entries.filter((entry) => {
+      if (!entry || typeof entry !== "object") return false;
+      if (typeof entry.traceId !== "string" || !entry.traceId) return false;
+      if (typeof entry.targetNormalizedUrl !== "string" || !entry.targetNormalizedUrl) {
+        return false;
+      }
+      if (typeof entry.createdAt !== "number") return false;
+      return now - entry.createdAt <= ttlMs;
+    });
+  }
+
+  _readCrossTabPendingEntries() {
+    const key = this._getCrossTabPendingKey();
+    const raw = this._safeGetStorage("local", key);
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      this._safeRemoveStorage("local", key);
+      return [];
+    }
+  }
+
+  _writeCrossTabPendingEntries(entries) {
+    const key = this._getCrossTabPendingKey();
+    const maxEntries = Math.max(1, Number(this.crossTabPendingMaxEntries) || 20);
+    const pruned = this._pruneCrossTabPendingEntries(entries).slice(-maxEntries);
+    return this._safeSetStorage("local", key, JSON.stringify(pruned));
+  }
+
+  _stashCrossTabPendingTrace(traceId, targetUrl, sourceUrl) {
+    if (typeof traceId !== "string" || !traceId) return false;
+    if (typeof targetUrl !== "string" || !targetUrl) return false;
+
+    const now = Date.now();
+    const targetNormalizedUrl = this.normalizeUrl(targetUrl);
+    const sourcePageUrl = sourceUrl || window.location.href;
+    const sourceNormalizedUrl = this.normalizeUrl(sourcePageUrl);
+
+    const entries = this._pruneCrossTabPendingEntries(
+      this._readCrossTabPendingEntries(),
+      now,
+    ).filter((entry) => entry.traceId !== traceId);
+
+    entries.push({
+      traceId,
+      targetUrl,
+      targetNormalizedUrl,
+      sourceUrl: sourcePageUrl,
+      sourceNormalizedUrl,
+      createdAt: now,
+    });
+
+    const saved = this._writeCrossTabPendingEntries(entries);
+    if (saved) {
+      this.log("↗️ Cross-tab trace handoff stored", {
+        traceId,
+        targetNormalizedUrl,
+        sourceNormalizedUrl,
+        queueSize: entries.length,
+      });
+    }
+    return saved;
+  }
+
+  _isCrossTabTargetMatch(targetNormalizedUrl, currentNormalizedUrl) {
+    if (!targetNormalizedUrl || !currentNormalizedUrl) return false;
+    if (targetNormalizedUrl === currentNormalizedUrl) return true;
+    if (currentNormalizedUrl.startsWith(targetNormalizedUrl)) return true;
+    if (targetNormalizedUrl.startsWith(currentNormalizedUrl)) return true;
+    return false;
+  }
+
+  _consumeCrossTabPendingTrace() {
+    const now = Date.now();
+    const rawEntries = this._readCrossTabPendingEntries();
+    const entries = this._pruneCrossTabPendingEntries(rawEntries, now);
+    const currentNormalizedUrl = this.normalizeUrl(window.location.href);
+    const matchIndex = entries.findIndex((entry) =>
+      this._isCrossTabTargetMatch(entry.targetNormalizedUrl, currentNormalizedUrl),
+    );
+
+    if (matchIndex === -1) {
+      if (entries.length !== rawEntries.length) {
+        this._writeCrossTabPendingEntries(entries);
+      }
+      return null;
+    }
+
+    const [match] = entries.splice(matchIndex, 1);
+    this._writeCrossTabPendingEntries(entries);
+    this.log("↘️ Cross-tab trace handoff consumed", {
+      traceId: match.traceId,
+      targetNormalizedUrl: match.targetNormalizedUrl,
+      currentNormalizedUrl,
+      sourceNormalizedUrl: match.sourceNormalizedUrl || null,
+    });
+    return match;
   }
 
   _getSentEventIdsStorageKey() {
@@ -753,28 +916,333 @@ class AIRInterceptor {
   /** * Wait for SPA to render and stabilize (Hydration Check)
    * VERSION: 7.0 (Quiescence Engine Integration)
    */
-  waitForSPAContent(timeoutMs = 5000) {
-    return new Promise(async (resolve) => {
-      const { app } = this.detectSPA();
-      if (!app) {
-        return resolve(); // Not an SPA, proceed immediately
+  async waitForSPAContent(timeoutMs = 5000) {
+    const { app } = this.detectSPA();
+    if (!app) return; // Not an SPA, proceed immediately
+
+    const budget = Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? timeoutMs
+      : this.config.snapshotContentReadyTimeoutMs;
+
+    this.log("⏳ SPA detected. Waiting for hydration/quiescence...");
+
+    if (this.quiescence) {
+      const readiness = await this._waitForSettleAndReady("spa-hydration", budget);
+      this.log("✅ SPA Hydrated", {
+        settleReason: readiness?.settleResult?.reason || "unknown",
+        settleStable: readiness?.settleResult?.stable ?? null,
+        contentReady: readiness?.readinessResult?.ready ?? null,
+        matchedProductSignal: readiness?.readinessResult?.matchedProductSignal || null,
+      });
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, Math.min(2000, budget)));
+    this.log("⚠️ SPA Hydration fallback timeout reached");
+  }
+
+  _isLikelyProductPage(url = window.location.href) {
+    const text = String(url || "").toLowerCase();
+    return (
+      /\/product(s)?\//.test(text) ||
+      /\/p\//.test(text) ||
+      /\/dp\//.test(text) ||
+      /[?&]pid=/.test(text) ||
+      /[?&]sku=/.test(text) ||
+      /[?&]product/.test(text)
+    );
+  }
+
+  _isElementVisible(el) {
+    if (!el || typeof el.getBoundingClientRect !== "function") return false;
+    try {
+      if (el.hidden) return false;
+      const style = window.getComputedStyle(el);
+      if (!style) return false;
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.opacity === "0"
+      ) {
+        return false;
       }
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    } catch (_) {
+      return false;
+    }
+  }
 
-      this.log("⏳ SPA detected. Waiting for hydration/quiescence...");
-
-      // Trust the elite QuiescenceEngine. It perfectly handles the 
-      // "loading spinner" trap by ensuring all API network calls are finished.
-      if (this.quiescence) {
-        await this.quiescence.waitForSettle(timeoutMs);
-        this.log("✅ SPA Hydrated (Network & DOM quiescent)");
-        return resolve();
+  _findFirstVisibleMatch(selectors, root = document) {
+    const list = Array.isArray(selectors) ? selectors : [];
+    const queryRoot = root && typeof root.querySelector === "function" ? root : document;
+    for (const selector of list) {
+      if (typeof selector !== "string" || !selector.trim()) continue;
+      try {
+        const el = queryRoot.querySelector(selector);
+        if (el && this._isElementVisible(el)) {
+          return { selector, element: el };
+        }
+      } catch (_) {
+        // Ignore invalid selectors in runtime config.
       }
+    }
+    return null;
+  }
 
-      // Failsafe if QuiescenceEngine failed to initialize
-      setTimeout(() => {
-        this.log("⚠️ SPA Hydration fallback timeout reached");
-        resolve();
-      }, 2000);
+  _resolveReadinessRoot(isProductPage) {
+    const fallback = document.body || document.documentElement;
+    if (!isProductPage) return fallback;
+    const rootMatch = this._findFirstVisibleMatch(this.config.snapshotProductRootSelectors, document);
+    return rootMatch?.element || fallback;
+  }
+
+  _findProductReadySignal(root) {
+    const queryRoot = root && typeof root.querySelector === "function" ? root : document;
+    const selectorList = Array.isArray(this.config.snapshotProductReadySelectors)
+      ? this.config.snapshotProductReadySelectors
+      : [];
+    for (const selector of selectorList) {
+      if (typeof selector !== "string" || !selector.trim()) continue;
+      try {
+        const candidate = queryRoot.querySelector(selector);
+        if (!candidate || !this._isElementVisible(candidate)) continue;
+        const candidateText = (candidate.textContent || candidate.getAttribute?.("content") || "")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (selector.toLowerCase().includes("price")) {
+          const looksLikePrice = /(\d{2,}|rs\.?|inr|usd|\$)/i.test(candidateText);
+          if (!looksLikePrice) continue;
+        }
+        return {
+          matched: true,
+          signal: selector,
+          source: "selector",
+        };
+      } catch (_) {}
+    }
+
+    const keywords = Array.isArray(this.config.snapshotProductReadyKeywords)
+      ? this.config.snapshotProductReadyKeywords
+      : [];
+    const textCandidates = queryRoot.querySelectorAll(
+      'button, a[href], [role="button"], [role="link"], [aria-label], [class*="price"]',
+    );
+    for (const candidate of textCandidates) {
+      if (!this._isElementVisible(candidate)) continue;
+      const text = (candidate.textContent || candidate.getAttribute?.("aria-label") || "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+      if (!text) continue;
+      const matchedKeyword = keywords.find((keyword) =>
+        typeof keyword === "string" &&
+        keyword.trim() &&
+        text.includes(keyword.trim().toLowerCase()),
+      );
+      if (matchedKeyword) {
+        return {
+          matched: true,
+          signal: matchedKeyword,
+          source: "keyword",
+        };
+      }
+    }
+
+    return {
+      matched: false,
+      signal: null,
+      source: null,
+    };
+  }
+
+  _collectSnapshotReadiness() {
+    const isProductPage = this._isLikelyProductPage(window.location.href);
+    const root = this._resolveReadinessRoot(isProductPage);
+    const interactiveSelector = Array.isArray(this.config.snapshotInteractiveSelectors)
+      ? this.config.snapshotInteractiveSelectors.join(",")
+      : "a[href],button,input,select,textarea";
+    const skeletonSelector = Array.isArray(this.config.snapshotSkeletonSelectors)
+      ? this.config.snapshotSkeletonSelectors.join(",")
+      : '[class*="skeleton"],[class*="loading"]';
+
+    let interactiveCount = 0;
+    let skeletonCount = 0;
+    try {
+      interactiveCount = root?.querySelectorAll?.(interactiveSelector)?.length || 0;
+    } catch (_) {}
+    try {
+      skeletonCount = root?.querySelectorAll?.(skeletonSelector)?.length || 0;
+    } catch (_) {}
+
+    const textLength = (root?.textContent || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .length;
+
+    const minInteractive = isProductPage
+      ? this.config.snapshotProductMinInteractiveCount
+      : this.config.snapshotMinInteractiveCount;
+    const minTextLength = isProductPage
+      ? this.config.snapshotProductMinTextLength
+      : this.config.snapshotMinTextLength;
+
+    const genericReady =
+      interactiveCount >= minInteractive && textLength >= minTextLength;
+
+    const productSignal = isProductPage
+      ? this._findProductReadySignal(root)
+      : { matched: true, signal: null, source: null };
+
+    const ready = genericReady && productSignal.matched;
+    return {
+      ready,
+      isProductPage,
+      genericReady,
+      interactiveCount,
+      textLength,
+      skeletonCount,
+      minInteractive,
+      minTextLength,
+      matchedProductSignal: productSignal.signal,
+      productSignalSource: productSignal.source,
+    };
+  }
+
+  async _waitForSnapshotReadiness(reason = "snapshot", timeoutMs = null) {
+    const maxWait = Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? timeoutMs
+      : this.config.snapshotContentReadyTimeoutMs;
+    const pollMs = Math.max(75, this.config.snapshotContentReadyPollMs || 200);
+    const start = Date.now();
+    let attempts = 0;
+    let last = this._collectSnapshotReadiness();
+
+    while (Date.now() - start <= maxWait) {
+      attempts++;
+      last = this._collectSnapshotReadiness();
+      if (last.ready) {
+        this.log("[SNAPSHOT_READY] ready", {
+          reason,
+          attempts,
+          waitedMs: Date.now() - start,
+          isProductPage: last.isProductPage,
+          interactiveCount: last.interactiveCount,
+          textLength: last.textLength,
+          skeletonCount: last.skeletonCount,
+          productSignal: last.matchedProductSignal,
+        });
+        return {
+          ...last,
+          ready: true,
+          attempts,
+          waitedMs: Date.now() - start,
+          reason,
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+
+    this.log("[SNAPSHOT_READY] timeout", {
+      reason,
+      attempts,
+      waitedMs: Date.now() - start,
+      isProductPage: last?.isProductPage ?? null,
+      interactiveCount: last?.interactiveCount ?? null,
+      textLength: last?.textLength ?? null,
+      skeletonCount: last?.skeletonCount ?? null,
+      productSignal: last?.matchedProductSignal ?? null,
+    });
+    return {
+      ...(last || {}),
+      ready: false,
+      attempts,
+      waitedMs: Date.now() - start,
+      reason,
+    };
+  }
+
+  async _waitForSettleAndReady(reason = "snapshot", timeoutMs = null) {
+    const budget = Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? timeoutMs
+      : this.config.snapshotContentReadyTimeoutMs;
+    const startedAt = Date.now();
+    let settleResult = { stable: true, reason: "no-quiescence", waitedMs: 0 };
+
+    if (this.quiescence) {
+      const settleBudget = Math.max(500, Math.floor(budget * 0.6));
+      try {
+        settleResult = await this.quiescence.waitForSettle(settleBudget);
+      } catch (err) {
+        settleResult = {
+          stable: false,
+          reason: "quiescence-error",
+          waitedMs: Date.now() - startedAt,
+          error: err?.message || String(err),
+        };
+      }
+    }
+
+    const elapsed = Date.now() - startedAt;
+    const readinessBudget = Math.max(
+      this.config.snapshotContentReadyPollMs || 200,
+      budget - elapsed,
+    );
+    const readinessResult = await this._waitForSnapshotReadiness(
+      reason,
+      readinessBudget,
+    );
+
+    return {
+      settleResult,
+      readinessResult,
+      waitedMs: Date.now() - startedAt,
+    };
+  }
+
+  _getAdaptiveSnapshotCaptureLimits() {
+    const baseNodes = this.config.snapshotMaxNodes ?? 5000;
+    const baseTextLength = this.config.snapshotMaxTextLength ?? 5000;
+    if (!this.config.snapshotAdaptiveBoostEnabled || !this._isLikelyProductPage(window.location.href)) {
+      return {
+        maxNodes: baseNodes,
+        maxTextLength: baseTextLength,
+        profile: "default",
+      };
+    }
+
+    return {
+      maxNodes: Math.max(baseNodes, this.config.snapshotProductMaxNodes ?? 15000),
+      maxTextLength: Math.max(
+        baseTextLength,
+        this.config.snapshotProductMaxTextLength ?? 15000,
+      ),
+      profile: "product",
+    };
+  }
+
+  _snapshotPreview(html, maxChars = null) {
+    const previewSize = Number.isFinite(maxChars) && maxChars > 0
+      ? maxChars
+      : this.config.snapshotDebugPreviewChars;
+    return String(html || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, previewSize);
+  }
+
+  _logSnapshotDiagnostics(stage, snapshot) {
+    if (!this.config.debugMode || !snapshot || typeof snapshot !== "object") return;
+    const html = typeof snapshot.html === "string" ? snapshot.html : "";
+    const bytes = new Blob([html]).size;
+    this.log("[SNAPSHOT_CAPTURE]", {
+      stage,
+      url: snapshot.url || window.location.href,
+      normalizedUrl: snapshot.normalizedUrl || this.normalizeUrl(window.location.href),
+      htmlChars: html.length,
+      htmlBytes: bytes,
+      preview: this._snapshotPreview(html),
+      metrics: snapshot.metrics || null,
     });
   }
 
@@ -943,13 +1411,14 @@ class AIRInterceptor {
 
     const runCapture = () => {
       const start = performance.now();
+      const captureLimits = this._getAdaptiveSnapshotCaptureLimits();
       let result = null;
       try {
         if (this.config.snapshotWaitForSPA && !skipWait) {
           return this.waitForSPAContent(this.config.snapshotTimeoutMs).then(
             () => {
               try {
-                result = this.captureDOM(effectiveDepth);
+                result = this.captureDOM(effectiveDepth, captureLimits);
                 if (!result.html)
                   result = this.captureDOMFallback(Math.min(5, effectiveDepth));
               } catch (e) {
@@ -968,7 +1437,7 @@ class AIRInterceptor {
                   this.quiescence.domMutationTimer === null;
               }
 
-              return {
+              const snapshot = {
                 html: result.html || "",
                 anchors: anchors, // <--- Added Anchors
                 controlSignature,
@@ -982,15 +1451,20 @@ class AIRInterceptor {
                 timestamp: Date.now(),
                 metrics: {
                   ...result.metrics,
+                  captureProfile: captureLimits.profile,
+                  captureMaxNodes: captureLimits.maxNodes,
+                  captureMaxTextLength: captureLimits.maxTextLength,
                   totalMs: Math.round(performance.now() - start),
                 },
               };
+              this._logSnapshotDiagnostics("page-snapshot", snapshot);
+              return snapshot;
             },
           );
         }
 
         try {
-          result = this.captureDOM(effectiveDepth);
+          result = this.captureDOM(effectiveDepth, captureLimits);
           if (!result.html)
             result = this.captureDOMFallback(Math.min(5, effectiveDepth));
         } catch (e) {
@@ -1008,7 +1482,7 @@ class AIRInterceptor {
             this.quiescence.domMutationTimer === null;
         }
 
-        return Promise.resolve({
+        const snapshot = {
           html: result?.html || "",
           anchors: anchors, // <--- Added Anchors
           controlSignature,
@@ -1019,9 +1493,14 @@ class AIRInterceptor {
           timestamp: Date.now(),
           metrics: {
             ...(result?.metrics || {}),
+            captureProfile: captureLimits.profile,
+            captureMaxNodes: captureLimits.maxNodes,
+            captureMaxTextLength: captureLimits.maxTextLength,
             totalMs: Math.round(performance.now() - start),
           },
-        });
+        };
+        this._logSnapshotDiagnostics("page-snapshot", snapshot);
+        return Promise.resolve(snapshot);
       } catch (err) {
         return Promise.resolve(null);
       }
@@ -1044,7 +1523,13 @@ class AIRInterceptor {
    * Capture a full-page snapshot for InteractionContext (IC) validation.
    * Captured once per unique page-state (normalizedUrl + controlSignature).
    */
-  async _captureFullPageForIC() {
+  async _captureFullPageForIC(options = {}) {
+    const {
+      skipReadinessWait = false,
+      readinessReason = "ic-full-page",
+      readinessTimeoutMs = this.config.snapshotContentReadyTimeoutMs,
+    } = options || {};
+
     const controlSig = this.computeControlSignature(document);
     const normalizedUrl = this.normalizeUrl(window.location.href);
     const cacheKey = `${normalizedUrl}|${controlSig}`;
@@ -1057,11 +1542,33 @@ class AIRInterceptor {
       this._icCaptureCache = new Map();
     }
     const cachedState = this._icCaptureCache.get(cacheKey);
-    if (cachedState === "stable") return null;
+    const cachedStatus = typeof cachedState === "string" ? cachedState : cachedState?.state;
+    const cachedContentReady =
+      typeof cachedState === "object" ? cachedState.contentReady !== false : true;
+    if (cachedStatus === "stable" && cachedContentReady) {
+      return null;
+    }
 
+    let readinessResult = null;
+    if (this.config.snapshotWaitForSPA && !skipReadinessWait) {
+      try {
+        const readiness = await this._waitForSettleAndReady(
+          readinessReason,
+          readinessTimeoutMs,
+        );
+        readinessResult = readiness?.readinessResult || null;
+      } catch (err) {
+        this.log("[SNAPSHOT_CAPTURE] readiness wait failed", {
+          stage: "ic-full-page",
+          error: err?.message || String(err),
+        });
+      }
+    }
+
+    const captureLimits = this._getAdaptiveSnapshotCaptureLimits();
     let result;
     try {
-      result = this.captureDOM(this.config.snapshotDepth);
+      result = this.captureDOM(this.config.snapshotDepth, captureLimits);
       if (!result?.html) result = this.captureDOMFallback(5);
     } catch (_) {
       result = this.captureDOMFallback(5);
@@ -1076,10 +1583,18 @@ class AIRInterceptor {
         this.quiescence.domMutationTimer === null;
     }
 
-    if (cachedState === "unstable" && !isStable) return null;
-    this._icCaptureCache.set(cacheKey, isStable ? "stable" : "unstable");
+    const isContentReady = readinessResult ? readinessResult.ready === true : true;
+    if (cachedStatus === "unstable" && !isStable && !isContentReady) return null;
 
-    return {
+    const cacheState = isStable && isContentReady ? "stable" : "unstable";
+    this._icCaptureCache.set(cacheKey, {
+      state: cacheState,
+      contentReady: isContentReady,
+      capturedAt: Date.now(),
+      htmlLength: result.html.length,
+    });
+
+    const snapshot = {
       html: result.html,
       anchors: this.scanPageAnchors(),
       controlSignature: controlSig,
@@ -1088,8 +1603,18 @@ class AIRInterceptor {
       viewport: { width: window.innerWidth, height: window.innerHeight },
       url: window.location.href,
       timestamp: Date.now(),
-      metrics: { ...result.metrics, fullPage: true },
+      metrics: {
+        ...result.metrics,
+        fullPage: true,
+        captureProfile: captureLimits.profile,
+        captureMaxNodes: captureLimits.maxNodes,
+        captureMaxTextLength: captureLimits.maxTextLength,
+        contentReady: isContentReady,
+        readinessReason: readinessReason,
+      },
     };
+    this._logSnapshotDiagnostics("ic-full-page", snapshot);
+    return snapshot;
   }
 
   _captureSubtreeSnapshot(element, maxChars = 50000) {
@@ -2494,12 +3019,38 @@ class AIRInterceptor {
 
     // Check B: Is it a Standard Link? (Ignore #anchors and javascript:)
     const anchor = clickTarget.closest?.("a");
+    const isNewTabLink =
+      anchor &&
+      anchor.href &&
+      !anchor.href.startsWith("javascript:") &&
+      !anchor.href.includes("#") &&
+      anchor.target === "_blank";
     const isLink =
       anchor &&
       anchor.href &&
       !anchor.href.startsWith("javascript:") &&
       !anchor.href.includes("#") &&
       anchor.target !== "_blank"; // New tabs don't change current URL
+
+    // Critical: for target="_blank", the outcome snapshot belongs to the new tab.
+    // Stash the trace+URL and let checkPendingOutcome() recover on destination tab.
+    if (isNewTabLink) {
+      const saved = this._stashCrossTabPendingTrace(traceId, anchor.href, startUrl);
+      if (saved) {
+        this.log("↗️ New-tab navigation detected; deferring outcome to destination tab", {
+          traceId,
+          targetUrl: anchor.href,
+          saved,
+        });
+        this.pendingTraceId = null;
+        return;
+      }
+
+      this.log("⚠️ New-tab trace handoff failed; falling back to source-tab outcome", {
+        traceId,
+        targetUrl: anchor.href,
+      });
+    }
 
     // Check C: Is it explicitly marked as a link?
     const isRoleLink = clickTarget.closest?.('[role="link"]');
@@ -2525,20 +3076,29 @@ class AIRInterceptor {
 
     // 5. WAIT for Quiescence (Network/DOM Settle)
     try {
-      let settleResult = "immediate";
+      let settleResult = { stable: true, reason: "immediate", waitedMs: 0 };
+      const settleTimeout = isLikelyNavigation
+        ? this.config.snapshotContentReadyTimeoutMs
+        : 2000;
       if (this.quiescence) {
-        settleResult = await this.quiescence.waitForSettle(2000);
+        settleResult = await this.quiescence.waitForSettle(settleTimeout);
+      }
+      if (isLikelyNavigation) {
+        await this._waitForSnapshotReadiness(
+          "click-outcome",
+          this.config.snapshotContentReadyTimeoutMs,
+        );
       }
 
       // 6. Capture Final State (Snapshot B - "Where we ended up")
       let finalSnapshot = undefined;
       if (this.config.capturePageSnapshot) {
         try {
-          finalSnapshot = target
+          finalSnapshot = target && !isLikelyNavigation
             ? this._captureSubtreeSnapshot(target)
             : await this.capturePageSnapshot(
                 this.config.snapshotDepth,
-                true,
+                false,
               );
         } catch (err) {
           this.log("Failed to capture final snapshot", err);
@@ -2690,8 +3250,8 @@ class AIRInterceptor {
       // with same URL, or a popstate that didn't actually move).
       if (newUrl === lastUrl && changeType !== 'hashchange') return;
 
-      // Wait for the SPA to render the new view
-      if (self.quiescence) await self.quiescence.waitForSettle(2000);
+      // Wait for SPA route content (network + DOM + readiness checks)
+      await self.waitForSPAContent(self.config.snapshotContentReadyTimeoutMs);
 
       const newAnchors     = self.scanPageAnchors();
       const addedAnchors   = newAnchors.filter(a => !lastAnchors.includes(a));
@@ -2703,7 +3263,7 @@ class AIRInterceptor {
       self.log(`🗺️ SPA route change [${changeType}]`, { from: lastUrl, to: newUrl, domChanged });
 
       const snapshot = self.config.capturePageSnapshot
-        ? await self.capturePageSnapshot(self.config.snapshotDepth, true).catch(() => null)
+        ? await self.capturePageSnapshot(self.config.snapshotDepth, false).catch(() => null)
         : null;
 
       const normalizedUrl = self.normalizeUrl(newUrl);
@@ -3675,62 +4235,84 @@ class AIRInterceptor {
  checkPendingOutcome() {
   if (this.disabled) return false;
 
+  let traceId = null;
+  let recoverySource = null; // navigation | cross-tab
+  let crossTabPending = null;
+
   const pending = this._safeGetStorage("session", "air_pending_trace");
-  if (!pending) return false;
-
-  try {
-    const data = JSON.parse(pending);
-    if (!data || typeof data.traceId !== "string") {
+  if (pending) {
+    try {
+      const data = JSON.parse(pending);
+      if (data && typeof data.traceId === "string" && data.traceId) {
+        traceId = data.traceId;
+        recoverySource = "navigation";
+        this._safeRemoveStorage("session", "air_pending_trace");
+      } else {
+        this._safeRemoveStorage("session", "air_pending_trace");
+      }
+    } catch (err) {
+      this.log("⚠️ Corrupted pending trace; clearing it", err?.message || err);
       this._safeRemoveStorage("session", "air_pending_trace");
-      return false;
     }
-
-    this._safeRemoveStorage("session", "air_pending_trace");
-    this.lastActionTraceId = data.traceId;
-    this.lastActionTraceAt = Date.now();
-    this.log("🔄 Recovering pending outcome from navigation", { traceId: data.traceId });
-
-    this.capturePageSnapshot(this.config.snapshotDepth, false).then(async (snapshot) => {
-      const controlSignature = this.computeControlSignature(document);
-      const primaryHeading = this.getPrimaryHeading(document);
-      const pageUrl = window.location.href;
-      const normalizedUrl = this.normalizeUrl(pageUrl);
-      let icSnapshot = null;
-      try {
-        icSnapshot = await this._captureFullPageForIC();
-      } catch (_) {}
-      const normalizedIcSnapshot = this._normalizeSnapshotForTransport(
-        icSnapshot,
-        200000
-      );
-
-      this.queueEvent({
-        id: this.generateUUID(),
-        type: "outcome",
-        traceId: data.traceId,
-        timestamp: Date.now(),
-        sessionId: this.config.sessionId,
-        meta: {
-          settleType: "navigation",
-          urlAfter: window.location.href,
-          controlSignature,
-          primaryHeading,
-          isRecovery: true,
-        },
-        interactionContext: normalizedIcSnapshot, // full-page context for D3.5 validation
-        pageSnapshot: snapshot,
-        pageState: snapshot,
-        pageUrl,
-        normalizedUrl,
-      });
-    });
-
-    return true;
-  } catch (err) {
-    this.log("⚠️ Corrupted pending trace; clearing it", err?.message || err);
-    this._safeRemoveStorage("session", "air_pending_trace");
-    return false;
   }
+
+  if (!traceId) {
+    crossTabPending = this._consumeCrossTabPendingTrace();
+    if (crossTabPending && typeof crossTabPending.traceId === "string" && crossTabPending.traceId) {
+      traceId = crossTabPending.traceId;
+      recoverySource = "cross-tab";
+    }
+  }
+
+  if (!traceId) return false;
+
+  this.lastActionTraceId = traceId;
+  this.lastActionTraceAt = Date.now();
+  this.log("🔄 Recovering pending outcome", {
+    traceId,
+    recoverySource,
+    targetNormalizedUrl: crossTabPending?.targetNormalizedUrl || null,
+  });
+
+  this.capturePageSnapshot(this.config.snapshotDepth, false).then(async (snapshot) => {
+    const controlSignature = this.computeControlSignature(document);
+    const primaryHeading = this.getPrimaryHeading(document);
+    const pageUrl = window.location.href;
+    const normalizedUrl = this.normalizeUrl(pageUrl);
+    let icSnapshot = null;
+    try {
+      icSnapshot = await this._captureFullPageForIC();
+    } catch (_) {}
+    const normalizedIcSnapshot = this._normalizeSnapshotForTransport(
+      icSnapshot,
+      200000
+    );
+
+    this.queueEvent({
+      id: this.generateUUID(),
+      type: "outcome",
+      traceId,
+      timestamp: Date.now(),
+      sessionId: this.config.sessionId,
+      meta: {
+        settleType: recoverySource === "cross-tab" ? "cross-tab-navigation" : "navigation",
+        urlAfter: window.location.href,
+        controlSignature,
+        primaryHeading,
+        isRecovery: true,
+        isCrossTabRecovery: recoverySource === "cross-tab",
+        crossTabTargetNormalizedUrl: crossTabPending?.targetNormalizedUrl || null,
+        crossTabSourceNormalizedUrl: crossTabPending?.sourceNormalizedUrl || null,
+      },
+      interactionContext: normalizedIcSnapshot, // full-page context for D3.5 validation
+      pageSnapshot: snapshot,
+      pageState: snapshot,
+      pageUrl,
+      normalizedUrl,
+    });
+  });
+
+  return true;
 }
 
 async flushPending() {

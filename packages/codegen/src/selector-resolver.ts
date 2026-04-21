@@ -1510,33 +1510,60 @@ function serializeSnapshotExcerpt(
     }
     return html
       .replace(/<script[\s\S]*?<\/script>/gi, '')
-      .replace(/<style[\s\S]*?<\/style>/gi, '');
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<link\b[^>]*>/gi, '')
+      .replace(/<meta\b[^>]*>/gi, '')
+      .replace(/<noscript[\s\S]*?<\/noscript>/gi, '');
   };
 
-  const serializeFromElement = (targetElement: Element): string => {
-    const candidates: string[] = [];
-    candidates.push(targetElement.outerHTML);
+  const serializeFromElement = (
+    targetElement: Element,
+    strategy: 'max-context' | 'focused' = 'max-context'
+  ): string => {
+    const candidateElements: Element[] = [];
+    candidateElements.push(targetElement);
 
     let parent = targetElement.parentElement;
     let depth = 0;
     while (parent && depth < 2) {
-      candidates.push(parent.outerHTML);
+      candidateElements.push(parent);
       parent = parent.parentElement;
       depth++;
     }
 
-    const cleanedCandidates = candidates.map(stripNoise);
+    const cleanedCandidates = candidateElements.map(element => stripNoise(element.outerHTML));
+
+    const redactedCandidates = cleanedCandidates.map(html => redactSnapshot(html));
+
+    if (strategy === 'focused') {
+      // Prefer the closest element-local context instead of large page wrappers.
+      for (let index = 0; index < redactedCandidates.length; index += 1) {
+        const redacted = redactedCandidates[index];
+        const tagName = ((candidateElements[index] as HTMLElement).tagName || '').toLowerCase();
+        if (tagName === 'html' || tagName === 'body') continue;
+        if (redacted.length >= 60 && redacted.length <= maxChars) {
+          return redacted;
+        }
+      }
+      for (let index = 0; index < redactedCandidates.length; index += 1) {
+        const tagName = ((candidateElements[index] as HTMLElement).tagName || '').toLowerCase();
+        if (tagName === 'html' || tagName === 'body') continue;
+        const candidate = redactedCandidates[index] || '';
+        if (candidate.length > 0) return candidate.slice(0, maxChars);
+      }
+      const firstRedacted = redactedCandidates[0] || '';
+      return firstRedacted.slice(0, maxChars);
+    }
 
     let bestHtml = '';
-    for (const html of cleanedCandidates) {
-      const redacted = redactSnapshot(html);
+    for (const redacted of redactedCandidates) {
       if (redacted.length <= maxChars && redacted.length > bestHtml.length) {
         bestHtml = redacted;
       }
     }
 
     if (!bestHtml) {
-      const firstRedacted = redactSnapshot(cleanedCandidates[0] || '');
+      const firstRedacted = redactedCandidates[0] || '';
       bestHtml = firstRedacted.slice(0, maxChars);
     }
 
@@ -1544,6 +1571,52 @@ function serializeSnapshotExcerpt(
   };
 
   const fallbackDocumentExcerpt = (): string => {
+    const interactiveSelectors = [
+      'a[href]',
+      'button',
+      'input:not([type="hidden"])',
+      'select',
+      '[role="button"]',
+      '[role="link"]',
+      '[data-testid]',
+      '[data-id]',
+      '[class*="btn"]',
+      '[class*="button"]',
+    ];
+
+    const interactiveCandidates: Element[] = [];
+    const seenCandidates = new Set<Element>();
+    const addCandidate = (element: Element | null): void => {
+      if (!element) return;
+      if (seenCandidates.has(element)) return;
+      seenCandidates.add(element);
+      interactiveCandidates.push(element);
+    };
+
+    for (const selector of interactiveSelectors) {
+      try {
+        const matches = Array.from(snapshot.querySelectorAll(selector)).slice(0, 4);
+        for (const match of matches) {
+          addCandidate(match);
+        }
+      } catch {
+        // Ignore invalid selector errors and continue probing.
+      }
+    }
+
+    if (interactiveCandidates.length > 0) {
+      const ranked = interactiveCandidates
+        .map(element => ({
+          element,
+          score: evaluateIntentMatch(element, step).score,
+        }))
+        .sort((a, b) => b.score - a.score);
+      const best = ranked[0]?.element;
+      if (best) {
+        return serializeFromElement(best, 'focused');
+      }
+    }
+
     const fullHtml = snapshot.body?.outerHTML || snapshot.documentElement?.outerHTML || '';
     const cleaned = stripNoise(fullHtml);
     const redacted = redactSnapshot(cleaned);
