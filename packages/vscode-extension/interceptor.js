@@ -297,6 +297,9 @@ class AIRInterceptor {
       this._safeSetStorage("session", "AIR_SESSION_ID", currentSessionId);
     }
 
+    const resolvedTab = this._resolveTabContext(config);
+    this._tabResolution = resolvedTab;
+
     // ------------------------------------------------------------
     // 2. CONFIGURATION
     // ------------------------------------------------------------
@@ -315,6 +318,11 @@ class AIRInterceptor {
       snapshotWaitForSPA: config.snapshotWaitForSPA ?? true,
       snapshotContentReadyTimeoutMs: config.snapshotContentReadyTimeoutMs ?? 8000,
       snapshotContentReadyPollMs: config.snapshotContentReadyPollMs ?? 200,
+      snapshotBusyMaxWaitMs: config.snapshotBusyMaxWaitMs ?? 3000,
+      snapshotBusyPollMs: config.snapshotBusyPollMs ?? 150,
+      snapshotBusyMaxLoggedReasons: config.snapshotBusyMaxLoggedReasons ?? 5,
+      hoverIntentBufferTtlMs: config.hoverIntentBufferTtlMs ?? 500,
+      hoverIntentBufferMaxEntries: config.hoverIntentBufferMaxEntries ?? 8,
       snapshotMinInteractiveCount: config.snapshotMinInteractiveCount ?? 6,
       snapshotMinTextLength: config.snapshotMinTextLength ?? 120,
       snapshotProductMinInteractiveCount: config.snapshotProductMinInteractiveCount ?? 4,
@@ -372,6 +380,7 @@ class AIRInterceptor {
       batchSize: config.batchSize || 10,
       batchInterval: config.batchInterval || 2000,
       corsEnabled: config.corsEnabled ?? true,
+      tabId: resolvedTab.tabId,
     };
 
     // ------------------------------------------------------------
@@ -564,6 +573,90 @@ class AIRInterceptor {
     }
   }
 
+  _getTabIdStorageKey() {
+    return "AIR_TAB_ID";
+  }
+
+  _looksLikeTabId(value) {
+    return typeof value === "string" && /^tab-[a-f0-9-]+$/i.test(value);
+  }
+
+  _generateTabId() {
+    return `tab-${this.generateUUID()}`;
+  }
+
+  _hasWindowOpener() {
+    try {
+      return typeof window !== "undefined" && !!window.opener;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  _getNavigationType() {
+    try {
+      const navEntry = performance.getEntriesByType?.("navigation")?.[0];
+      if (navEntry && typeof navEntry.type === "string") {
+        return navEntry.type;
+      }
+      if (performance?.navigation) {
+        if (performance.navigation.type === performance.navigation.TYPE_RELOAD) {
+          return "reload";
+        }
+        if (performance.navigation.type === performance.navigation.TYPE_BACK_FORWARD) {
+          return "back_forward";
+        }
+      }
+    } catch (_) {}
+    return "navigate";
+  }
+
+  _shouldRotateTabIdForNewTab(storedTabId) {
+    if (!this._looksLikeTabId(storedTabId)) return false;
+    const hasOpener = this._hasWindowOpener();
+    if (!hasOpener) return false;
+    const navigationType = this._getNavigationType();
+    if (navigationType !== "navigate") return false;
+    try {
+      return Number(window.history?.length || 0) <= 1;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  _resolveTabContext(config = {}) {
+    const configuredTabId = this._looksLikeTabId(config?.tabId)
+      ? config.tabId
+      : this._looksLikeTabId(window.__AIR_CONFIG__?.tabId)
+        ? window.__AIR_CONFIG__.tabId
+        : null;
+    const storageKey = this._getTabIdStorageKey();
+    const storedTabId = this._safeGetStorage("session", storageKey);
+    const shouldRotate = !configuredTabId && this._shouldRotateTabIdForNewTab(storedTabId);
+    let tabId = configuredTabId || storedTabId;
+    let source = configuredTabId ? "config" : "session_storage";
+    let rotatedFrom = null;
+
+    if (shouldRotate) {
+      rotatedFrom = storedTabId;
+      tabId = this._generateTabId();
+      source = "rotated_new_tab";
+    } else if (!this._looksLikeTabId(tabId)) {
+      tabId = this._generateTabId();
+      source = "generated";
+    }
+
+    this._safeSetStorage("session", storageKey, tabId);
+    return {
+      tabId,
+      source,
+      rotated: rotatedFrom !== null,
+      rotatedFrom,
+      hasOpener: this._hasWindowOpener(),
+      navigationType: this._getNavigationType(),
+    };
+  }
+
   _getCrossTabPendingKey() {
     return `air_pending_trace_cross_tab_${this.config?.sessionId || "unknown"}`;
   }
@@ -718,10 +811,26 @@ class AIRInterceptor {
     if (this.disabled) return;
     this.log("🚀 AIR Interceptor initializing...", {
       sessionId: this.config.sessionId,
+      tabId: this.config.tabId,
     });
+    this.log("AIR_TAB_RESOLVED", {
+      sessionId: this.config.sessionId,
+      tabId: this.config.tabId,
+      source: this._tabResolution?.source || "unknown",
+      navigationType: this._tabResolution?.navigationType || "unknown",
+      hasOpener: this._tabResolution?.hasOpener === true,
+    });
+    if (this._tabResolution?.rotated) {
+      this.log("AIR_TAB_ROTATED_NEW_TAB", {
+        sessionId: this.config.sessionId,
+        oldTabId: this._tabResolution.rotatedFrom,
+        newTabId: this.config.tabId,
+      });
+    }
     console.log('[AIR_INTERCEPTOR] Initialized', {
       sessionId: window.__AIR_CONFIG__?.sessionId,
       serverUrl: window.__AIR_CONFIG__?.serverUrl,
+      tabId: this.config.tabId,
     });
     this.monitorNetwork();
     this.attachEventListeners();
@@ -918,7 +1027,7 @@ class AIRInterceptor {
    */
   async waitForSPAContent(timeoutMs = 5000) {
     const { app } = this.detectSPA();
-    if (!app) return; // Not an SPA, proceed immediately
+    if (!app) return null; // Not an SPA, proceed immediately
 
     const budget = Number.isFinite(timeoutMs) && timeoutMs > 0
       ? timeoutMs
@@ -932,13 +1041,16 @@ class AIRInterceptor {
         settleReason: readiness?.settleResult?.reason || "unknown",
         settleStable: readiness?.settleResult?.stable ?? null,
         contentReady: readiness?.readinessResult?.ready ?? null,
+        busy: readiness?.busyResult?.busy ?? null,
+        forcedCapture: readiness?.busyResult?.forcedCapture ?? null,
         matchedProductSignal: readiness?.readinessResult?.matchedProductSignal || null,
       });
-      return;
+      return readiness;
     }
 
     await new Promise((resolve) => setTimeout(resolve, Math.min(2000, budget)));
     this.log("⚠️ SPA Hydration fallback timeout reached");
+    return null;
   }
 
   _isLikelyProductPage(url = window.location.href) {
@@ -971,6 +1083,224 @@ class AIRInterceptor {
     } catch (_) {
       return false;
     }
+  }
+
+  _pushBusyReason(reasons, reason) {
+    if (!Array.isArray(reasons) || typeof reason !== "string") return;
+    const normalized = reason.trim();
+    if (!normalized || reasons.includes(normalized)) return;
+    const maxReasons = Math.max(1, this.config.snapshotBusyMaxLoggedReasons || 5);
+    if (reasons.length < maxReasons) {
+      reasons.push(normalized);
+    }
+  }
+
+  _matchesBusySignalHint(value) {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (!normalized) return false;
+    return /(^|[\s:_-])(spinner|loader|skeleton)(?=$|[\s:_-])/.test(normalized);
+  }
+
+  _matchesBusySignalText(value) {
+    const normalized = String(value || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+    if (!normalized) return false;
+    return /\b(loading|please wait|processing|saving|submitting|fetching|retrieving|syncing|updating)\b/.test(normalized);
+  }
+
+  _isBusyCandidateVisible(el) {
+    if (!el || typeof el.getBoundingClientRect !== "function") return false;
+    try {
+      if (el.hidden) return false;
+      const rect = el.getBoundingClientRect();
+      return el.offsetParent !== null || (rect.width > 0 && rect.height > 0);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  _describeBusyText(value) {
+    return String(value || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 80);
+  }
+
+  _detectBusySignals(root = document) {
+    const queryRoot =
+      root && typeof root.querySelectorAll === "function"
+        ? root
+        : document;
+    const reasons = [];
+    const maxCandidatesToCheck = 24;
+    const selectors = [
+      '[aria-busy="true"]',
+      '[role="progressbar"]',
+      '[role="status"]',
+      '[aria-live]',
+      '[class*="spinner"]',
+      '[class*="loader"]',
+      '[class*="skeleton"]',
+      '[id*="spinner"]',
+      '[id*="loader"]',
+      '[id*="skeleton"]',
+      '[data-testid*="spinner"]',
+      '[data-testid*="loader"]',
+      '[data-testid*="skeleton"]',
+    ];
+    let candidates = [];
+    try {
+      candidates = Array.from(
+        queryRoot.querySelectorAll(selectors.join(",")),
+      ).slice(0, maxCandidatesToCheck);
+    } catch (_) {
+      candidates = [];
+    }
+
+    let busyVisibleCount = 0;
+    let busyIgnoredHiddenCount = 0;
+
+    for (const el of candidates) {
+      if (!this._isBusyCandidateVisible(el)) {
+        busyIgnoredHiddenCount++;
+        continue;
+      }
+      busyVisibleCount++;
+
+      const ariaBusy = String(el.getAttribute?.("aria-busy") || "").toLowerCase();
+      if (ariaBusy === "true") {
+        this._pushBusyReason(reasons, 'aria-busy="true"');
+        continue;
+      }
+
+      const role = String(el.getAttribute?.("role") || "").toLowerCase();
+      if (role === "progressbar") {
+        this._pushBusyReason(reasons, 'role="progressbar"');
+        continue;
+      }
+
+      const hintValues = [
+        el.className,
+        el.id,
+        el.getAttribute?.("data-testid"),
+      ];
+      const hintValue = hintValues.find((value) => this._matchesBusySignalHint(value));
+      if (hintValue) {
+        this._pushBusyReason(
+          reasons,
+          `loader-hint:${String(hintValue).replace(/\s+/g, " ").trim().slice(0, 60)}`,
+        );
+        continue;
+      }
+
+      const text = this._describeBusyText(el.textContent || el.getAttribute?.("aria-label") || "");
+      if (
+        text &&
+        this._matchesBusySignalText(text) &&
+        (role === "status" || el.hasAttribute?.("aria-live"))
+      ) {
+        this._pushBusyReason(reasons, `loading-text:${text}`);
+      }
+    }
+
+    this.log("[BUSY_DETECT]", {
+      busyCandidatesFound: candidates.length,
+      busyVisibleCount,
+      busyIgnoredHiddenCount,
+      busyReasons: reasons,
+    });
+
+    return {
+      busy: reasons.length > 0,
+      reasons,
+      forcedCapture: false,
+    };
+  }
+
+  async _waitForBusySignalsToClear(reason = "snapshot", timeoutMs = null) {
+    const maxWait = Number.isFinite(timeoutMs) && timeoutMs >= 0
+      ? timeoutMs
+      : this.config.snapshotBusyMaxWaitMs;
+    const pollMs = Math.max(50, this.config.snapshotBusyPollMs || 150);
+    const start = Date.now();
+    let attempts = 0;
+    let last = this._detectBusySignals(document);
+
+    while (Date.now() - start <= maxWait) {
+      attempts++;
+      last = this._detectBusySignals(document);
+      if (!last.busy) {
+        return {
+          ...last,
+          forcedCapture: false,
+          attempts,
+          waitedMs: Date.now() - start,
+          reason,
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+
+    return {
+      ...last,
+      forcedCapture: last.busy === true,
+      attempts,
+      waitedMs: Date.now() - start,
+      reason,
+    };
+  }
+
+  _buildSnapshotStability(waitResult = null) {
+    const fallbackBusy = waitResult?.busyResult || this._detectBusySignals(document);
+    const busyReasons = Array.isArray(fallbackBusy?.reasons)
+      ? fallbackBusy.reasons.slice(0, Math.max(1, this.config.snapshotBusyMaxLoggedReasons || 5))
+      : [];
+    const settleStable = waitResult?.settleResult
+      ? waitResult.settleResult.stable === true
+      : !this.quiescence ||
+        (this.quiescence.activeNetworkCount === 0 &&
+          this.quiescence.domMutationTimer === null);
+    const contentReady = waitResult?.readinessResult
+      ? waitResult.readinessResult.ready === true
+      : true;
+    const forcedCapture = waitResult?.busyResult?.forcedCapture === true;
+    const busy = waitResult?.busyResult
+      ? waitResult.busyResult.busy === true
+      : fallbackBusy.busy === true;
+    const isStable = settleStable && contentReady && !busy && !forcedCapture;
+
+    return {
+      isStable,
+      settleStable,
+      contentReady,
+      busy,
+      busyReasons,
+      forcedCapture,
+    };
+  }
+
+  _buildOutcomeCaptureMeta(pageSnapshot, interactionContext) {
+    const pageMetrics = pageSnapshot?.metrics || {};
+    const icMetrics = interactionContext?.metrics || {};
+    const forcedCapture =
+      pageMetrics.forcedCapture === true || icMetrics.forcedCapture === true;
+    const busyAtCapture =
+      pageMetrics.busyAtCapture === true || icMetrics.busyAtCapture === true;
+    const busyReasons = [
+      ...(Array.isArray(pageMetrics.busyReasons) ? pageMetrics.busyReasons : []),
+      ...(Array.isArray(icMetrics.busyReasons) ? icMetrics.busyReasons : []),
+    ].filter((value, index, arr) => typeof value === "string" && arr.indexOf(value) === index);
+
+    return {
+      forcedCapture,
+      busyAtCapture,
+      busyReasons: busyReasons.slice(
+        0,
+        Math.max(1, this.config.snapshotBusyMaxLoggedReasons || 5),
+      ),
+    };
   }
 
   _findFirstVisibleMatch(selectors, root = document) {
@@ -1192,10 +1522,27 @@ class AIRInterceptor {
       reason,
       readinessBudget,
     );
+    const busyResult = await this._waitForBusySignalsToClear(reason);
+
+    if (busyResult?.forcedCapture) {
+      const warningPayload = {
+        reason,
+        waitedMs: busyResult.waitedMs,
+        busyReasons: Array.isArray(busyResult.reasons)
+          ? busyResult.reasons.slice(
+              0,
+              Math.max(1, this.config.snapshotBusyMaxLoggedReasons || 5),
+            )
+          : [],
+      };
+      console.warn("forced_unstable_capture", warningPayload);
+      this.log("[SNAPSHOT_READY] forced unstable capture", warningPayload);
+    }
 
     return {
       settleResult,
       readinessResult,
+      busyResult,
       waitedMs: Date.now() - startedAt,
     };
   }
@@ -1401,72 +1748,31 @@ class AIRInterceptor {
   }
 
   /** Run capture (optionally in requestIdleCallback) and return snapshot with metrics. */
-  capturePageSnapshot(depth, skipWait = false) {
+  capturePageSnapshot(depth, skipWait = false, options = {}) {
     if (!this.config.capturePageSnapshot) return Promise.resolve(null);
     const effectiveDepth = depth ?? this.config.snapshotDepth ?? 10;
+    const { precomputedWaitResult = null } = options || {};
     const useIdle =
       !skipWait &&
       this.config.snapshotUseIdleCallback &&
       typeof requestIdleCallback !== "undefined";
 
-    const runCapture = () => {
+    const runCapture = async () => {
       const start = performance.now();
       const captureLimits = this._getAdaptiveSnapshotCaptureLimits();
       let result = null;
+
       try {
-        if (this.config.snapshotWaitForSPA && !skipWait) {
-          return this.waitForSPAContent(this.config.snapshotTimeoutMs).then(
-            () => {
-              try {
-                result = this.captureDOM(effectiveDepth, captureLimits);
-                if (!result.html)
-                  result = this.captureDOMFallback(Math.min(5, effectiveDepth));
-              } catch (e) {
-                result = this.captureDOMFallback(Math.min(5, effectiveDepth));
-              }
-
-              // 🌟 NEW: Calculate Anchors along with snapshot
-              const anchors = this.scanPageAnchors();
-              const controlSignature = this.computeControlSignature(document);
-              const pageUrl = window.location.href;
-              const normalizedUrl = this.normalizeUrl(pageUrl);
-              let isStable = true;
-              if (this.quiescence) {
-                isStable =
-                  this.quiescence.activeNetworkCount === 0 &&
-                  this.quiescence.domMutationTimer === null;
-              }
-
-              const snapshot = {
-                html: result.html || "",
-                anchors: anchors, // <--- Added Anchors
-                controlSignature,
-                normalizedUrl,
-                isStable,
-                viewport: {
-                  width: window.innerWidth,
-                  height: window.innerHeight,
-                },
-                url: pageUrl,
-                timestamp: Date.now(),
-                metrics: {
-                  ...result.metrics,
-                  captureProfile: captureLimits.profile,
-                  captureMaxNodes: captureLimits.maxNodes,
-                  captureMaxTextLength: captureLimits.maxTextLength,
-                  totalMs: Math.round(performance.now() - start),
-                },
-              };
-              this._logSnapshotDiagnostics("page-snapshot", snapshot);
-              return snapshot;
-            },
-          );
+        let waitResult = precomputedWaitResult;
+        if (this.config.snapshotWaitForSPA && !skipWait && !waitResult) {
+          waitResult = await this.waitForSPAContent(this.config.snapshotTimeoutMs);
         }
 
         try {
           result = this.captureDOM(effectiveDepth, captureLimits);
-          if (!result.html)
+          if (!result?.html) {
             result = this.captureDOMFallback(Math.min(5, effectiveDepth));
+          }
         } catch (e) {
           result = this.captureDOMFallback(Math.min(5, effectiveDepth));
         }
@@ -1475,19 +1781,14 @@ class AIRInterceptor {
         const controlSignature = this.computeControlSignature(document);
         const pageUrl = window.location.href;
         const normalizedUrl = this.normalizeUrl(pageUrl);
-        let isStable = true;
-        if (this.quiescence) {
-          isStable =
-            this.quiescence.activeNetworkCount === 0 &&
-            this.quiescence.domMutationTimer === null;
-        }
+        const stabilityState = this._buildSnapshotStability(waitResult);
 
         const snapshot = {
           html: result?.html || "",
-          anchors: anchors, // <--- Added Anchors
+          anchors,
           controlSignature,
           normalizedUrl,
-          isStable,
+          isStable: stabilityState.isStable,
           viewport: { width: window.innerWidth, height: window.innerHeight },
           url: pageUrl,
           timestamp: Date.now(),
@@ -1496,13 +1797,18 @@ class AIRInterceptor {
             captureProfile: captureLimits.profile,
             captureMaxNodes: captureLimits.maxNodes,
             captureMaxTextLength: captureLimits.maxTextLength,
+            contentReady: stabilityState.contentReady,
+            settleStable: stabilityState.settleStable,
+            busyAtCapture: stabilityState.busy,
+            busyReasons: stabilityState.busyReasons,
+            forcedCapture: stabilityState.forcedCapture,
             totalMs: Math.round(performance.now() - start),
           },
         };
         this._logSnapshotDiagnostics("page-snapshot", snapshot);
-        return Promise.resolve(snapshot);
+        return snapshot;
       } catch (err) {
-        return Promise.resolve(null);
+        return null;
       }
     };
 
@@ -1528,6 +1834,7 @@ class AIRInterceptor {
       skipReadinessWait = false,
       readinessReason = "ic-full-page",
       readinessTimeoutMs = this.config.snapshotContentReadyTimeoutMs,
+      precomputedWaitResult = null,
     } = options || {};
 
     const controlSig = this.computeControlSignature(document);
@@ -1549,14 +1856,13 @@ class AIRInterceptor {
       return null;
     }
 
-    let readinessResult = null;
-    if (this.config.snapshotWaitForSPA && !skipReadinessWait) {
+    let waitResult = precomputedWaitResult;
+    if (this.config.snapshotWaitForSPA && !skipReadinessWait && !waitResult) {
       try {
-        const readiness = await this._waitForSettleAndReady(
+        waitResult = await this._waitForSettleAndReady(
           readinessReason,
           readinessTimeoutMs,
         );
-        readinessResult = readiness?.readinessResult || null;
       } catch (err) {
         this.log("[SNAPSHOT_CAPTURE] readiness wait failed", {
           stage: "ic-full-page",
@@ -1576,22 +1882,26 @@ class AIRInterceptor {
 
     if (!result?.html) return null;
 
-    let isStable = true;
-    if (this.quiescence) {
-      isStable =
-        this.quiescence.activeNetworkCount === 0 &&
-        this.quiescence.domMutationTimer === null;
+    const stabilityState = this._buildSnapshotStability(waitResult);
+    if (
+      cachedStatus === "unstable" &&
+      !stabilityState.isStable &&
+      (!stabilityState.contentReady || stabilityState.busy || stabilityState.forcedCapture)
+    ) {
+      return null;
     }
 
-    const isContentReady = readinessResult ? readinessResult.ready === true : true;
-    if (cachedStatus === "unstable" && !isStable && !isContentReady) return null;
-
-    const cacheState = isStable && isContentReady ? "stable" : "unstable";
+    const shouldMarkStable =
+      stabilityState.isStable &&
+      stabilityState.contentReady &&
+      !stabilityState.forcedCapture;
     this._icCaptureCache.set(cacheKey, {
-      state: cacheState,
-      contentReady: isContentReady,
+      state: shouldMarkStable ? "stable" : "unstable",
+      contentReady: shouldMarkStable,
       capturedAt: Date.now(),
       htmlLength: result.html.length,
+      forcedCapture: stabilityState.forcedCapture === true,
+      busy: stabilityState.busy === true,
     });
 
     const snapshot = {
@@ -1599,7 +1909,7 @@ class AIRInterceptor {
       anchors: this.scanPageAnchors(),
       controlSignature: controlSig,
       normalizedUrl,
-      isStable,
+      isStable: stabilityState.isStable,
       viewport: { width: window.innerWidth, height: window.innerHeight },
       url: window.location.href,
       timestamp: Date.now(),
@@ -1609,8 +1919,12 @@ class AIRInterceptor {
         captureProfile: captureLimits.profile,
         captureMaxNodes: captureLimits.maxNodes,
         captureMaxTextLength: captureLimits.maxTextLength,
-        contentReady: isContentReady,
-        readinessReason: readinessReason,
+        contentReady: stabilityState.contentReady,
+        readinessReason,
+        settleStable: stabilityState.settleStable,
+        busyAtCapture: stabilityState.busy,
+        busyReasons: stabilityState.busyReasons,
+        forcedCapture: stabilityState.forcedCapture,
       },
     };
     this._logSnapshotDiagnostics("ic-full-page", snapshot);
@@ -1664,58 +1978,217 @@ class AIRInterceptor {
     const pageUrl = window.location.href;
     const normalizedUrl = this.normalizeUrl(pageUrl);
 
-    let isStable = true;
-    if(this.quiescence) {
-      isStable = this.quiescence.activeNetworkCount === 0 
-            && this.quiescence.domMutationTimer === null;
-    }
+    const stabilityState = this._buildSnapshotStability();
 
     return {
       html: bestHtml,
       anchors,
       controlSignature,
       normalizedUrl,
-      isStable,
+      isStable: stabilityState.isStable,
       viewport: { width: window.innerWidth, height: window.innerHeight },
       url: pageUrl,
       timestamp: Date.now(),
-      metrics: { subtree: true, maxChars },
+      metrics: {
+        subtree: true,
+        maxChars,
+        contentReady: stabilityState.contentReady,
+        settleStable: stabilityState.settleStable,
+        busyAtCapture: stabilityState.busy,
+        busyReasons: stabilityState.busyReasons,
+        forcedCapture: stabilityState.forcedCapture,
+      },
     };
   }
 
-  _normalizeSnapshotForTransport(snapshotValue, maxChars = 30000) {
-    if (snapshotValue === undefined) return undefined;
-    if (snapshotValue === null) return null;
+  _getPayloadBytes(payloadValue) {
+    const normalized =
+      typeof payloadValue === "string"
+        ? payloadValue
+        : JSON.stringify(payloadValue ?? null);
+    return new Blob([normalized]).size;
+  }
 
-    let snapshotObject = null;
+  _isPlainObject(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+  }
+
+  _getSnapshotTransportFieldNames() {
+    return ["pageSnapshot", "pageState", "interactionContext"];
+  }
+
+  _getSnapshotFieldDropOrder() {
+    return ["pageSnapshot", "pageState", "interactionContext"];
+  }
+
+  _getEventTransportContext(event, transportKind = "flush") {
+    return {
+      eventId: typeof event?.id === "string" ? event.id : null,
+      type: typeof event?.type === "string" ? event.type : "unknown",
+      traceId: typeof event?.traceId === "string" ? event.traceId : null,
+      sessionId: typeof event?.sessionId === "string" ? event.sessionId : null,
+      tabId: typeof event?.tabId === "string" ? event.tabId : null,
+      transportKind,
+    };
+  }
+
+  _ensureEventTransportMeta(eventCopy) {
+    if (!this._isPlainObject(eventCopy.meta)) {
+      eventCopy.meta = {};
+    }
+    if (!this._isPlainObject(eventCopy.meta.transport)) {
+      eventCopy.meta.transport = {};
+    }
+    if (!this._isPlainObject(eventCopy.meta.transport.fields)) {
+      eventCopy.meta.transport.fields = {};
+    }
+    return eventCopy.meta.transport;
+  }
+
+  _attachTransportFieldMeta(eventCopy, fieldName, fieldMeta) {
+    if (!fieldMeta) return;
+    const transportMeta = this._ensureEventTransportMeta(eventCopy);
+    transportMeta.fields[fieldName] = {
+      ...(this._isPlainObject(transportMeta.fields[fieldName])
+        ? transportMeta.fields[fieldName]
+        : {}),
+      ...fieldMeta,
+    };
+  }
+
+  _updateTransportSummary(eventCopy, summary) {
+    const transportMeta = this._ensureEventTransportMeta(eventCopy);
+    Object.assign(transportMeta, summary);
+  }
+
+  _logTransportFieldMeta(fieldName, eventContext, fieldMeta) {
+    if (!eventContext || !fieldMeta) return;
+    this.log("TRANSPORT_SNAPSHOT_FIELD_NORMALIZED", {
+      ...eventContext,
+      fieldName,
+      ...fieldMeta,
+    });
+  }
+
+  stripScriptsStylesNoscript(html) {
+    let sanitized = typeof html === "string" ? html : "";
+    let scriptsRemoved = 0;
+    let stylesRemoved = 0;
+    let noscriptRemoved = 0;
+
+    sanitized = sanitized.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, () => {
+      scriptsRemoved += 1;
+      return "";
+    });
+
+    sanitized = sanitized.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, () => {
+      stylesRemoved += 1;
+      return "";
+    });
+
+    sanitized = sanitized.replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, () => {
+      noscriptRemoved += 1;
+      return "";
+    });
+
+    return { html: sanitized, scriptsRemoved, stylesRemoved, noscriptRemoved };
+  }
+
+  collapseBase64DataUrls(html) {
+    let sanitized = typeof html === "string" ? html : "";
+    let base64Collapsed = 0;
+
+    sanitized = sanitized.replace(
+      /\s(?:src|href|poster|xlink:href|srcset)\s*=\s*(["'])(data:[^"']+)\1/gi,
+      (match, _quote, dataUrl) => {
+        if (!/;base64,/i.test(dataUrl) && dataUrl.length < 512) {
+          return match;
+        }
+        base64Collapsed += 1;
+        return ' data-air-blob="collapsed"';
+      }
+    );
+
+    sanitized = sanitized.replace(
+      /url\((["']?)data:[^)]+\1\)/gi,
+      (match) => {
+        if (!/;base64,/i.test(match) && match.length < 512) {
+          return match;
+        }
+        base64Collapsed += 1;
+        return 'url("data-air-blob:collapsed")';
+      }
+    );
+
+    return { html: sanitized, base64Collapsed };
+  }
+
+  collapseLargeSvgBlocks(html, options = {}) {
+    let sanitized = typeof html === "string" ? html : "";
+    let svgCollapsed = 0;
+    const sizeThreshold = Number.isFinite(options.sizeThreshold)
+      ? options.sizeThreshold
+      : 4096;
+    const shapeThreshold = Number.isFinite(options.shapeThreshold)
+      ? options.shapeThreshold
+      : 20;
+
+    sanitized = sanitized.replace(/<svg\b[\s\S]*?<\/svg>/gi, (svgBlock) => {
+      const svgBytes = this._getPayloadBytes(svgBlock);
+      const shapeCount = (svgBlock.match(/<(path|circle|rect|polygon|polyline|ellipse|line|use|g)\b/gi) || []).length;
+      if (svgBytes <= sizeThreshold && shapeCount < shapeThreshold) {
+        return svgBlock;
+      }
+      svgCollapsed += 1;
+      return '<svg data-air="icon"></svg>';
+    });
+
+    return { html: sanitized, svgCollapsed };
+  }
+
+  sanitizeSnapshotHtmlForTransport(html) {
+    const stripped = this.stripScriptsStylesNoscript(html);
+    const collapsedBase64 = this.collapseBase64DataUrls(stripped.html);
+    const collapsedSvg = this.collapseLargeSvgBlocks(collapsedBase64.html);
+
+    return {
+      html: collapsedSvg.html,
+      scriptsRemoved: stripped.scriptsRemoved,
+      stylesRemoved: stripped.stylesRemoved,
+      noscriptRemoved: stripped.noscriptRemoved,
+      base64Collapsed: collapsedBase64.base64Collapsed,
+      svgCollapsed: collapsedSvg.svgCollapsed,
+    };
+  }
+
+  _buildSnapshotTransportObject(snapshotValue) {
     if (typeof snapshotValue === "string") {
-      snapshotObject = {
+      return {
         html: snapshotValue,
         metrics: { coercedFromString: true },
       };
-    } else if (typeof snapshotValue === "object") {
-      snapshotObject = { ...snapshotValue };
-    } else {
-      return null;
     }
 
-    const html = typeof snapshotObject.html === "string" ? snapshotObject.html : "";
-    let reducedHtml = html;
-    if (new Blob([reducedHtml]).size > maxChars) {
-      reducedHtml = reducedHtml.slice(0, maxChars) + '<!-- reduced -->';
+    if (this._isPlainObject(snapshotValue)) {
+      return { ...snapshotValue };
     }
 
-    // Build a schema-compatible snapshot shape.
+    return null;
+  }
+
+  _buildSchemaCompatibleSnapshot(snapshotObject, sanitizedHtml) {
     const normalizedSnapshot = {
-      html: reducedHtml,
-      url: typeof snapshotObject.url === "string" ? snapshotObject.url : window.location.href,
+      html: sanitizedHtml,
+      url:
+        typeof snapshotObject.url === "string"
+          ? snapshotObject.url
+          : window.location.href,
       normalizedUrl:
         typeof snapshotObject.normalizedUrl === "string"
           ? snapshotObject.normalizedUrl
           : this.normalizeUrl(window.location.href),
       viewport:
-        snapshotObject.viewport &&
-        typeof snapshotObject.viewport === "object" &&
+        this._isPlainObject(snapshotObject.viewport) &&
         typeof snapshotObject.viewport.width === "number" &&
         typeof snapshotObject.viewport.height === "number"
           ? {
@@ -1727,17 +2200,10 @@ class AIRInterceptor {
         typeof snapshotObject.timestamp === "number"
           ? snapshotObject.timestamp
           : Date.now(),
-      metrics: {
-        ...(
-          snapshotObject.metrics &&
-          typeof snapshotObject.metrics === "object" &&
-          !Array.isArray(snapshotObject.metrics)
-            ? snapshotObject.metrics
-            : {}
-        ),
-        reducedForTransport: true,
-        maxChars,
-      },
+      metrics:
+        this._isPlainObject(snapshotObject.metrics)
+          ? { ...snapshotObject.metrics }
+          : undefined,
     };
 
     if (Array.isArray(snapshotObject.anchors)) {
@@ -1757,7 +2223,244 @@ class AIRInterceptor {
       normalizedSnapshot.isStable = snapshotObject.isStable;
     }
 
+    if (!normalizedSnapshot.metrics) {
+      delete normalizedSnapshot.metrics;
+    }
+
     return normalizedSnapshot;
+  }
+
+  normalizeSnapshotFieldForTransport(
+    snapshotValue,
+    fieldName,
+    maxBytes,
+    eventContext = null,
+    options = {}
+  ) {
+    const suppressLogs = options.suppressLogs === true;
+
+    if (snapshotValue === undefined) {
+      return { value: undefined, meta: null };
+    }
+
+    if (snapshotValue === null) {
+      return { value: null, meta: null };
+    }
+
+    const originalBytes = this._getPayloadBytes(snapshotValue);
+
+    try {
+      const snapshotObject = this._buildSnapshotTransportObject(snapshotValue);
+      if (!snapshotObject) {
+        const meta = {
+          scriptsRemoved: 0,
+          stylesRemoved: 0,
+          noscriptRemoved: 0,
+          base64Collapsed: 0,
+          svgCollapsed: 0,
+          transportTruncated: true,
+          transportReductionReason: "unsupported_snapshot_type",
+          originalBytes,
+          finalBytes: 0,
+        };
+        if (!suppressLogs) {
+          this._logTransportFieldMeta(fieldName, eventContext, meta);
+        }
+        return { value: null, meta };
+      }
+
+      const html = typeof snapshotObject.html === "string" ? snapshotObject.html : "";
+      const sanitized = this.sanitizeSnapshotHtmlForTransport(html);
+      const normalizedSnapshot = this._buildSchemaCompatibleSnapshot(
+        snapshotObject,
+        sanitized.html
+      );
+      const finalBytes = this._getPayloadBytes(normalizedSnapshot);
+      const meta = {
+        scriptsRemoved: sanitized.scriptsRemoved,
+        stylesRemoved: sanitized.stylesRemoved,
+        noscriptRemoved: sanitized.noscriptRemoved,
+        base64Collapsed: sanitized.base64Collapsed,
+        svgCollapsed: sanitized.svgCollapsed,
+        transportTruncated: false,
+        transportReductionReason: null,
+        originalBytes,
+        finalBytes,
+      };
+
+      if (!suppressLogs) {
+        this._logTransportFieldMeta(fieldName, eventContext, meta);
+      }
+
+      return { value: normalizedSnapshot, meta };
+    } catch (error) {
+      if (!suppressLogs) {
+        this.log("TRANSPORT_SANITIZATION_FAILED", {
+          ...eventContext,
+          fieldName,
+          error: error?.message || String(error),
+          originalBytes,
+        });
+      }
+
+      if (originalBytes <= maxBytes) {
+        const meta = {
+          scriptsRemoved: 0,
+          stylesRemoved: 0,
+          noscriptRemoved: 0,
+          base64Collapsed: 0,
+          svgCollapsed: 0,
+          transportTruncated: false,
+          transportReductionReason: "sanitization_failed_original_retained",
+          originalBytes,
+          finalBytes: originalBytes,
+        };
+        if (!suppressLogs) {
+          this._logTransportFieldMeta(fieldName, eventContext, meta);
+        }
+        return { value: snapshotValue, meta };
+      }
+
+      const meta = {
+        scriptsRemoved: 0,
+        stylesRemoved: 0,
+        noscriptRemoved: 0,
+        base64Collapsed: 0,
+        svgCollapsed: 0,
+        transportTruncated: true,
+        transportReductionReason: "sanitization_failed_field_removed",
+        originalBytes,
+        finalBytes: 0,
+      };
+      if (!suppressLogs) {
+        this._logTransportFieldMeta(fieldName, eventContext, meta);
+      }
+      return { value: null, meta };
+    }
+  }
+
+  dropSnapshotFieldForTransport(eventCopy, fieldName, reason, eventContext = null) {
+    eventCopy[fieldName] = null;
+    const meta = {
+      transportTruncated: true,
+      transportReductionReason: reason,
+      finalBytes: 0,
+    };
+    this._attachTransportFieldMeta(eventCopy, fieldName, meta);
+    if (eventContext) {
+      this.log("TRANSPORT_SNAPSHOT_FIELD_DROPPED", {
+        ...eventContext,
+        fieldName,
+        ...meta,
+      });
+    }
+  }
+
+  enforceSnapshotTransportBudget(eventCopy, maxBytes, eventContext = null) {
+    let payload = JSON.stringify(eventCopy);
+    let payloadBytes = this._getPayloadBytes(payload);
+    const reducedFields = [];
+
+    for (const fieldName of this._getSnapshotFieldDropOrder()) {
+      if (payloadBytes <= maxBytes) break;
+      if (eventCopy[fieldName] === undefined || eventCopy[fieldName] === null) {
+        continue;
+      }
+      this.dropSnapshotFieldForTransport(
+        eventCopy,
+        fieldName,
+        "budget_exceeded",
+        eventContext
+      );
+      reducedFields.push(fieldName);
+      payload = JSON.stringify(eventCopy);
+      payloadBytes = this._getPayloadBytes(payload);
+    }
+
+    return {
+      event: eventCopy,
+      payload,
+      payloadBytes,
+      reducedFields,
+      overBudget: payloadBytes > maxBytes,
+    };
+  }
+
+  _prepareEventForTransport(event, options = {}) {
+    const maxPayloadBytes = Number.isFinite(options.maxPayloadBytes)
+      ? options.maxPayloadBytes
+      : 60000;
+    const transportKind = options.transportKind || "flush";
+    const eventContext = this._getEventTransportContext(event, transportKind);
+    const eventCopy = { ...event };
+
+    if (this._isPlainObject(event.meta)) {
+      eventCopy.meta = { ...event.meta };
+    }
+
+    const originalPayloadBytes = this._getPayloadBytes(event);
+
+    for (const fieldName of this._getSnapshotTransportFieldNames()) {
+      const normalized = this.normalizeSnapshotFieldForTransport(
+        event[fieldName],
+        fieldName,
+        maxPayloadBytes,
+        eventContext
+      );
+      if (normalized.value !== undefined || fieldName in eventCopy) {
+        eventCopy[fieldName] = normalized.value;
+      }
+      this._attachTransportFieldMeta(eventCopy, fieldName, normalized.meta);
+    }
+
+    let payload = JSON.stringify(eventCopy);
+    let payloadBytes = this._getPayloadBytes(payload);
+    let reducedFields = [];
+
+    if (payloadBytes > maxPayloadBytes) {
+      const budgetResult = this.enforceSnapshotTransportBudget(
+        eventCopy,
+        maxPayloadBytes,
+        eventContext
+      );
+      payload = budgetResult.payload;
+      payloadBytes = budgetResult.payloadBytes;
+      reducedFields = budgetResult.reducedFields;
+    }
+
+    this._updateTransportSummary(eventCopy, {
+      transportKind,
+      originalPayloadBytes,
+      finalPayloadBytes: payloadBytes,
+      transportTruncated: reducedFields.length > 0,
+      transportReductionReason:
+        reducedFields.length > 0 ? "budget_exceeded" : null,
+      reducedFields,
+    });
+
+    payload = JSON.stringify(eventCopy);
+    payloadBytes = this._getPayloadBytes(payload);
+
+    return {
+      event: eventCopy,
+      payload,
+      payloadBytes,
+      originalPayloadBytes,
+      reducedFields,
+      overBudget: payloadBytes > maxPayloadBytes,
+      eventContext,
+    };
+  }
+
+  _normalizeSnapshotForTransport(snapshotValue, maxBytes = 30000) {
+    const result = this.normalizeSnapshotFieldForTransport(
+      snapshotValue,
+      "snapshot",
+      maxBytes,
+      null,
+      { suppressLogs: true }
+    );
+    return result.value;
   }
 
   // ============================================================
@@ -1975,13 +2678,154 @@ class AIRInterceptor {
   _attachHoverDetection() {
     this._boundHandleHover = this._handleHover.bind(this);
     this._recentHovers     = new Set();
+    this._hoverIntentBuffer = [];
     // passive: true — we never call preventDefault, so the browser can optimise.
-    document.addEventListener('mouseenter', this._boundHandleHover, { capture: true, passive: true });
+    // Use pointerenter so we buffer hover candidates synchronously even when
+    // visibility changes are driven by CSS :hover and never mutate the DOM.
+    document.addEventListener('pointerenter', this._boundHandleHover, { capture: true, passive: true });
+  }
+
+  _pruneHoverIntentBuffer(now = Date.now()) {
+    const ttlMs = this.config.hoverIntentBufferTtlMs || 500;
+    this._hoverIntentBuffer = (this._hoverIntentBuffer || []).filter(
+      (entry) => entry && (now - entry.timestamp) <= ttlMs
+    );
+  }
+
+  _recordHoverIntentBuffer(target, nestedContext, hoverKey) {
+    if (!target) return null;
+    const now = Date.now();
+    this._pruneHoverIntentBuffer(now);
+
+    const entry = {
+      timestamp: now,
+      target,
+      hoverKey,
+      fingerprint: this.generateFingerprint(target),
+      nestedContext,
+      hadDomMutation: false,
+      hasPopupHint: !!target.getAttribute?.('aria-haspopup'),
+      hasExpandedHint: target.getAttribute?.('aria-expanded') != null,
+      targetTag: target.tagName?.toLowerCase?.() || null,
+    };
+
+    this._hoverIntentBuffer.push(entry);
+    const maxEntries = Math.max(1, this.config.hoverIntentBufferMaxEntries || 8);
+    if (this._hoverIntentBuffer.length > maxEntries) {
+      this._hoverIntentBuffer = this._hoverIntentBuffer.slice(-maxEntries);
+    }
+
+    this.log('HOVER_BUFFER_RECORDED', {
+      hoverKey,
+      targetTag: entry.targetTag,
+      hasPopupHint: entry.hasPopupHint,
+      hasExpandedHint: entry.hasExpandedHint,
+      sessionId: this.config.sessionId,
+      tabId: this.config.tabId,
+    });
+
+    return entry;
+  }
+
+  _isClickInsideRevealContainer(target) {
+    if (!target || typeof target.closest !== 'function') return false;
+    const roleSelector = Array.from(AIRInterceptor.CONTAINER_ROLES)
+      .map((role) => `[role="${role}"]`)
+      .join(', ');
+    return !!(
+      target.closest(roleSelector || '__air_no_role__') ||
+      target.closest('[aria-haspopup], [aria-expanded], [aria-controls]') ||
+      target.closest('[class*="menu"], [class*="popup"], [class*="popover"], [class*="flyout"], [class*="dropdown"]')
+    );
+  }
+
+  _isPlausiblyRelatedHoverTarget(hoverEntry, clickTarget) {
+    const hoverTarget = hoverEntry?.target;
+    if (!hoverTarget || !clickTarget) return false;
+
+    if (hoverTarget === clickTarget) return true;
+    if (typeof hoverTarget.contains === 'function' && hoverTarget.contains(clickTarget)) return true;
+    if (typeof clickTarget.contains === 'function' && clickTarget.contains(hoverTarget)) return true;
+
+    const ariaControls = hoverTarget.getAttribute?.('aria-controls');
+    if (ariaControls) {
+      const controlled = document.getElementById(ariaControls);
+      if (controlled && typeof controlled.contains === 'function' && controlled.contains(clickTarget)) {
+        return true;
+      }
+    }
+
+    const hoverParent = hoverTarget.parentElement;
+    if (hoverParent && hoverParent === clickTarget.parentElement) {
+      return true;
+    }
+
+    return false;
+  }
+
+  _findSyntheticHoverCandidate(clickTarget) {
+    this._pruneHoverIntentBuffer();
+    const entries = Array.isArray(this._hoverIntentBuffer)
+      ? [...this._hoverIntentBuffer].reverse()
+      : [];
+
+    for (const entry of entries) {
+      const revealLikely = entry.hasPopupHint || entry.hasExpandedHint || entry.hadDomMutation;
+      const clickInsideRevealContainer = this._isClickInsideRevealContainer(clickTarget);
+      const related = this._isPlausiblyRelatedHoverTarget(entry, clickTarget);
+
+      if (revealLikely && clickInsideRevealContainer && related) {
+        return entry;
+      }
+    }
+
+    return null;
+  }
+
+  _emitSyntheticHover(entry, traceId) {
+    if (!entry?.target || !traceId) return false;
+
+    const pageUrl = window.location.href;
+    const normalizedUrl = this.normalizeUrl(pageUrl);
+    this.queueEvent({
+      id: this.generateUUID(),
+      type: 'hover',
+      timestamp: Date.now(),
+      traceId,
+      pageUrl,
+      normalizedUrl,
+      pageTitle: document.title,
+      sessionId: this.config.sessionId,
+      nestedContext: entry.nestedContext,
+      schemaVersion: 'air:v2',
+      fingerprint: entry.fingerprint || this.generateFingerprint(entry.target),
+      meta: {
+        domChanged: !!entry.hadDomMutation,
+        nodesAdded: 0,
+        nodesRemoved: 0,
+        synthetic: true,
+        synthesizedForClick: true,
+        source: 'trailing_hover_buffer',
+      },
+    });
+
+    this.log('SYNTHETIC_HOVER_EMITTED', {
+      hoverKey: entry.hoverKey,
+      targetTag: entry.targetTag,
+      traceId,
+      sessionId: this.config.sessionId,
+      tabId: this.config.tabId,
+    });
+    this._hoverIntentBuffer = (this._hoverIntentBuffer || []).filter((candidate) => candidate !== entry);
+    return true;
   }
 
   _handleHover(e) {
     // Item 2.5: composedPath for Shadow DOM
-    const target = (e.composedPath && e.composedPath()[0]) || e.target;
+    const eventId = this.generateUUID();
+    const resolvedTargetInfo = this._resolveNestedContext(e, this._getComposedEventTarget(e), eventId);
+    const target = resolvedTargetInfo.target;
+    const nestedContext = resolvedTargetInfo.nestedContext;
     if (!target || target === document.body || target === document.documentElement) return;
 
     const tag = target.tagName || '';
@@ -2001,6 +2845,7 @@ class AIRInterceptor {
 
     // Debounce — same element no more than once per 500 ms to avoid storm
     const hoverKey = [tag, target.id || '', target.getAttribute?.('data-testid') || ''].join('|');
+    const hoverBufferEntry = this._recordHoverIntentBuffer(target, nestedContext, hoverKey);
     if (this._recentHovers.has(hoverKey)) return;
     this._recentHovers.add(hoverKey);
     setTimeout(() => this._recentHovers.delete(hoverKey), 500);
@@ -2012,18 +2857,20 @@ class AIRInterceptor {
       // Only emit if there was a meaningful structural change (new nodes added/removed)
       const significant = mutations.some(m => m.addedNodes.length > 0 || m.removedNodes.length > 0);
       if (!significant) return;
+      if (hoverBufferEntry) hoverBufferEntry.hadDomMutation = true;
 
       this.log('🖱️ Hover triggered DOM change', { tag, hoverKey });
       const pageUrl = window.location.href;
       const normalizedUrl = this.normalizeUrl(pageUrl);
       this.queueEvent({
-        id:            this.generateUUID(),
+        id:            eventId,
         type:          'hover',
         timestamp:     Date.now(),
         pageUrl,
         normalizedUrl,
         pageTitle:     document.title,
         sessionId:     this.config.sessionId,
+        nestedContext,
         schemaVersion: 'air:v2',
         fingerprint:   this.generateFingerprint(target),
         meta: {
@@ -2097,6 +2944,7 @@ class AIRInterceptor {
       ...ev,
       pageSnapshot: null,
       pageState:    null,
+      interactionContext: null,
     }));
 
     // ── STEP 2: Stash full events to localStorage (The Gold Standard) ─────────
@@ -2165,14 +3013,19 @@ class AIRInterceptor {
         }
       } else {
         // Native sendBeacon — slim payload guaranteed under 64KB after snapshot strip
-        const blob = new Blob([lightPayload], { type: "application/json" });
-        const sent = navigator.sendBeacon(this.apiEndpoint, blob);
-        if (sent) {
-          slimEvents.forEach((ev) => this._rememberSentEventId(ev.id));
-          this.log(`🚀 Stripped beacon dispatched (${slimEvents.length} events)`);
+        const lightPayloadBytes = this._getPayloadBytes(lightPayload);
+        if (lightPayloadBytes <= 60_000) {
+          const blob = new Blob([lightPayload], { type: "application/json" });
+          const sent = navigator.sendBeacon(this.apiEndpoint, blob);
+          if (sent) {
+            slimEvents.forEach((ev) => this._rememberSentEventId(ev.id));
+            this.log(`🚀 Stripped beacon dispatched (${slimEvents.length} events)`);
+          } else {
+            // Extremely unlikely after stripping — payload would need to be >64KB
+            // of pure event metadata with no snapshots
+            this.log("⚠️ Stripped beacon rejected — payload too large even without snapshots");
+          }
         } else {
-          // Extremely unlikely after stripping — payload would need to be >64KB
-          // of pure event metadata with no snapshots
           this.log("⚠️ Stripped beacon rejected — payload too large even without snapshots");
         }
       }
@@ -2266,6 +3119,24 @@ class AIRInterceptor {
           queuedIds.add(eventId);
         }
         this.log("recovered event accepted for replay", { eventId });
+      }
+
+      for (const ev of acceptedEvents) {
+        if (
+          this._isPlainObject(ev) &&
+          (ev.tabId === undefined || ev.tabId === null) &&
+          typeof this.config?.tabId === "string" &&
+          this.config.tabId
+        ) {
+          ev.tabId = this.config.tabId;
+          this.log("RECOVERED_EVENT_TABID_STAMPED", {
+            eventId: typeof ev.id === "string" ? ev.id : null,
+            type: typeof ev.type === "string" ? ev.type : null,
+            tabId: ev.tabId,
+            sessionId: typeof ev.sessionId === "string" ? ev.sessionId : this.config.sessionId,
+            traceId: typeof ev.traceId === "string" ? ev.traceId : null,
+          });
+        }
       }
 
       this.eventQueue.unshift(...acceptedEvents);
@@ -2451,6 +3322,127 @@ class AIRInterceptor {
     ].join("|");
   }
 
+  _getComposedEventTarget(event) {
+    return (event?.composedPath && event.composedPath()[0]) || event?.target || null;
+  }
+
+  _elementHasActionableDetail(element) {
+    if (!element || typeof element.getAttribute !== "function") return false;
+    const text = (element.textContent || "").trim().replace(/\s+/g, " ");
+    return !!(
+      element.id ||
+      element.name ||
+      element.getAttribute("data-testid") ||
+      element.getAttribute("aria-label") ||
+      element.getAttribute("title") ||
+      element.getAttribute("role") ||
+      text.length > 0
+    );
+  }
+
+  _isProbableClosedShadowHost(element) {
+    if (!element || typeof element.tagName !== "string") return false;
+    const tagName = element.tagName.toLowerCase();
+    if (!tagName.includes("-")) return false;
+    if (element.shadowRoot) return false;
+    return !this._elementHasActionableDetail(element);
+  }
+
+  _resolveNestedContext(event, target, eventId = null) {
+    if (!target || typeof target !== "object") {
+      return { target, nestedContext: undefined };
+    }
+
+    const nestedContext = {};
+    const sessionId = this.config?.sessionId || null;
+    const tabId = this.config?.tabId || null;
+    const effectiveTarget = target;
+    const rootNode = typeof effectiveTarget.getRootNode === "function"
+      ? effectiveTarget.getRootNode()
+      : null;
+
+    if (rootNode && typeof ShadowRoot !== "undefined" && rootNode instanceof ShadowRoot) {
+      nestedContext.isShadowDom = true;
+      nestedContext.shadowHostTag = rootNode.host?.tagName?.toLowerCase?.() || null;
+      this.log("SHADOW_DOM_TARGET_USED", {
+        eventId,
+        tagName: effectiveTarget.tagName?.toLowerCase?.() || null,
+        shadowHostTag: nestedContext.shadowHostTag,
+        sessionId,
+        tabId,
+      });
+    } else if (this._isProbableClosedShadowHost(effectiveTarget)) {
+      nestedContext.isShadowDom = true;
+      nestedContext.shadowHostTag = effectiveTarget.tagName?.toLowerCase?.() || null;
+      nestedContext.degraded = true;
+      nestedContext.degradedReason = "probable_closed_shadow_host";
+      this.log("SHADOW_DOM_CLOSED_DEGRADED", {
+        eventId,
+        hostTag: nestedContext.shadowHostTag,
+        hasShadowRootHint: null,
+        sessionId,
+        tabId,
+      });
+    }
+
+    // Important limitation:
+    // The parent document cannot capture inner click/input events from iframe documents.
+    // This metadata only applies when the event target is the iframe element itself, or
+    // when same-origin iframe metadata is safely readable without injecting into the frame.
+    const iframeElement = effectiveTarget.tagName === "IFRAME"
+      ? effectiveTarget
+      : (typeof effectiveTarget.closest === "function" ? effectiveTarget.closest("iframe") : null);
+
+    if (iframeElement) {
+      nestedContext.isIframe = true;
+      nestedContext.iframeSrc = iframeElement.getAttribute("src") || null;
+      nestedContext.iframeName = iframeElement.getAttribute("name") || iframeElement.name || null;
+
+      let iframeSameOrigin = null;
+      try {
+        // Metadata-only enrichment. Do not inject into iframe documents here.
+        iframeSameOrigin = !!iframeElement.contentDocument;
+      } catch (_) {
+        iframeSameOrigin = false;
+      }
+      nestedContext.iframeSameOrigin = iframeSameOrigin;
+
+      if (iframeSameOrigin) {
+        this.log("SAME_ORIGIN_IFRAME_CONTEXT_CAPTURED", {
+          eventId,
+          iframeSrc: nestedContext.iframeSrc,
+          iframeName: nestedContext.iframeName,
+          sessionId,
+          tabId,
+        });
+      } else {
+        nestedContext.degraded = true;
+        nestedContext.degradedReason = nestedContext.degradedReason || "cross_origin_iframe_unavailable";
+        this.log("IFRAME_CONTEXT_DEGRADED", {
+          eventId,
+          iframeSrc: nestedContext.iframeSrc,
+          iframeName: nestedContext.iframeName,
+          iframeSameOrigin,
+          sessionId,
+          tabId,
+        });
+      }
+    }
+
+    if (Object.keys(nestedContext).length > 0) {
+      this.log("NESTED_CONTEXT_DETECTED", {
+        eventId,
+        tagName: effectiveTarget.tagName?.toLowerCase?.() || null,
+        nestedContext,
+        sessionId,
+        tabId,
+      });
+      return { target: effectiveTarget, nestedContext };
+    }
+
+    return { target: effectiveTarget, nestedContext: undefined };
+  }
+
   /**
    * Emit a single structured input event.
    * @param {HTMLElement} target
@@ -2458,9 +3450,13 @@ class AIRInterceptor {
    * @param {"blur"|"change"|"input:progress"} trigger  — what caused this emission
    */
   _emitInputEvent(target, traceId, trigger) {
-    const fingerprint = this.generateFingerprint(target);
-    const rawValue    = target.value || "";
-    const isSensitive = this.isSensitiveField(target);
+    const eventId = this.generateUUID();
+    const resolvedTargetInfo = this._resolveNestedContext(null, target, eventId);
+    const effectiveTarget = resolvedTargetInfo.target || target;
+    const nestedContext = resolvedTargetInfo.nestedContext;
+    const fingerprint = this.generateFingerprint(effectiveTarget);
+    const rawValue    = effectiveTarget.value || "";
+    const isSensitive = this.isSensitiveField(effectiveTarget);
     const hasPII      = this.containsPII(rawValue);
 
     // For non-sensitive fields we record value LENGTH as a signal (not the text).
@@ -2471,8 +3467,8 @@ class AIRInterceptor {
 
     // SELECT: also record which option was chosen (text label only, not value, for safety)
     let selectedLabel = undefined;
-    if (target.tagName === "SELECT" && !isSensitive) {
-      selectedLabel = target.options[target.selectedIndex]?.text || undefined;
+    if (effectiveTarget.tagName === "SELECT" && !isSensitive) {
+      selectedLabel = effectiveTarget.options[effectiveTarget.selectedIndex]?.text || undefined;
     }
 
     const isHeartbeat = trigger === "input:progress";
@@ -2485,12 +3481,12 @@ class AIRInterceptor {
 
     const pageUrl = window.location.href;
     const normalizedUrl = this.normalizeUrl(pageUrl);
-    const subtreeSnapshot = target
-      ? this._captureSubtreeSnapshot(target)
+    const subtreeSnapshot = effectiveTarget
+      ? this._captureSubtreeSnapshot(effectiveTarget)
       : null;
 
     this.queueEvent({
-      id:            this.generateUUID(),
+      id:            eventId,
       type:          "input",
       trigger,                          // blur | change | input:progress
       timestamp:     Date.now(),
@@ -2499,6 +3495,7 @@ class AIRInterceptor {
       pageTitle:     document.title,
       viewport:      { width: window.innerWidth, height: window.innerHeight },
       fingerprint,
+      nestedContext,
       inputValueMasked: maskedValue,
       inputLength:   rawValue.length,   // useful signal for analytics
       selectedLabel,                    // SELECT-only
@@ -2507,6 +3504,7 @@ class AIRInterceptor {
       schemaVersion: "air:v2",
       pageSnapshot: subtreeSnapshot || undefined,
       pageState: subtreeSnapshot || undefined,
+      interactionContext: undefined,
     });
   }
   // ═══════════════════════════════════════════════════════════════════
@@ -2822,6 +3820,7 @@ class AIRInterceptor {
   _handleCustomDropdownSelection(optionData, clickEvent) {
     const { label, value, index, el } = optionData;
     const session = this._openDropdown;
+    const eventId = this.generateUUID();
 
     this.log("✅ Custom dropdown option selected", { label, value, index });
 
@@ -2835,8 +3834,15 @@ class AIRInterceptor {
     this._markActionTrace(traceId);
     const triggerFp        = session?.triggerFingerprint || null;
     const durationMs       = session ? Date.now() - session.openTimestamp : null;
-    const optionFingerprint = this.generateFingerprint(el);
-    const snapshotTarget = el || session?.triggerEl || clickEvent?.target || null;
+    const resolvedTargetInfo = this._resolveNestedContext(
+      clickEvent,
+      el || session?.triggerEl || this._getComposedEventTarget(clickEvent) || null,
+      eventId
+    );
+    const nestedContext = resolvedTargetInfo.nestedContext;
+    const optionTarget = resolvedTargetInfo.target || el;
+    const optionFingerprint = this.generateFingerprint(optionTarget);
+    const snapshotTarget = optionTarget || session?.triggerEl || this._getComposedEventTarget(clickEvent) || null;
     const subtreeSnapshot = snapshotTarget
       ? this._captureSubtreeSnapshot(snapshotTarget)
       : null;
@@ -2844,7 +3850,7 @@ class AIRInterceptor {
     const pageUrl = window.location.href;
     const normalizedUrl = this.normalizeUrl(pageUrl);
     this.queueEvent({
-      id:            this.generateUUID(),
+      id:            eventId,
       type:          "custom-select",          // distinct from native "input" / "change"
       trigger:       "option-click",
       timestamp:     Date.now(),
@@ -2854,6 +3860,7 @@ class AIRInterceptor {
       pageTitle:     document.title,
       viewport:      { width: window.innerWidth, height: window.innerHeight },
       sessionId:     this.config.sessionId,
+      nestedContext,
       schemaVersion: "air:v2",
       // ── Selection payload ──
       selection: {
@@ -2872,6 +3879,7 @@ class AIRInterceptor {
       },
       pageSnapshot: subtreeSnapshot || undefined,
       pageState: subtreeSnapshot || undefined,
+      interactionContext: undefined,
     });
 
     this._closeDropdownSession();
@@ -2900,7 +3908,10 @@ class AIRInterceptor {
     if (this.disabled) return;
     // Item 2.5: Resolve the TRUE click target through Shadow DOM boundaries.
     // e.target is retargeted to the shadow host; composedPath()[0] is the real element.
-    const clickTarget = (e.composedPath && e.composedPath()[0]) || e.target;
+    const actionEventId = this.generateUUID();
+    const resolvedTargetInfo = this._resolveNestedContext(e, this._getComposedEventTarget(e), actionEventId);
+    const clickTarget = resolvedTargetInfo.target;
+    const nestedContext = resolvedTargetInfo.nestedContext;
 
     // ══════════════════════════════════════════════════════════════
     // CUSTOM DROPDOWN INTERCEPT — must run FIRST, before dedup logic,
@@ -2967,6 +3978,21 @@ class AIRInterceptor {
 
     // 2. Generate ONE Shared Trace ID for both events
     const traceId = this._createActionTraceId();
+    const syntheticHoverCandidate = this._findSyntheticHoverCandidate(target);
+    if (syntheticHoverCandidate) {
+      this._emitSyntheticHover(syntheticHoverCandidate, traceId);
+    } else {
+      this.log('SYNTHETIC_HOVER_SKIPPED', {
+        reason: (this._hoverIntentBuffer && this._hoverIntentBuffer.length > 0)
+          ? 'no_plausible_hover_relationship'
+          : 'no_recent_hover_buffer',
+        clickTag: target?.tagName?.toLowerCase?.() || null,
+        traceId,
+        sessionId: this.config.sessionId,
+        tabId: this.config.tabId,
+      });
+    }
+
     const fingerprint = this.generateFingerprint(target);
     const seek = this.detectSeekStrategy(target);
     const startUrl = window.location.href;
@@ -2989,7 +4015,7 @@ class AIRInterceptor {
     // 4. Send ACTION Event (Immediate User Intent)
     const actionNormalizedUrl = this.normalizeUrl(startUrl);
     const actionEvent = {
-      id: this.generateUUID(),
+      id: actionEventId,
       type: EventType.CLICK,
       timestamp: Date.now(),
       traceId: traceId, // <--- SHARED ID
@@ -2998,6 +4024,7 @@ class AIRInterceptor {
       pageTitle: document.title,
       viewport: { width: window.innerWidth, height: window.innerHeight },
       fingerprint,
+      nestedContext,
       seek,
       sessionId: this.config.sessionId,
       schemaVersion: "air:v2",
@@ -3077,17 +4104,18 @@ class AIRInterceptor {
     // 5. WAIT for Quiescence (Network/DOM Settle)
     try {
       let settleResult = { stable: true, reason: "immediate", waitedMs: 0 };
+      let captureWaitResult = null;
       const settleTimeout = isLikelyNavigation
         ? this.config.snapshotContentReadyTimeoutMs
         : 2000;
-      if (this.quiescence) {
-        settleResult = await this.quiescence.waitForSettle(settleTimeout);
-      }
       if (isLikelyNavigation) {
-        await this._waitForSnapshotReadiness(
+        captureWaitResult = await this._waitForSettleAndReady(
           "click-outcome",
           this.config.snapshotContentReadyTimeoutMs,
         );
+        settleResult = captureWaitResult?.settleResult || settleResult;
+      } else if (this.quiescence) {
+        settleResult = await this.quiescence.waitForSettle(settleTimeout);
       }
 
       // 6. Capture Final State (Snapshot B - "Where we ended up")
@@ -3099,6 +4127,7 @@ class AIRInterceptor {
             : await this.capturePageSnapshot(
                 this.config.snapshotDepth,
                 false,
+                { precomputedWaitResult: captureWaitResult },
               );
         } catch (err) {
           this.log("Failed to capture final snapshot", err);
@@ -3106,7 +4135,9 @@ class AIRInterceptor {
       }
       let icSnapshot = null;
       try {
-        icSnapshot = await this._captureFullPageForIC();
+        icSnapshot = await this._captureFullPageForIC({
+          precomputedWaitResult: captureWaitResult,
+        });
       } catch (_) {}
 
     // 7. Build OUTCOME Event (The Result)
@@ -3118,6 +4149,7 @@ class AIRInterceptor {
       icSnapshot,
       200000
     );
+    const captureMeta = this._buildOutcomeCaptureMeta(finalSnapshot, icSnapshot);
     const outcomeEvent = {
       id: this.generateUUID(),
       type: "outcome",
@@ -3132,6 +4164,9 @@ class AIRInterceptor {
         titleAfter: document.title,
         controlSignature,
         primaryHeading,
+        forcedCapture: captureMeta.forcedCapture,
+        busyAtCapture: captureMeta.busyAtCapture,
+        busyReasons: captureMeta.busyReasons,
       },
       interactionContext: normalizedIcSnapshot, // full-page context for D3.5 validation
       pageSnapshot: finalSnapshot, // State B
@@ -3452,13 +4487,21 @@ class AIRInterceptor {
   handleSubmit(e) {
     if (this.disabled) return;
 
-    const fingerprint = this.generateFingerprint(e.target);
+    const eventId = this.generateUUID();
+    const resolvedTargetInfo = this._resolveNestedContext(e, this._getComposedEventTarget(e), eventId);
+    const target = resolvedTargetInfo.target;
+    const nestedContext = resolvedTargetInfo.nestedContext;
+    const formTarget = target && typeof target.closest === "function"
+      ? (target.closest("form") || target)
+      : target;
+    const captureTarget = formTarget && formTarget.tagName ? formTarget : null;
+    const fingerprint = this.generateFingerprint(captureTarget);
     const traceId = this._createActionTraceId();
 
     const pageUrl = window.location.href;
     const normalizedUrl = this.normalizeUrl(pageUrl);
     const baseEvent = {
-      id: this.generateUUID(),
+      id: eventId,
       type: "submit",
       timestamp: Date.now(),
       traceId: traceId,
@@ -3467,16 +4510,18 @@ class AIRInterceptor {
       pageTitle: document.title,
       viewport: { width: window.innerWidth, height: window.innerHeight },
       fingerprint,
+      nestedContext,
       sessionId: this.config.sessionId,
       schemaVersion: "air:v2",
-      meta: { eventType: "formSubmit", formId: e.target.id },
+      meta: { eventType: "formSubmit", formId: captureTarget && captureTarget.id ? captureTarget.id : undefined },
+      interactionContext: undefined,
     };
     if (!this.config.capturePageSnapshot) {
       this.queueEvent({ ...baseEvent });
       return;
     }
-    const subtreeSnapshot = e.target
-      ? this._captureSubtreeSnapshot(e.target)
+    const subtreeSnapshot = captureTarget
+      ? this._captureSubtreeSnapshot(captureTarget)
       : null;
 
     if (subtreeSnapshot) {
@@ -3911,24 +4956,35 @@ class AIRInterceptor {
 
   queueEvent(event) {
     if (this.disabled) return;
-    this.eventQueue.push(event);
+    const queuedEvent = this._isPlainObject(event) ? { ...event } : event;
+    if (
+      this._isPlainObject(queuedEvent) &&
+      (queuedEvent.tabId === undefined || queuedEvent.tabId === null) &&
+      typeof this.config?.tabId === "string" &&
+      this.config.tabId
+    ) {
+      queuedEvent.tabId = this.config.tabId;
+    }
+    this.eventQueue.push(queuedEvent);
 
-    if (["click", "input", "submit"].includes(event.type)) {
-      const snapshotText = typeof event.pageSnapshot === "string"
-        ? event.pageSnapshot
-        : (event.pageSnapshot ? JSON.stringify(event.pageSnapshot) : "");
+    if (["click", "input", "submit"].includes(queuedEvent.type)) {
+      const snapshotText = typeof queuedEvent.pageSnapshot === "string"
+        ? queuedEvent.pageSnapshot
+        : (queuedEvent.pageSnapshot ? JSON.stringify(queuedEvent.pageSnapshot) : "");
       console.log("[AIR_SNAPSHOT_SIZE]", {
-        type: event.type,
-        id: event.id,
+        type: queuedEvent.type,
+        id: queuedEvent.id,
+        tabId: queuedEvent.tabId || null,
         snapshotChars: snapshotText.length,
       });
     }
 
     const debugInfo = {
-      type: event.type,
+      type: queuedEvent.type,
       queueLength: this.eventQueue.length,
-      hasSnapshot: !!event.pageSnapshot,
-      traceId: event.traceId,
+      hasSnapshot: !!queuedEvent.pageSnapshot,
+      traceId: queuedEvent.traceId,
+      tabId: queuedEvent.tabId || null,
     };
 
     this.log("📋 Event queued", debugInfo);
@@ -3958,8 +5014,7 @@ class AIRInterceptor {
 
     try {
       const currentEvent = this.eventQueue[0];
-      let payloadEvent = currentEvent;
-      let payload = JSON.stringify(payloadEvent);
+      const maxTransportBytes = 60_000;
       const traceLabel =
         currentEvent.traceId && typeof currentEvent.traceId === "string"
           ? `trace:${currentEvent.traceId.slice(0, 8)}`
@@ -3972,82 +5027,94 @@ class AIRInterceptor {
           currentEvent.meta?.settleType === "navigation" &&
           !currentEvent.meta?.isRecovery);
 
+      const preparedTransport = this._prepareEventForTransport(currentEvent, {
+        maxPayloadBytes: maxTransportBytes,
+        transportKind: isNavigation ? "navigation" : "flush",
+      });
+      let payload = preparedTransport.payload;
+
       if (isNavigation) {
-        const lightEvent = { ...currentEvent, pageSnapshot: null, pageState: null };
-        const navPayload = JSON.stringify(lightEvent);
+        this.log("NAV_BEACON_REDUCED", {
+          ...preparedTransport.eventContext,
+          originalBytes: preparedTransport.originalPayloadBytes,
+          finalBytes: preparedTransport.payloadBytes,
+          reducedFields: preparedTransport.reducedFields,
+          wasReduced:
+            preparedTransport.reducedFields.length > 0 ||
+            preparedTransport.originalPayloadBytes !== preparedTransport.payloadBytes,
+        });
 
-        // Priority 1: GM beacon (extension context, ad-blocker immune)
-        if (typeof window.__air_gmBeacon === "function") {
-          const accepted = window.__air_gmBeacon(this.apiEndpoint, navPayload);
-          if (accepted) {
-            this._rememberSentEventId(currentEvent.id);
-            this._retryState.delete(currentEvent.id);
-            this.eventQueue.shift();
-            this.log(`[NAV] Dispatched via GM beacon (${traceLabel})`);
-            if (this.eventQueue.length > 0) setTimeout(() => this.flushQueue(), 10);
-            return;
-          }
-          this.log(`[NAV] GM beacon rejected event; falling back to sendBeacon (${traceLabel})`);
+        if (preparedTransport.payloadBytes > maxTransportBytes) {
+          this.log("NAV_BEACON_PAYLOAD_TOO_LARGE", {
+            ...preparedTransport.eventContext,
+            originalBytes: preparedTransport.originalPayloadBytes,
+            finalBytes: preparedTransport.payloadBytes,
+            reducedFields: preparedTransport.reducedFields,
+          });
         } else {
-          this.log(`[NAV] GM beacon unavailable; trying native sendBeacon (${traceLabel})`);
+          // Priority 1: GM beacon (extension context, ad-blocker immune)
+          if (typeof window.__air_gmBeacon === "function") {
+            const accepted = window.__air_gmBeacon(this.apiEndpoint, payload);
+            if (accepted) {
+              this._rememberSentEventId(currentEvent.id);
+              this._retryState.delete(currentEvent.id);
+              this.eventQueue.shift();
+              this.log(`[NAV] Dispatched via GM beacon (${traceLabel})`);
+              if (this.eventQueue.length > 0) setTimeout(() => this.flushQueue(), 10);
+              return;
+            }
+            this.log(`[NAV] GM beacon rejected event; falling back to sendBeacon (${traceLabel})`);
+          } else {
+            this.log(`[NAV] GM beacon unavailable; trying native sendBeacon (${traceLabel})`);
+          }
+
+          // Priority 2: native sendBeacon (fallback)
+          const blob = new Blob([payload], { type: "application/json" });
+          const beaconBytes = this._getPayloadBytes(payload);
+          if (beaconBytes <= maxTransportBytes) {
+            const sent = navigator.sendBeacon(this.apiEndpoint, blob);
+            if (sent) {
+              this._rememberSentEventId(currentEvent.id);
+              this._retryState.delete(currentEvent.id);
+              this.eventQueue.shift();
+              this.log(`[NAV] Dispatched via sendBeacon (${traceLabel})`);
+              if (this.eventQueue.length > 0) setTimeout(() => this.flushQueue(), 10);
+              return;
+            }
+            this.log("NAV_BEACON_REJECTED_FALLBACK_FETCH", {
+              ...preparedTransport.eventContext,
+              originalBytes: preparedTransport.originalPayloadBytes,
+              finalBytes: beaconBytes,
+              reducedFields: preparedTransport.reducedFields,
+            });
+          } else {
+            this.log("NAV_BEACON_PAYLOAD_TOO_LARGE", {
+              ...preparedTransport.eventContext,
+              originalBytes: preparedTransport.originalPayloadBytes,
+              finalBytes: beaconBytes,
+              reducedFields: preparedTransport.reducedFields,
+            });
+          }
         }
-
-        // Priority 2: native sendBeacon (fallback)
-        const blob = new Blob([payload], { type: "application/json" });
-        const sent = navigator.sendBeacon(this.apiEndpoint, blob);
-        if (sent) {
-          this._rememberSentEventId(currentEvent.id);
-          this._retryState.delete(currentEvent.id);
-          this.eventQueue.shift();
-          this.log(`[NAV] Dispatched via sendBeacon (${traceLabel})`);
-          if (this.eventQueue.length > 0) setTimeout(() => this.flushQueue(), 10);
-          return;
-        }
-        this.log(`[NAV] sendBeacon rejected event (likely payload/capacity); falling back to fetch (${traceLabel})`);
-      }
-
-      // Size guard: browser keepalive cap is ~64KB
-      const payloadSize = new Blob([payload]).size;
-
-      // Recovery events must keep snapshot
-      if (payloadSize > 60_000 && !currentEvent.meta?.isRecovery) {
-        this.log(`[FLUSH] Payload too big (${payloadSize}). Reducing snapshot.`);
-        const reducedPageSnapshot = this._normalizeSnapshotForTransport(
-          currentEvent.pageSnapshot,
-          30000
-        );
-        const reducedPageState = this._normalizeSnapshotForTransport(
-          currentEvent.pageState,
-          30000
-        );
-        const reducedInteractionContext = this._normalizeSnapshotForTransport(
-          currentEvent.interactionContext,
-          30000
-        );
-
-        // Clone the payload event and keep queue event immutable for retries/debugging.
-        const reducedEvent = {
-          ...currentEvent,
-          pageSnapshot: reducedPageSnapshot,
-          pageState: reducedPageState,
-          interactionContext: reducedInteractionContext,
-        };
-
-        payload = JSON.stringify(reducedEvent);
       }
 
       this.log(
         `[FLUSH] Sending ${currentEvent.type} via ${this._gmSend ? "GM transport" : "fetch"} (${new Blob([payload]).size} bytes) - ${traceLabel}`,
+        { tabId: currentEvent.tabId || null },
       );
       console.log('[AIR_SEND]', {
         type: currentEvent.type,
         id: currentEvent.id,
+        tabId: currentEvent.tabId || null,
         size: payload.length,
       });
 
       // Send via GM transport (no CORS) or native raw fetch.
       let response;
       try {
+        const keepaliveSafe =
+          !currentEvent.meta?.isRecovery &&
+          this._getPayloadBytes(payload) <= maxTransportBytes;
         if (this._gmSend) {
           response = await this._gmSend(this.apiEndpoint, payload);
         } else {
@@ -4056,7 +5123,7 @@ class AIRInterceptor {
             headers: { "Content-Type": "application/json" },
             body: payload,
             mode: "cors",
-            keepalive: !currentEvent.meta?.isRecovery,
+            keepalive: keepaliveSafe,
             [_AIR_INTERNAL]: true,
           });
         }
@@ -4287,6 +5354,7 @@ class AIRInterceptor {
       icSnapshot,
       200000
     );
+    const captureMeta = this._buildOutcomeCaptureMeta(snapshot, icSnapshot);
 
     this.queueEvent({
       id: this.generateUUID(),
@@ -4299,6 +5367,9 @@ class AIRInterceptor {
         urlAfter: window.location.href,
         controlSignature,
         primaryHeading,
+        forcedCapture: captureMeta.forcedCapture,
+        busyAtCapture: captureMeta.busyAtCapture,
+        busyReasons: captureMeta.busyReasons,
         isRecovery: true,
         isCrossTabRecovery: recoverySource === "cross-tab",
         crossTabTargetNormalizedUrl: crossTabPending?.targetNormalizedUrl || null,
@@ -4337,13 +5408,21 @@ async flushPending() {
           icSnapshot,
           200000
         );
+        const captureMeta = this._buildOutcomeCaptureMeta(snapshot, icSnapshot);
         this.queueEvent({
           id: this.generateUUID(),
           type: "outcome",
           traceId: "baseline-" + this.generateUUID(),
           timestamp: Date.now(),
           sessionId: this.config.sessionId,
-          meta: { settleType: "baseline", controlSignature, primaryHeading },
+          meta: {
+            settleType: "baseline",
+            controlSignature,
+            primaryHeading,
+            forcedCapture: captureMeta.forcedCapture,
+            busyAtCapture: captureMeta.busyAtCapture,
+            busyReasons: captureMeta.busyReasons,
+          },
           interactionContext: normalizedIcSnapshot, // full-page context for D3.5 validation
           pageSnapshot: snapshot,
           pageState: snapshot,
@@ -4403,5 +5482,4 @@ if (typeof window !== "undefined" && !window._airInterceptor) {
   window.AIR_checkBackend = () => window._airInterceptor.checkBackendHealth();
   console.log("🎯 AIR Interceptor loaded and active");
 }
-
 

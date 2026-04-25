@@ -774,6 +774,16 @@ export class CodegenService {
         }
       }
 
+      console.log('CODEGEN_STEP_MAPPED', {
+        sessionId,
+        step: step.step,
+        eventId: ev.eventId ?? null,
+        traceId: ev.traceId ?? null,
+        sourceNodeId: step.sourceNodeId ?? null,
+        selector: step.selector,
+        resolvedSelector: step.resolvedSelector ?? null,
+      });
+
       // Consecutive duplicate filter — keep last (carries final committed value)
       const prev = rawSteps[rawSteps.length - 1];
       if (prev && prev.selector === step.selector && prev.action === step.action) {

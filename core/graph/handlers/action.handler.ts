@@ -58,7 +58,13 @@ export class ActionHandler {
     );
   }
 
-  public async handleAction(event: AIREvent, traceId: string, currentNodeId: string, lastNodeId: string | null): Promise<void> {
+  public async handleAction(
+    event: AIREvent,
+    traceId: string,
+    currentNodeId: string,
+    lastNodeId: string | null,
+    tabId: string
+  ): Promise<void> {
     const fpHash    = this.computeFingerprintHash(event);
     const safeEventId = event.id || crypto.randomUUID();
 
@@ -66,8 +72,12 @@ export class ActionHandler {
 
     // 1. Register PENDING ACTION in DB (for future Outcome to resolve)
     if (shouldRegisterPending) {
-      await this.registerPendingAction(traceId, event.sessionId, currentNodeId, safeEventId, event.type, fpHash);
-      await this.logWithContext('info', 'Registered PENDING ACTION in DB', { type: event.type }, event.sessionId ?? null, traceId ?? null);
+      await this.registerPendingAction(traceId, event.sessionId, tabId, currentNodeId, safeEventId, event.type, fpHash);
+      await this.logWithContext('info', 'PENDING_ACTION_TAB_SCOPED_REGISTERED', {
+        type: event.type,
+        tabId,
+        nodeId: currentNodeId,
+      }, event.sessionId ?? null, traceId ?? null);
     }
 
     // 2. Self-Loop Fix: Ensure immediate actions still create edges
@@ -79,13 +89,14 @@ export class ActionHandler {
   public async registerPendingAction(
     traceId: string,
     sessionId: string,
+    tabId: string,
     fromNodeId: string,
     triggerEventId: string,
     actionType: string,
     fingerprintHash: string
   ): Promise<void> {
     try {
-      await this.pendingRepo.register(traceId, sessionId, fromNodeId, triggerEventId, actionType, fingerprintHash);
+      await this.pendingRepo.register(traceId, sessionId, tabId, fromNodeId, triggerEventId, actionType, fingerprintHash);
     } catch (e) {
       await this.logWithContext('error', 'Failed to register pending action', { error: (e as Error).message }, sessionId ?? null, traceId ?? null);
       throw e; // FIX: re-throw so GraphBuilder's transaction rolls back

@@ -77,6 +77,169 @@ export class GraphBuilder {
     );
   }
 
+  private buildEventLogFields(
+    event: Pick<AIREvent, 'type' | 'sessionId'>,
+    eventId: string,
+    traceId: string | null,
+    tabId: string | null,
+    nodeId: string | null = null,
+    extra: Record<string, unknown> = {}
+  ): Record<string, unknown> {
+    return {
+      eventId,
+      type: event.type,
+      sessionId: event.sessionId ?? null,
+      traceId,
+      tabId,
+      nodeId,
+      ...extra,
+    };
+  }
+
+  private async logGraphResult(
+    level: 'info' | 'warn' | 'error',
+    event: Pick<AIREvent, 'type' | 'sessionId'>,
+    eventId: string,
+    traceId: string | null,
+    tabId: string | null,
+    nodeId: string | null,
+    result: Record<string, unknown>
+  ): Promise<void> {
+    await this.logWithContext(
+      level,
+      'EVENT_GRAPH_RESULT',
+      this.buildEventLogFields(event, eventId, traceId, tabId, nodeId, result),
+      event.sessionId ?? null,
+      traceId
+    );
+  }
+
+  private shouldRetainEventSnapshotsInPayload(event: AIREvent): boolean {
+    return event.type === 'input' || event.type === 'submit' || event.type === 'custom-select';
+  }
+
+  private getSnapshotCandidate(event: AIREvent): {
+    source: 'pageState' | 'pageSnapshot' | null;
+    snapshot: Record<string, unknown> | null;
+  } {
+    const pageState = (event as any).pageState;
+    if (pageState && typeof pageState === 'object') {
+      return { source: 'pageState', snapshot: pageState as Record<string, unknown> };
+    }
+
+    const pageSnapshot = (event as any).pageSnapshot;
+    if (pageSnapshot && typeof pageSnapshot === 'object') {
+      return { source: 'pageSnapshot', snapshot: pageSnapshot as Record<string, unknown> };
+    }
+
+    return { source: null, snapshot: null };
+  }
+
+  private isSnapshotHtmlParseable(html: string): { parseable: boolean; reason: string } {
+    const trimmed = html.trim();
+    if (!trimmed) return { parseable: false, reason: 'empty_html' };
+    if (!trimmed.includes('<') || !trimmed.includes('>')) {
+      return { parseable: false, reason: 'missing_tag_delimiters' };
+    }
+    if ((trimmed.match(/</g)?.length ?? 0) !== (trimmed.match(/>/g)?.length ?? 0)) {
+      return { parseable: false, reason: 'mismatched_angle_brackets' };
+    }
+    if (/<[^>]*$/.test(trimmed)) {
+      return { parseable: false, reason: 'truncated_tag' };
+    }
+
+    const voidTags = new Set([
+      'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link',
+      'meta', 'param', 'source', 'track', 'wbr',
+    ]);
+    const stack: string[] = [];
+    const tagRegex = /<\/?([a-zA-Z][a-zA-Z0-9:-]*)(?:\s[^<>]*)?>/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = tagRegex.exec(trimmed)) !== null) {
+      const fullTag = match[0];
+      const tagName = match[1].toLowerCase();
+
+      if (fullTag.startsWith('</')) {
+        if (voidTags.has(tagName)) continue;
+        const openTag = stack.pop();
+        if (openTag !== tagName) {
+          return { parseable: false, reason: 'tag_mismatch' };
+        }
+        continue;
+      }
+
+      if (voidTags.has(tagName) || fullTag.endsWith('/>')) continue;
+      stack.push(tagName);
+    }
+
+    if (stack.length > 0) {
+      return { parseable: false, reason: 'unclosed_tags' };
+    }
+
+    return { parseable: true, reason: 'ok' };
+  }
+
+  private evaluateEventLocalSnapshotFallback(
+    event: AIREvent,
+    lastNodeId: string | null,
+    hasSessionAndTrace: boolean
+  ): {
+    eligible: boolean;
+    reason: string;
+    snapshotSource: 'pageState' | 'pageSnapshot' | null;
+  } {
+    if (lastNodeId) {
+      return { eligible: false, reason: 'existing_current_node', snapshotSource: null };
+    }
+    if (!hasSessionAndTrace) {
+      return { eligible: false, reason: 'missing_session_or_trace', snapshotSource: null };
+    }
+
+    const candidate = this.getSnapshotCandidate(event);
+    if (!candidate.snapshot) {
+      return { eligible: false, reason: 'missing_snapshot', snapshotSource: candidate.source };
+    }
+
+    const html = candidate.snapshot.html;
+    if (typeof html !== 'string' || html.trim().length === 0) {
+      return { eligible: false, reason: 'invalid_snapshot_html', snapshotSource: candidate.source };
+    }
+
+    const parseResult = this.isSnapshotHtmlParseable(html);
+    if (!parseResult.parseable) {
+      return {
+        eligible: false,
+        reason: `unparseable_snapshot_${parseResult.reason}`,
+        snapshotSource: candidate.source,
+      };
+    }
+
+    return { eligible: true, reason: 'eligible', snapshotSource: candidate.source };
+  }
+
+  private withEventLocalFallbackMetadata(event: AIREvent): AIREvent {
+    const existingMeta =
+      (event as any).meta && typeof (event as any).meta === 'object'
+        ? ((event as any).meta as Record<string, unknown>)
+        : {};
+
+    return {
+      ...(event as any),
+      meta: {
+        ...existingMeta,
+        nodePromotionSource: 'event_local_fallback',
+        nodePromotionReason: 'missing_current_node',
+      },
+    } as AIREvent;
+  }
+
+  private getEffectiveTabId(event: AIREvent): string {
+    return typeof event.tabId === 'string' && event.tabId.length > 0
+      ? event.tabId
+      : 'tab-legacy';
+  }
+
   public async getStats(): Promise<GraphStats> {
     try {
       const nodes = await this.db.prepare('SELECT COUNT(*) as count FROM nodes').get<{ count: number }>();
@@ -121,6 +284,15 @@ export class GraphBuilder {
         eventId: safeEventId,
         type: event.type,
       }, null, traceId ?? null);
+      await this.logGraphResult(
+        'error',
+        event,
+        safeEventId,
+        traceId ?? null,
+        null,
+        null,
+        { success: false, stage: 'missing_session_rejected', error: 'Missing sessionId' }
+      );
       return { success: false, error: 'Missing sessionId' };
     }
 
@@ -131,6 +303,15 @@ export class GraphBuilder {
           eventId: safeEventId,
           type: event.type,
         }, sessionId ?? null, traceId ?? null);
+        await this.logGraphResult(
+          'warn',
+          event,
+          safeEventId,
+          traceId ?? null,
+          event.tabId ?? 'tab-legacy',
+          existing.node_id ?? null,
+          { success: true, stage: 'duplicate_skipped', duplicate: true }
+        );
         return { success: true, eventId: safeEventId, duplicate: true };
       }
     } catch (error) {
@@ -142,100 +323,216 @@ export class GraphBuilder {
       id: safeEventId,
       traceId: event.traceId || traceId,
     } as AIREvent;
+    const effectiveTabId = this.getEffectiveTabId(normalizedEvent);
 
     try {
       return await this.db.transaction(async (): Promise<ProcessResult> => {
         await this.sessionManager.getOrCreateSession(normalizedEvent.sessionId);
+        if (effectiveTabId === 'tab-legacy') {
+          await this.logWithContext('info', 'TAB_LEGACY_FALLBACK_USED', {
+            eventId: safeEventId,
+            type: normalizedEvent.type,
+            tabId: effectiveTabId,
+            reason: 'missing_tab_id_on_event',
+          }, normalizedEvent.sessionId ?? null, traceId ?? null);
+        }
 
-        const intent = IntentDetector.detectIntent(normalizedEvent);
-        const intentRaw = IntentDetector.getRawIntent(normalizedEvent);
-        const slimPayload = { ...normalizedEvent } as any;
-        // Keep interactionContext in payload for D3.5 diagnostics; trim only large node-resolution snapshots.
-        delete slimPayload.pageSnapshot;
-        delete slimPayload.pageState;
-        await this.eventRepo.insert(slimPayload as AIREvent, intent, intentRaw);
-        await this.persistInteractionContext(normalizedEvent);
-
-        let currentNodeId: string | null = null;
         const isInput = normalizedEvent.type === 'input';
         const isScroll = normalizedEvent.type === 'scroll';
         const isSubmit = normalizedEvent.type === 'submit';
-        const hasSnapshot = !!(
-          ('pageState' in normalizedEvent && normalizedEvent.pageState) ||
-          ('pageSnapshot' in normalizedEvent && (normalizedEvent as any).pageSnapshot)
-        );
-        const lastNodeId = await this.sessionManager.getLastNode(normalizedEvent.sessionId);
+        const isCustomSelect = normalizedEvent.type === 'custom-select';
+        const usesEventLocalSnapshotPolicy = isInput || isSubmit || isCustomSelect;
+        const lastNodeId = await this.sessionManager.getLastNode(normalizedEvent.sessionId, effectiveTabId);
+        const hasSessionAndTrace =
+          typeof event.sessionId === 'string' &&
+          event.sessionId.length > 0 &&
+          typeof event.traceId === 'string' &&
+          event.traceId.length > 0;
 
-        if (isInput && !hasSnapshot && lastNodeId) {
-          currentNodeId = lastNodeId;
-          await this.logWithContext('info', 'Anchoring Input event to existing node', { nodeId: currentNodeId }, normalizedEvent.sessionId ?? null, traceId ?? null);
+        const fallbackDecision = usesEventLocalSnapshotPolicy
+          ? this.evaluateEventLocalSnapshotFallback(normalizedEvent, lastNodeId, hasSessionAndTrace)
+          : { eligible: false, reason: 'not_event_local_snapshot_type', snapshotSource: null as null };
+
+        const eventForGraph = fallbackDecision.eligible
+          ? this.withEventLocalFallbackMetadata(normalizedEvent)
+          : normalizedEvent;
+
+        const intent = IntentDetector.detectIntent(eventForGraph);
+        const intentRaw = IntentDetector.getRawIntent(eventForGraph);
+        const slimPayload = { ...eventForGraph } as any;
+        // Keep interactionContext in payload for D3.5 diagnostics.
+        // Keep input/submit/custom-select snapshots as event-local truth; trim large node-resolution snapshots elsewhere.
+        if (!this.shouldRetainEventSnapshotsInPayload(eventForGraph)) {
+          delete slimPayload.pageSnapshot;
+          delete slimPayload.pageState;
+        }
+        await this.eventRepo.insert(slimPayload as AIREvent, intent, intentRaw);
+        await this.logWithContext(
+          'info',
+          'EVENT_PERSISTED',
+          this.buildEventLogFields(eventForGraph, safeEventId, traceId, effectiveTabId, null, {
+            intent,
+            intentRaw,
+          }),
+          eventForGraph.sessionId ?? null,
+          traceId ?? null
+        );
+        await this.persistInteractionContext(eventForGraph);
+
+        let currentNodeId: string | null = null;
+        const hasSnapshot = !!(
+          ('pageState' in eventForGraph && (eventForGraph as any).pageState) ||
+          ('pageSnapshot' in eventForGraph && (eventForGraph as any).pageSnapshot)
+        );
+
+        if (usesEventLocalSnapshotPolicy) {
+          if (lastNodeId) {
+            currentNodeId = lastNodeId;
+            await this.logWithContext('info', 'CONTROL_EVENT_ANCHORED_EXISTING_NODE', {
+              eventId: safeEventId,
+              type: eventForGraph.type,
+              nodeId: currentNodeId,
+              traceId,
+              tabId: effectiveTabId,
+            }, eventForGraph.sessionId ?? null, traceId ?? null);
+          } else if (fallbackDecision.eligible) {
+            currentNodeId = await this.baselineHandler.upsertNode(eventForGraph);
+            if (currentNodeId) {
+              await this.logWithContext('info', 'CONTROL_EVENT_EVENT_LOCAL_FALLBACK_PROMOTED', {
+                eventId: safeEventId,
+                type: eventForGraph.type,
+                nodeId: currentNodeId,
+                traceId,
+                snapshotSource: fallbackDecision.snapshotSource,
+                nodePromotionSource: 'event_local_fallback',
+                nodePromotionReason: 'missing_current_node',
+                tabId: effectiveTabId,
+              }, eventForGraph.sessionId ?? null, traceId ?? null);
+            } else {
+              await this.logWithContext('warn', 'CONTROL_EVENT_UNLINKED_NO_VALID_SNAPSHOT', {
+                eventId: safeEventId,
+                type: eventForGraph.type,
+                traceId,
+                reason: 'fallback_upsert_failed',
+                snapshotSource: fallbackDecision.snapshotSource,
+                tabId: effectiveTabId,
+              }, eventForGraph.sessionId ?? null, traceId ?? null);
+            }
+          } else {
+            await this.logWithContext('warn', 'CONTROL_EVENT_UNLINKED_NO_VALID_SNAPSHOT', {
+              eventId: safeEventId,
+              type: eventForGraph.type,
+              traceId,
+              reason: fallbackDecision.reason,
+              snapshotSource: fallbackDecision.snapshotSource,
+              tabId: effectiveTabId,
+            }, eventForGraph.sessionId ?? null, traceId ?? null);
+          }
         } else if (isScroll && !hasSnapshot && lastNodeId) {
           currentNodeId = lastNodeId;
-          await this.logWithContext('info', 'Anchoring Scroll event to existing node', { nodeId: currentNodeId }, normalizedEvent.sessionId ?? null, traceId ?? null);
-        } else if (isSubmit && !hasSnapshot && lastNodeId) {
-          currentNodeId = lastNodeId;
-          await this.logWithContext('info', 'Anchoring Submit event to existing node', { nodeId: currentNodeId }, normalizedEvent.sessionId ?? null, traceId ?? null);
-        } else if (['click', 'input', 'custom', 'outcome', 'scroll', 'custom-select', 'spa-route-change'].includes(normalizedEvent.type)) {
-          currentNodeId = await this.baselineHandler.upsertNode(normalizedEvent);
+          await this.logWithContext('info', 'Anchoring Scroll event to existing node', {
+            nodeId: currentNodeId,
+            tabId: effectiveTabId,
+          }, eventForGraph.sessionId ?? null, traceId ?? null);
+        } else if (['click', 'custom', 'outcome', 'scroll', 'custom-select', 'spa-route-change'].includes(eventForGraph.type)) {
+          currentNodeId = await this.baselineHandler.upsertNode(eventForGraph);
         }
 
         if (currentNodeId) {
           await this.eventRepo.updateNodeId(safeEventId, currentNodeId);
+          await this.logWithContext(
+            'info',
+            'EVENT_NODE_LINKED',
+            this.buildEventLogFields(eventForGraph, safeEventId, traceId, effectiveTabId, currentNodeId),
+            eventForGraph.sessionId ?? null,
+            traceId ?? null
+          );
         }
 
-        const isHeartbeat = normalizedEvent.type === 'input' && (normalizedEvent as any).trigger === 'input:progress';
+        const isHeartbeat = eventForGraph.type === 'input' && (eventForGraph as any).trigger === 'input:progress';
 
-        if (normalizedEvent.sessionId && currentNodeId) {
-          if (['click', 'input', 'submit', 'custom-select'].includes(normalizedEvent.type) && !isHeartbeat) {
-            await this.actionHandler.handleAction(normalizedEvent, traceId, currentNodeId, lastNodeId);
-            await this.sessionManager.updatePointer(normalizedEvent.sessionId, currentNodeId);
+        if (eventForGraph.sessionId && currentNodeId) {
+          if (['click', 'input', 'submit', 'custom-select'].includes(eventForGraph.type) && !isHeartbeat) {
+            await this.actionHandler.handleAction(eventForGraph, traceId, currentNodeId, lastNodeId, effectiveTabId);
+            await this.sessionManager.updatePointer(eventForGraph.sessionId, effectiveTabId, currentNodeId, eventForGraph.timestamp);
             await this.logWithContext('info', 'Event stage: action recorded, pending action registered', {
               eventId: safeEventId,
-              type: normalizedEvent.type,
+              type: eventForGraph.type,
               nodeId: currentNodeId,
               traceId,
-            }, normalizedEvent.sessionId ?? null, traceId ?? null);
+              tabId: effectiveTabId,
+            }, eventForGraph.sessionId ?? null, traceId ?? null);
+            await this.logGraphResult(
+              'info',
+              eventForGraph,
+              safeEventId,
+              traceId,
+              effectiveTabId,
+              currentNodeId,
+              { success: true, stage: 'action_recorded' }
+            );
             return { success: true, stage: 'action_recorded', nodeId: currentNodeId, traceId };
           }
 
-          if (normalizedEvent.type === 'outcome') {
-            const parsedOutcome = OutcomeEventSchema.parse(normalizedEvent);
-            await this.outcomeHandler.handleOutcome(parsedOutcome, traceId, currentNodeId);
-            await this.sessionManager.updatePointer(normalizedEvent.sessionId, currentNodeId);
+          if (eventForGraph.type === 'outcome') {
+            const parsedOutcome = OutcomeEventSchema.parse(eventForGraph);
+            await this.outcomeHandler.handleOutcome(parsedOutcome, traceId, currentNodeId, effectiveTabId);
+            await this.sessionManager.updatePointer(eventForGraph.sessionId, effectiveTabId, currentNodeId, eventForGraph.timestamp);
             await this.logWithContext('info', 'Event stage: outcome processed, edge created or updated', {
               eventId: safeEventId,
-              type: normalizedEvent.type,
+              type: eventForGraph.type,
               nodeId: currentNodeId,
               traceId,
-            }, normalizedEvent.sessionId ?? null, traceId ?? null);
+              tabId: effectiveTabId,
+            }, eventForGraph.sessionId ?? null, traceId ?? null);
+            await this.logGraphResult(
+              'info',
+              eventForGraph,
+              safeEventId,
+              traceId,
+              effectiveTabId,
+              currentNodeId,
+              { success: true, stage: 'edge_finalized' }
+            );
             return { success: true, stage: 'edge_finalized', nodeId: currentNodeId, traceId };
           }
 
-          if (normalizedEvent.type === 'spa-route-change') {
-            const spaEvent = normalizedEvent as any;
+          if (eventForGraph.type === 'spa-route-change') {
+            const spaEvent = eventForGraph as any;
             try {
               const syntheticOutcome = OutcomeEventSchema.parse({
-                ...normalizedEvent,
+                ...eventForGraph,
                 type: 'outcome',
                 meta: {
                   settleType: spaEvent.changeType || 'navigation',
-                  urlAfter: spaEvent.navigation?.to || (normalizedEvent as any).pageUrl,
+                  urlAfter: spaEvent.navigation?.to || (eventForGraph as any).pageUrl,
                 },
               });
-              await this.outcomeHandler.handleOutcome(syntheticOutcome, traceId, currentNodeId);
+              await this.outcomeHandler.handleOutcome(syntheticOutcome, traceId, currentNodeId, effectiveTabId);
             } catch (e) {
               await this.logWithContext('warn', 'Failed to parse synthetic outcome for spa-route-change', {
                 error: (e as Error).message,
-              }, normalizedEvent.sessionId ?? null, traceId ?? null);
+                tabId: effectiveTabId,
+              }, eventForGraph.sessionId ?? null, traceId ?? null);
             }
 
-            await this.sessionManager.updatePointer(normalizedEvent.sessionId, currentNodeId);
+            await this.sessionManager.updatePointer(eventForGraph.sessionId, effectiveTabId, currentNodeId, eventForGraph.timestamp);
             await this.logWithContext('info', 'Event stage: SPA route transition processed as synthetic outcome', {
               eventId: safeEventId,
-              type: normalizedEvent.type,
+              type: eventForGraph.type,
               nodeId: currentNodeId,
               traceId,
-            }, normalizedEvent.sessionId ?? null, traceId ?? null);
+              tabId: effectiveTabId,
+            }, eventForGraph.sessionId ?? null, traceId ?? null);
+            await this.logGraphResult(
+              'info',
+              eventForGraph,
+              safeEventId,
+              traceId,
+              effectiveTabId,
+              currentNodeId,
+              { success: true, stage: 'spa_navigation_recorded' }
+            );
             return { success: true, stage: 'spa_navigation_recorded', nodeId: currentNodeId, traceId };
           }
         }
@@ -243,14 +540,24 @@ export class GraphBuilder {
         let stage = 'event processed but no graph change';
         if (isHeartbeat) stage = 'ignored input heartbeat';
         else if (!currentNodeId) stage = 'no node resolved - event not linked';
-        else if (!normalizedEvent.sessionId) stage = 'missing session - rejected';
+        else if (!eventForGraph.sessionId) stage = 'missing session - rejected';
 
         await this.logWithContext('info', `Event stage: ${stage}`, {
           eventId: safeEventId,
           nodeId: currentNodeId,
-          type: normalizedEvent.type,
+          type: eventForGraph.type,
           traceId,
-        }, normalizedEvent.sessionId ?? null, traceId ?? null);
+          tabId: effectiveTabId,
+        }, eventForGraph.sessionId ?? null, traceId ?? null);
+        await this.logGraphResult(
+          'info',
+          eventForGraph,
+          safeEventId,
+          traceId,
+          effectiveTabId,
+          currentNodeId,
+          { success: true, stage }
+        );
 
         return { success: true, eventId: safeEventId, nodeId: currentNodeId, traceId };
       });
@@ -261,6 +568,15 @@ export class GraphBuilder {
         { error: (error as Error).message, eventId: safeEventId, traceId },
         sessionId,
         traceId
+      );
+      await this.logGraphResult(
+        'error',
+        normalizedEvent,
+        safeEventId,
+        traceId,
+        effectiveTabId,
+        null,
+        { success: false, stage: 'transaction_failed', error: (error as Error).message }
       );
       return { success: false, error: (error as Error).message };
     }

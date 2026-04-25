@@ -38,6 +38,18 @@ export const PageSnapshotSchema = z.object({
 });
 export type PageSnapshot = z.infer<typeof PageSnapshotSchema>;
 
+export const NestedContextSchema = z.object({
+  isShadowDom: z.boolean().optional(),
+  shadowHostTag: z.string().nullable().optional(),
+  isIframe: z.boolean().optional(),
+  iframeSrc: z.string().nullable().optional(),
+  iframeName: z.string().nullable().optional(),
+  iframeSameOrigin: z.boolean().nullable().optional(),
+  degraded: z.boolean().optional(),
+  degradedReason: z.string().nullable().optional(),
+});
+export type NestedContext = z.infer<typeof NestedContextSchema>;
+
 /** Base fields shared by all events */
 const BaseEventSchema = z.object({
   id: z.string().uuid().optional().catch(() => crypto.randomUUID()), // Safe fallback if ID is stripped
@@ -46,8 +58,10 @@ const BaseEventSchema = z.object({
   sessionId: z.string()
     .min(1, 'Session ID required')
     .regex(/^session-[a-f0-9-]+$/, 'Invalid session ID format'),
+  tabId: z.string().nullable().optional(),
   pageUrl: z.string().optional(), // Strictly optional to fix the Zod missing url error
   normalizedUrl: z.string().optional(),
+  nestedContext: NestedContextSchema.optional(),
   schemaVersion: z.string().optional(),
 });
 
@@ -69,6 +83,9 @@ export const InputEventSchema = BaseEventSchema.extend({
   viewport: ViewportSchema.optional(),
   fingerprint: ElementFingerprintSchema.nullable().optional(),
   inputValueMasked: z.string().optional(),
+  pageSnapshot: PageSnapshotSchema.nullable().optional(),
+  pageState: PageSnapshotSchema.nullable().optional(),
+  interactionContext: PageSnapshotSchema.nullable().optional(),
   // Fix (Bug #3): these three fields were sent by the interceptor but stripped by Zod.
   // trigger distinguishes a committed value (blur/change) from a mid-typing heartbeat
   // (input:progress). graph-builder uses it to gate Branch A. Optional so events
@@ -84,11 +101,13 @@ export const SubmitEventSchema = BaseEventSchema.extend({
   pageTitle: z.string().optional(),
   viewport: ViewportSchema.optional(),
   fingerprint: ElementFingerprintSchema.nullable().optional(),
+  pageSnapshot: PageSnapshotSchema.nullable().optional(),
   meta: z.object({
     eventType: z.string(),
     formId: z.string().optional(),
   }).catchall(z.unknown()).optional(),
   pageState: PageSnapshotSchema.nullable().optional(),
+  interactionContext: PageSnapshotSchema.nullable().optional(),
 });
 
 /** Action Event: Scroll */
@@ -155,7 +174,7 @@ export const HoverEventSchema = BaseEventSchema.extend({
     domChanged: z.boolean(),
     nodesAdded: z.number(),
     nodesRemoved: z.number()
-  }).optional()
+  }).catchall(z.unknown()).optional()
 });
 
 /** Advanced Event: Custom Select (Div-based dropdowns) */
@@ -170,6 +189,9 @@ export const CustomSelectEventSchema = BaseEventSchema.extend({
   }).optional(),
   triggerFingerprint: ElementFingerprintSchema.nullable().optional(),
   fingerprint: ElementFingerprintSchema.nullable().optional(),
+  pageSnapshot: PageSnapshotSchema.nullable().optional(),
+  pageState: PageSnapshotSchema.nullable().optional(),
+  interactionContext: PageSnapshotSchema.nullable().optional(),
   meta: z.record(z.string(), z.unknown()).optional(),
 });
 

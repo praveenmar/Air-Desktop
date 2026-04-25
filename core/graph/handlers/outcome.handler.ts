@@ -47,21 +47,46 @@ export class OutcomeHandler {
     );
   }
 
-  public async handleOutcome(event: OutcomeEvent, traceId: string, currentNodeId: string): Promise<void> {
-    const pending = await this.pendingRepo.find(traceId);
+  public async handleOutcome(event: OutcomeEvent, traceId: string, currentNodeId: string, tabId: string): Promise<void> {
+    const sessionId = event.sessionId ?? null;
+    if (!sessionId) {
+      await this.logWithContext('warn', 'Orphaned OUTCOME event - missing session for scoped lookup', {
+        tabId,
+      }, null, traceId ?? null);
+      return;
+    }
+
+    await this.logWithContext('debug', 'PENDING_ACTION_EXACT_SCOPED_LOOKUP', {
+      tabId,
+      lookupScope: 'session_tab_trace',
+    }, sessionId, traceId ?? null);
+
+    const pending = await this.pendingRepo.findByTraceSessionAndTab(traceId, sessionId, tabId);
 
     if (pending) {
       await this.logWithContext('decision', 'Found PENDING ACTION for outcome', {
         fromNode: pending.fromNodeId,
         toNode: currentNodeId,
+        tabId,
       }, pending.sessionId ?? event.sessionId ?? null, traceId ?? null);
 
       await this.createExplicitEdge(pending.fromNodeId, currentNodeId, pending, event);
-      await this.pendingRepo.resolve(traceId);
+      const resolvedCount = await this.pendingRepo.resolve(traceId, sessionId, tabId);
+      await this.logWithContext('debug', 'PENDING_ACTION_SCOPED_RESOLVED', {
+        tabId,
+        resolvedCount,
+        resolveScope: 'session_tab_trace',
+      }, sessionId, traceId ?? null);
       return;
     }
 
-    const recovered = await this.tryRecoverPendingForCrossContextOutcome(event, traceId, currentNodeId);
+    await this.logWithContext('debug', 'PENDING_ACTION_EXACT_SCOPE_MISS', {
+      tabId,
+      reason: 'no_pending_action_for_trace_session_and_tab',
+      lookupScope: 'session_tab_trace',
+    }, sessionId, traceId ?? null);
+
+    const recovered = await this.tryRecoverPendingForCrossContextOutcome(event, traceId, currentNodeId, tabId);
     if (recovered) {
       return;
     }
@@ -86,15 +111,17 @@ export class OutcomeHandler {
   private async tryRecoverPendingForCrossContextOutcome(
     event: OutcomeEvent,
     traceId: string,
-    currentNodeId: string
+    currentNodeId: string,
+    tabId: string
   ): Promise<boolean> {
     const sessionId = event.sessionId ?? null;
     if (!sessionId) return false;
 
     const eventTimestamp = Number.isFinite(event.timestamp) ? event.timestamp : Date.now();
     const createdAfterMs = eventTimestamp - FALLBACK_PENDING_LOOKBACK_MS;
-    const recentPending = await this.pendingRepo.findRecentPendingForSession(
+    const recentPending = await this.pendingRepo.findRecentPendingForSessionAndTab(
       sessionId,
+      tabId,
       createdAfterMs,
       FALLBACK_PENDING_MAX_CANDIDATES
     );
@@ -106,6 +133,7 @@ export class OutcomeHandler {
     if (recentPending.length > 1) {
       await this.logWithContext('warn', 'Skipped fallback pending recovery due to ambiguity', {
         candidates: recentPending.map(candidate => candidate.traceId),
+        tabId,
       }, sessionId, traceId ?? null);
       return false;
     }
@@ -128,11 +156,12 @@ export class OutcomeHandler {
         candidateTraceId: candidate.traceId,
         normalizedTriggerUrl,
         normalizedOutcomeUrl,
+        tabId,
       }, sessionId, traceId ?? null);
       return false;
     }
 
-    await this.logWithContext('decision', 'Recovered pending action for cross-context outcome', {
+    await this.logWithContext('decision', 'PENDING_ACTION_TAB_SCOPED_RECOVERED', {
       fallbackTraceId: candidate.traceId,
       fromNode: candidate.fromNodeId,
       toNode: currentNodeId,
@@ -140,10 +169,17 @@ export class OutcomeHandler {
       normalizedOutcomeUrl,
       explicitNavigation,
       urlChanged,
+      tabId,
     }, sessionId, traceId ?? null);
 
     await this.createExplicitEdge(candidate.fromNodeId, currentNodeId, candidate, event);
-    await this.pendingRepo.resolve(candidate.traceId);
+    const resolvedCount = await this.pendingRepo.resolve(candidate.traceId, sessionId, tabId);
+    await this.logWithContext('debug', 'PENDING_ACTION_SCOPED_RESOLVED', {
+      tabId,
+      resolvedCount,
+      resolveScope: 'session_tab_trace',
+      fallbackTraceId: candidate.traceId,
+    }, sessionId, traceId ?? null);
     return true;
   }
 

@@ -52,13 +52,54 @@ export class SessionManager {
     return created;
   }
 
-  public async updatePointer(sessionId: string | null | undefined, nodeId: string): Promise<void> {
-    if (!sessionId) return;
-    await this.sessionRepo.updatePointer(sessionId, nodeId);
+  public async updatePointer(
+    sessionId: string | null | undefined,
+    tabId: string | null | undefined,
+    nodeId: string,
+    eventTimestamp: number | null | undefined
+  ): Promise<void> {
+    if (!sessionId || !tabId) return;
+    const safeEventTimestamp = typeof eventTimestamp === 'number' && Number.isFinite(eventTimestamp)
+      ? eventTimestamp
+      : Date.now();
+    if (tabId === 'tab-legacy') {
+      await this.logWithContext('info', 'TAB_LEGACY_FALLBACK_USED', {
+        reason: 'missing_tab_id_on_event',
+        tabId,
+        nodeId,
+        eventTimestamp: safeEventTimestamp,
+      }, sessionId, null);
+    }
+    await this.sessionRepo.updatePointerForTab(sessionId, tabId, nodeId, safeEventTimestamp);
+    await this.logWithContext('info', 'TAB_NODE_POINTER_UPDATED', {
+      tabId,
+      nodeId,
+      source: 'session_tab_state',
+      eventTimestamp: safeEventTimestamp,
+    }, sessionId, null);
   }
 
-  public async getLastNode(sessionId: string | null | undefined): Promise<string | null> {
-    if (!sessionId) return null;
-    return this.sessionRepo.getLastNode(sessionId);
+  public async getLastNode(sessionId: string | null | undefined, tabId: string | null | undefined): Promise<string | null> {
+    if (!sessionId || !tabId) return null;
+    if (tabId === 'tab-legacy') {
+      await this.logWithContext('info', 'TAB_LEGACY_FALLBACK_USED', {
+        reason: 'missing_tab_id_on_event',
+        tabId,
+      }, sessionId, null);
+    }
+    const nodeId = await this.sessionRepo.getLastNodeForTab(sessionId, tabId);
+    if (nodeId) {
+      await this.logWithContext('debug', 'TAB_NODE_POINTER_READ', {
+        tabId,
+        nodeId,
+        source: 'session_tab_state',
+      }, sessionId, null);
+      return nodeId;
+    }
+    await this.logWithContext('debug', 'TAB_NODE_POINTER_MISSING', {
+      tabId,
+      source: 'session_tab_state',
+    }, sessionId, null);
+    return null;
   }
 }

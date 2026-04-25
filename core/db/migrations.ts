@@ -60,7 +60,20 @@ const TABLES: string[] = [
 
   `CREATE INDEX IF NOT EXISTS idx_ic_session_url ON interaction_contexts(session_id, normalized_url)`,
 
-  // 🔥 STRICT events table for fresh DBs
+  `CREATE TABLE IF NOT EXISTS session_tab_state (
+    session_id TEXT NOT NULL,
+    tab_id TEXT NOT NULL,
+    last_node_id TEXT,
+    last_event_at INTEGER,
+    event_count INTEGER DEFAULT 0,
+    PRIMARY KEY (session_id, tab_id),
+    FOREIGN KEY(session_id) REFERENCES sessions(id)
+  )`,
+
+  `CREATE INDEX IF NOT EXISTS idx_session_tab_state_session ON session_tab_state(session_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_session_tab_state_last_event ON session_tab_state(last_event_at)`,
+
+  // ðŸ”¥ STRICT events table for fresh DBs
   `CREATE TABLE IF NOT EXISTS events (
     id TEXT PRIMARY KEY,
     type TEXT NOT NULL,
@@ -198,6 +211,32 @@ const MIGRATIONS: Array<{ cmd: string; name: string }> = [
     `,
     name: 'enforce_session_id_not_null',
   },
+  { cmd: 'ALTER TABLE pending_actions ADD COLUMN tab_id TEXT', name: 'pending_actions_tab_id' },
+  {
+    cmd: `CREATE INDEX IF NOT EXISTS idx_pending_session_tab_status
+      ON pending_actions(session_id, tab_id, status, created_at)`,
+    name: 'idx_pending_session_tab_status',
+  },
+  {
+    cmd: `
+      INSERT OR IGNORE INTO session_tab_state (
+        session_id,
+        tab_id,
+        last_node_id,
+        last_event_at,
+        event_count
+      )
+      SELECT
+        id,
+        'tab-legacy',
+        last_node_id,
+        last_event_at,
+        event_count
+      FROM sessions
+      WHERE last_node_id IS NOT NULL
+    `,
+    name: 'backfill_session_tab_state_legacy',
+  },
 ];
 
 export async function runMigrations(db: AsyncSQLiteDatabase): Promise<void> {
@@ -229,6 +268,11 @@ export async function runMigrations(db: AsyncSQLiteDatabase): Promise<void> {
     appliedMigrations.add(name);
   };
 
+  const tableHasColumn = async (tableName: string, columnName: string): Promise<boolean> => {
+    const columns = await db.prepare(`PRAGMA table_info(${tableName})`).all<{ name: string }>();
+    return columns.some((column) => column.name === columnName);
+  };
+
   for (const migration of MIGRATIONS) {
     if (appliedMigrations.has(migration.name)) continue;
     if (migration.name === 'enforce_session_id_not_null') {
@@ -238,6 +282,12 @@ export async function runMigrations(db: AsyncSQLiteDatabase): Promise<void> {
       }>();
       const sessionColumn = columns.find(col => col.name === 'session_id');
       if (sessionColumn?.notnull === 1) {
+        await markMigrationApplied(migration.name);
+        continue;
+      }
+    }
+    if (migration.name === 'pending_actions_tab_id') {
+      if (await tableHasColumn('pending_actions', 'tab_id')) {
         await markMigrationApplied(migration.name);
         continue;
       }

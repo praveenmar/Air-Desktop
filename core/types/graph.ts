@@ -71,6 +71,7 @@ export type Session = z.infer<typeof SessionSchema>;
 export const PendingActionSchema = z.object({
   traceId: z.string(),
   sessionId: z.string(),
+  tabId: z.string().nullable().optional(),
   fromNodeId: z.string(),
   triggerEventId: z.string(),
   actionType: z.string(),
