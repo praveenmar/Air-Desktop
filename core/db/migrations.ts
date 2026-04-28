@@ -153,7 +153,21 @@ const TABLES: string[] = [
   )`,
 
   `CREATE INDEX IF NOT EXISTS idx_logs_component ON debug_logs(component)`,
-  `CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON debug_logs(timestamp)`
+  `CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON debug_logs(timestamp)`,
+
+  `CREATE TABLE IF NOT EXISTS event_dedup_keys (
+    dedup_key TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL,
+    session_id TEXT,
+    trace_id TEXT,
+    event_type TEXT NOT NULL,
+    original_timestamp INTEGER,
+    created_at INTEGER NOT NULL
+  )`,
+
+  `CREATE INDEX IF NOT EXISTS idx_event_dedup_session_type ON event_dedup_keys(session_id, event_type)`,
+  `CREATE INDEX IF NOT EXISTS idx_event_dedup_trace ON event_dedup_keys(trace_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_event_dedup_created_at ON event_dedup_keys(created_at)`
 ];
 
 const MIGRATIONS: Array<{ cmd: string; name: string }> = [
@@ -236,6 +250,30 @@ const MIGRATIONS: Array<{ cmd: string; name: string }> = [
       WHERE last_node_id IS NOT NULL
     `,
     name: 'backfill_session_tab_state_legacy',
+  },
+  {
+    cmd: `
+      DELETE FROM outcomes
+      WHERE id NOT IN (
+        SELECT id
+        FROM (
+          SELECT
+            id,
+            ROW_NUMBER() OVER (
+              PARTITION BY edge_id, target_node_id
+              ORDER BY COALESCE(last_observed, 0) DESC, id DESC
+            ) AS row_num
+          FROM outcomes
+        )
+        WHERE row_num = 1
+      )
+    `,
+    name: 'dedupe_outcomes_edge_target',
+  },
+  {
+    cmd: `CREATE UNIQUE INDEX IF NOT EXISTS idx_outcomes_edge_target
+      ON outcomes(edge_id, target_node_id)`,
+    name: 'idx_outcomes_edge_target',
   },
 ];
 

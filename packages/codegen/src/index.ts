@@ -6,6 +6,11 @@
 // ── Core pipeline ────────────────────────────────────────────────────────────
 export { CodegenService } from './codegen.service';
 export { resolveSelectorsForSession } from './selector-resolver';
+export {
+  selectSnapshotForAction,
+  selectSnapshotForOutcome,
+  selectSnapshotForStep,
+} from './snapshot-selector';
 export type {
   ResolverConfig,
   SnapshotCache,
@@ -31,9 +36,13 @@ export type {
   OutcomeType,
   SelectorPriority,
   FingerprintData,
+  NestedContextData,
   ResolverMetadata,
   ResolverResolvedBy,
   ResolverSnapshotSource,
+  TemporalClass,
+  SnapshotSelectionProvenance,
+  SnapshotCandidateTraceEntry,
 } from './types';
 
 export type {

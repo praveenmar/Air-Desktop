@@ -396,6 +396,7 @@ class AIRInterceptor {
     this.pendingTraceId = null; // <-- Consolidated from both versions
     this.lastActionTraceId = null;
     this.lastActionTraceAt = 0;
+    this._recentSubmitClick = null;
     this.crossTabPendingTtlMs = config.crossTabPendingTtlMs ?? 45000;
     this.crossTabPendingMaxEntries = config.crossTabPendingMaxEntries ?? 20;
 
@@ -974,16 +975,670 @@ class AIRInterceptor {
     return raw.length > 0 ? this.simpleHash(raw) : null;
   }
 
+  _collapseAnchorWhitespace(text) {
+    return String(text || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  _normalizeCompositeTokenValue(text) {
+    return this._collapseAnchorWhitespace(text).toLowerCase();
+  }
+
+  _isLikelyVolatileAnchorValue(value) {
+    const normalized = this._collapseAnchorWhitespace(value);
+    if (!normalized) return true;
+    if (normalized.length > 80) return true;
+    if (/\b\d{6,}\b/.test(normalized)) return true;
+    if (/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(normalized)) return true;
+    if (/[A-Za-z0-9_-]{20,}/.test(normalized)) return true;
+    return false;
+  }
+
+  _isStableTextAnchorValue(value) {
+    const normalized = this._collapseAnchorWhitespace(value);
+    if (!normalized) return false;
+    if (normalized.length < 2 || normalized.length > 40) return false;
+    if (this._isLikelyVolatileAnchorValue(normalized)) return false;
+    return true;
+  }
+
+  _compositeToken(prefix, value) {
+    const normalized = this._normalizeCompositeTokenValue(value);
+    if (!normalized) return null;
+    return `${prefix}:${normalized}`;
+  }
+
+  _safeAnchorAttr(el, name) {
+    try {
+      return el.getAttribute(name);
+    } catch {
+      return null;
+    }
+  }
+
+  _stableAttributeToken(el, tagName = null) {
+    const tag = String(tagName || el.tagName || "node").toLowerCase();
+    const testId = this.normalizeAnchor(
+      this._safeAnchorAttr(el, "data-testid") ||
+      this._safeAnchorAttr(el, "data-cy") ||
+      this._safeAnchorAttr(el, "data-qa"),
+    );
+    if (testId && !this._isLikelyVolatileAnchorValue(testId)) {
+      return this._compositeToken(`${tag}.testid`, testId);
+    }
+
+    const id = this.normalizeAnchor(el.id || "");
+    if (id && !/\d{5,}/.test(id) && !this._isLikelyVolatileAnchorValue(id)) {
+      return this._compositeToken(`${tag}.id`, id);
+    }
+
+    const name = this.normalizeAnchor(this._safeAnchorAttr(el, "name"));
+    if (name && !this._isLikelyVolatileAnchorValue(name)) {
+      return this._compositeToken(`${tag}.name`, name);
+    }
+
+    const ariaLabel = this.normalizeAnchor(this._safeAnchorAttr(el, "aria-label"));
+    if (ariaLabel && this._isStableTextAnchorValue(ariaLabel)) {
+      return this._compositeToken(`${tag}.aria`, ariaLabel);
+    }
+
+    const role = this.normalizeAnchor(this._safeAnchorAttr(el, "role"));
+    if (role && !this._isLikelyVolatileAnchorValue(role)) {
+      return this._compositeToken(`${tag}.role`, role);
+    }
+
+    return null;
+  }
+
+  _stableTextToken(el, prefix) {
+    const text = this.normalizeAnchor(el.textContent || "");
+    if (!this._isStableTextAnchorValue(text)) return null;
+    return this._compositeToken(prefix, text);
+  }
+
+  _sortAndDedupeCompositeTokens(tokens) {
+    return [...new Set(tokens.filter((token) => typeof token === "string" && token.length > 0))]
+      .sort((left, right) => left.localeCompare(right));
+  }
+
+  _buildCompositeDescriptor(kind, scopeToken, tokens) {
+    const parts = [kind];
+    if (scopeToken) parts.push(`scope=${scopeToken}`);
+    if (tokens.length > 0) parts.push(`tokens=${tokens.join("|")}`);
+    return parts.join("|");
+  }
+
+  _extractHeadingText(container) {
+    const headings = container.querySelectorAll("h1, h2, h3, legend, [role='heading']");
+    for (const heading of headings) {
+      const text = this.normalizeAnchor(heading.textContent || "");
+      if (this._isStableTextAnchorValue(text)) return text;
+    }
+    return null;
+  }
+
+  _deriveCompositeScope(container) {
+    const scopeTag = container.tagName ? container.tagName.toLowerCase() : null;
+    const scopeRole = this._normalizeCompositeTokenValue(this._safeAnchorAttr(container, "role")) || null;
+    const scopeId = this._normalizeCompositeTokenValue(container.id || "") || null;
+    const scopeName = this._normalizeCompositeTokenValue(this._safeAnchorAttr(container, "name")) || null;
+    const labelSource =
+      this._safeAnchorAttr(container, "aria-label") ||
+      this._safeAnchorAttr(container, "aria-labelledby") ||
+      ((scopeTag === "dialog" || scopeRole === "dialog") ? this._extractHeadingText(container) : null);
+    const scopeLabel = this._isStableTextAnchorValue(labelSource)
+      ? this._normalizeCompositeTokenValue(labelSource)
+      : null;
+
+    const scopeToken =
+      this._stableAttributeToken(container, scopeTag || "scope") ||
+      (scopeLabel ? this._compositeToken(`${scopeTag || "scope"}.label`, scopeLabel) : null) ||
+      (scopeRole ? this._compositeToken(`${scopeTag || "scope"}.role`, scopeRole) : null);
+
+    return {
+      scopeTag,
+      scopeRole,
+      scopeId,
+      scopeName,
+      scopeLabel,
+      scopeToken,
+    };
+  }
+
+  _countContainerNodes(container, maxNodes = 220) {
+    let count = 0;
+    const stack = [container];
+    while (stack.length > 0 && count <= maxNodes) {
+      const current = stack.pop();
+      if (!current) continue;
+      count++;
+      for (let i = current.children.length - 1; i >= 0; i--) {
+        const child = current.children.item(i);
+        if (child instanceof Element) stack.push(child);
+      }
+    }
+    return count;
+  }
+
+  _collectCompositeControls(container, selector, maxItems = 12, maxDepth = 6) {
+    const collected = [];
+    const seen = new Set();
+    const stack = [{ node: container, depth: 0 }];
+
+    while (stack.length > 0 && collected.length < maxItems) {
+      const current = stack.pop();
+      if (!current) continue;
+
+      if (current.depth > 0 && current.node.matches(selector) && !seen.has(current.node)) {
+        collected.push(current.node);
+        seen.add(current.node);
+      }
+
+      if (current.depth >= maxDepth) continue;
+      for (let i = current.node.children.length - 1; i >= 0; i--) {
+        const child = current.node.children.item(i);
+        if (child instanceof Element) {
+          stack.push({ node: child, depth: current.depth + 1 });
+        }
+      }
+    }
+
+    return collected;
+  }
+
+  _firstStableTextToken(elements, prefix) {
+    for (const element of elements) {
+      const token = this._stableTextToken(element, prefix);
+      if (token) return token;
+      const attrToken = this._stableAttributeToken(element);
+      if (attrToken) return attrToken;
+    }
+    return null;
+  }
+
+  _getStableRowIdentifier(row) {
+    const rowToken = this._stableAttributeToken(row, "tr");
+    if (rowToken) return rowToken;
+
+    const directCells = Array.from(row.children || [])
+      .filter((child) => child && typeof child.tagName === "string")
+      .filter((child) => /^(td|th)$/i.test(child.tagName));
+    if (directCells.length === 0) return null;
+
+    const firstCell = directCells[0];
+    return (
+      this._stableAttributeToken(firstCell, firstCell.tagName.toLowerCase()) ||
+      this._stableTextToken(firstCell, "row")
+    );
+  }
+
+  _chooseStableControlToken(el) {
+    return (
+      this._stableAttributeToken(el) ||
+      this._stableTextToken(el, `${el.tagName.toLowerCase()}.text`) ||
+      (el.tagName.toLowerCase() === "input"
+        ? this._compositeToken("input.type", this.normalizeAnchor(this._safeAnchorAttr(el, "type") || "text"))
+        : null)
+    );
+  }
+
+  _buildCompositeAnchor(kind, container, tokens, confidence) {
+    const normalizedTokens = this._sortAndDedupeCompositeTokens(tokens);
+    if (normalizedTokens.length === 0) return null;
+
+    const scope = this._deriveCompositeScope(container);
+    const descriptor = this._buildCompositeDescriptor(kind, scope.scopeToken, normalizedTokens);
+    return {
+      kind,
+      scopeTag: scope.scopeTag,
+      scopeRole: scope.scopeRole,
+      scopeId: scope.scopeId,
+      scopeName: scope.scopeName,
+      scopeLabel: scope.scopeLabel,
+      tokens: normalizedTokens,
+      descriptor,
+      confidence,
+      _sortScore: confidence * 100 + normalizedTokens.length,
+    };
+  }
+
+  _scanCompositeContainers(root, selector, limit) {
+    const found = root.querySelectorAll(selector);
+    const results = [];
+    for (const element of found) {
+      if (results.length >= limit) break;
+      if (element instanceof Element) results.push(element);
+    }
+    return results;
+  }
+
+  _generateFormCompositeAnchor(form) {
+    const controls = this._collectCompositeControls(
+      form,
+      'input, select, textarea, button, [role="button"], [data-testid], [name]',
+    );
+    const fieldTokens = controls
+      .map((control) => {
+        const tag = control.tagName.toLowerCase();
+        if (tag === "button" || this._safeAnchorAttr(control, "role") === "button") {
+          return this._chooseStableControlToken(control);
+        }
+        return (
+          this._compositeToken(`${tag}.name`, this.normalizeAnchor(this._safeAnchorAttr(control, "name"))) ||
+          this._stableAttributeToken(control, tag) ||
+          this._compositeToken(`${tag}.type`, this.normalizeAnchor(this._safeAnchorAttr(control, "type")))
+        );
+      })
+      .filter(Boolean)
+      .slice(0, 12);
+
+    const formAction = this.normalizeAnchor(this._safeAnchorAttr(form, "action"));
+    const formActionToken =
+      formAction && !this._isLikelyVolatileAnchorValue(formAction)
+        ? this._compositeToken("form.action", formAction.toLowerCase())
+        : null;
+    const headingToken = this._compositeToken("form.label", this._extractHeadingText(form));
+
+    return this._buildCompositeAnchor(
+      "form_cluster",
+      form,
+      [formActionToken, headingToken, ...fieldTokens],
+      0.95,
+    );
+  }
+
+  _generateTableRowCompositeAnchors(table) {
+    const headerCells = Array.from(table.querySelectorAll("thead th, th[scope='col'], tr:first-child th"))
+      .map((cell) => this.normalizeAnchor(cell.textContent || ""))
+      .filter((text) => text.length >= 2 && text.length <= 30 && !this._isLikelyVolatileAnchorValue(text))
+      .slice(0, 6);
+    const headerTokens = headerCells.map((header) => this._compositeToken("header", header));
+    if (headerTokens.length === 0) return [];
+
+    const rows = Array.from(table.querySelectorAll("tbody tr, tr"))
+      .filter((row) => row.querySelector("td,th"))
+      .slice(0, 6);
+    const anchors = [];
+
+    for (const row of rows) {
+      const rowControls = this._collectCompositeControls(
+        row,
+        'button, [role="button"], input[type="submit"], input[type="button"], input[type="reset"], a[href]',
+        6,
+        3,
+      );
+      if (rowControls.length === 0) continue;
+
+      const rowIdentifier = this._getStableRowIdentifier(row);
+      if (!rowIdentifier) continue;
+
+      const actionTokens = rowControls
+        .map((control) => this._chooseStableControlToken(control))
+        .filter(Boolean)
+        .slice(0, 4);
+      if (actionTokens.length === 0) continue;
+
+      const anchor = this._buildCompositeAnchor(
+        "table_row",
+        row,
+        [...headerTokens, rowIdentifier, ...actionTokens],
+        0.96,
+      );
+      if (anchor) anchors.push(anchor);
+    }
+
+    return anchors;
+  }
+
+  _generateDialogCompositeAnchor(dialog) {
+    const titleToken =
+      this._compositeToken("dialog.title", this._extractHeadingText(dialog)) ||
+      this._compositeToken("dialog.label", this.normalizeAnchor(this._safeAnchorAttr(dialog, "aria-label")));
+    const actionTokens = this._collectCompositeControls(
+      dialog,
+      'button, [role="button"], input[type="submit"], input[type="button"], input[type="reset"], a[href]',
+      8,
+      5,
+    )
+      .map((control) => this._chooseStableControlToken(control))
+      .filter(Boolean)
+      .slice(0, 6);
+
+    return this._buildCompositeAnchor(
+      "dialog_actions",
+      dialog,
+      [titleToken, ...actionTokens],
+      0.93,
+    );
+  }
+
+  _generateMenuCompositeAnchor(container) {
+    const labelToken =
+      this._compositeToken("menu.label", this.normalizeAnchor(this._safeAnchorAttr(container, "aria-label"))) ||
+      this._compositeToken("menu.heading", this._extractHeadingText(container));
+    const optionTokens = this._collectCompositeControls(
+      container,
+      '[role="menuitem"], [role="option"], option, button, [role="button"], a[href], li',
+      10,
+      4,
+    )
+      .map((control) => this._chooseStableControlToken(control))
+      .filter(Boolean)
+      .slice(0, 8);
+
+    return this._buildCompositeAnchor(
+      "menu_group",
+      container,
+      [labelToken, ...optionTokens],
+      0.9,
+    );
+  }
+
+  _generateContainerCompositeAnchor(container) {
+    const controlTokens = this._collectCompositeControls(
+      container,
+      'button, [role="button"], input[type="submit"], input[type="button"], input[type="reset"], a[href]',
+      8,
+      4,
+    )
+      .map((control) => this._chooseStableControlToken(control))
+      .filter(Boolean)
+      .slice(0, 6);
+    const labelToken =
+      this._compositeToken("container.label", this.normalizeAnchor(this._safeAnchorAttr(container, "aria-label"))) ||
+      this._compositeToken("container.heading", this._extractHeadingText(container));
+
+    return this._buildCompositeAnchor(
+      "container_controls",
+      container,
+      [labelToken, ...controlTokens],
+      0.82,
+    );
+  }
+
+  _selectCompositeAnchors(candidates) {
+    const byKind = new Map();
+    for (const candidate of candidates) {
+      const list = byKind.get(candidate.kind) || [];
+      list.push(candidate);
+      byKind.set(candidate.kind, list);
+    }
+
+    const keptPerKind = [];
+    let droppedCompositeCount = 0;
+
+    byKind.forEach((list) => {
+      const sorted = [...list].sort(
+        (left, right) =>
+          right._sortScore - left._sortScore ||
+          right.confidence - left.confidence ||
+          left.descriptor.localeCompare(right.descriptor),
+      );
+      keptPerKind.push(...sorted.slice(0, 3));
+      droppedCompositeCount += Math.max(0, sorted.length - 3);
+    });
+
+    const finalAnchors = keptPerKind
+      .sort(
+        (left, right) =>
+          right._sortScore - left._sortScore ||
+          right.confidence - left.confidence ||
+          left.descriptor.localeCompare(right.descriptor),
+      )
+      .slice(0, 8);
+
+    droppedCompositeCount += Math.max(0, keptPerKind.length - finalAnchors.length);
+
+    return {
+      anchors: finalAnchors.map(({ _sortScore, ...anchor }) => anchor),
+      droppedCompositeCount,
+      skippedCompositeCount: 0,
+      finalCompositeCount: finalAnchors.length,
+      formScanMs: 0,
+      dialogScanMs: 0,
+      tableScanMs: 0,
+      menuScanMs: 0,
+      containerScanMs: 0,
+    };
+  }
+
+  _anchorNowMs() {
+    if (typeof performance !== "undefined" && typeof performance.now === "function") {
+      return performance.now();
+    }
+    return Date.now();
+  }
+
+  scanCompositeAnchorsDetailed(root = document) {
+    const candidates = [];
+    const skippedCompositeReasons = [];
+    let inspectedContainerCount = 0;
+    let skippedCompositeCount = 0;
+    let formScanMs = 0;
+    let dialogScanMs = 0;
+    let tableScanMs = 0;
+    let menuScanMs = 0;
+    let containerScanMs = 0;
+
+    const inspectContainer = (kind, container, build) => {
+      inspectedContainerCount++;
+      if (this._countContainerNodes(container, 221) > 220) {
+        skippedCompositeReasons.push("container_too_large");
+        skippedCompositeCount += 1;
+        return;
+      }
+      const built = build(container);
+      if (!built) return;
+      if (Array.isArray(built)) candidates.push(...built);
+      else candidates.push(built);
+    };
+
+    let scanStartedAt = this._anchorNowMs();
+    const forms = this._scanCompositeContainers(root, "form", 6);
+    forms.forEach((form) => inspectContainer("form_cluster", form, (container) => this._generateFormCompositeAnchor(container)));
+    formScanMs = this._anchorNowMs() - scanStartedAt;
+
+    scanStartedAt = this._anchorNowMs();
+    const dialogs = this._scanCompositeContainers(root, 'dialog, [role="dialog"]', 6);
+    dialogs.forEach((dialog) => inspectContainer("dialog_actions", dialog, (container) => this._generateDialogCompositeAnchor(container)));
+    dialogScanMs = this._anchorNowMs() - scanStartedAt;
+
+    scanStartedAt = this._anchorNowMs();
+    const tables = this._scanCompositeContainers(root, "table", 6);
+    tables.forEach((table) => inspectContainer("table_row", table, (container) => this._generateTableRowCompositeAnchors(container)));
+    tableScanMs = this._anchorNowMs() - scanStartedAt;
+
+    scanStartedAt = this._anchorNowMs();
+    const menus = this._scanCompositeContainers(root, '[role="menu"], [role="listbox"], [role="list"], nav, [role="group"]', 6);
+    menus.forEach((menu) => inspectContainer("menu_group", menu, (container) => this._generateMenuCompositeAnchor(container)));
+    menuScanMs = this._anchorNowMs() - scanStartedAt;
+
+    scanStartedAt = this._anchorNowMs();
+    const containers = this._scanCompositeContainers(
+      root,
+      'section, [role="region"], [role="group"], [role="toolbar"], [role="navigation"], main, aside',
+      6,
+    );
+    containers.forEach((container) => inspectContainer("container_controls", container, (current) => this._generateContainerCompositeAnchor(current)));
+    containerScanMs = this._anchorNowMs() - scanStartedAt;
+
+    const uniqueCandidates = candidates.filter(
+      (candidate, index, arr) =>
+        arr.findIndex((other) => other.descriptor === candidate.descriptor) === index,
+    );
+    const selected = this._selectCompositeAnchors(uniqueCandidates);
+    return {
+      anchors: selected.anchors,
+      inspectedContainerCount,
+      droppedCompositeCount: selected.droppedCompositeCount,
+      skippedCompositeReasons: [...new Set(skippedCompositeReasons)].sort(),
+      skippedCompositeCount,
+      finalCompositeCount: selected.anchors.length,
+      formScanMs,
+      dialogScanMs,
+      tableScanMs,
+      menuScanMs,
+      containerScanMs,
+    };
+  }
+
   // IMPORTANT: Must stay identical to @air/shared/src/anchor-utils.ts
   // Keep in sync until interceptor can import shared package
-  scanPageAnchors() {
+  scanCompositeAnchors(root = document) {
+    return this.scanCompositeAnchorsDetailed(root).anchors;
+  }
+
+  _nextSnapshotBuildId() {
+    this._snapshotBuildSeq = (this._snapshotBuildSeq || 0) + 1;
+    return `snapshot-build-${this._snapshotBuildSeq}`;
+  }
+
+  _trackRepeatedAnchorScan(traceId = null, normalizedUrl = null) {
+    const key = traceId || normalizedUrl || "untracked";
+    const now = Date.now();
+    const windowMs = 5000;
+    const maxEntries = 20;
+    if (!this._recentAnchorScans) {
+      this._recentAnchorScans = new Map();
+    }
+
+    for (const [existingKey, record] of this._recentAnchorScans.entries()) {
+      if (!record || (now - record.lastSeenAt) > windowMs) {
+        this._recentAnchorScans.delete(existingKey);
+      }
+    }
+
+    const current = this._recentAnchorScans.get(key);
+    const repeatedScanCount = current && (now - current.lastSeenAt) <= windowMs
+      ? current.count
+      : 0;
+    this._recentAnchorScans.set(key, {
+      count: repeatedScanCount + 1,
+      lastSeenAt: now,
+    });
+
+    while (this._recentAnchorScans.size > maxEntries) {
+      const firstKey = this._recentAnchorScans.keys().next().value;
+      if (!firstKey) break;
+      this._recentAnchorScans.delete(firstKey);
+    }
+
+    return repeatedScanCount;
+  }
+
+  _buildAnchorSnapshotData(root = document, meta = {}) {
+    let anchors = [];
+    let compositeAnchors = [];
+    let compositeResult = {
+      inspectedContainerCount: 0,
+      droppedCompositeCount: 0,
+      skippedCompositeReasons: [],
+      skippedCompositeCount: 0,
+      finalCompositeCount: 0,
+      formScanMs: 0,
+      dialogScanMs: 0,
+      tableScanMs: 0,
+      menuScanMs: 0,
+      containerScanMs: 0,
+    };
+    const snapshotBuildId = this._nextSnapshotBuildId();
+    const traceId = typeof meta.traceId === "string" && meta.traceId.length > 0
+      ? meta.traceId
+      : (this.pendingTraceId || this.lastActionTraceId || null);
+    const normalizedUrl = typeof meta.normalizedUrl === "string" && meta.normalizedUrl.length > 0
+      ? meta.normalizedUrl
+      : this.normalizeUrl(window.location.href);
+    const stage = typeof meta.stage === "string" && meta.stage.length > 0
+      ? meta.stage
+      : "snapshot";
+    const totalStartedAt = this._anchorNowMs();
+    const flatStartedAt = this._anchorNowMs();
+    let flatAnchorScanMs = 0;
+    let compositeAnchorScanMs = 0;
+
+    try {
+      anchors = this.scanPageAnchors(root);
+    } catch (_) {}
+    flatAnchorScanMs = this._anchorNowMs() - flatStartedAt;
+
+    const compositeStartedAt = this._anchorNowMs();
+    try {
+      compositeResult = this.scanCompositeAnchorsDetailed(root);
+      compositeAnchors = Array.isArray(compositeResult.anchors) ? compositeResult.anchors : [];
+    } catch (_) {}
+    compositeAnchorScanMs = this._anchorNowMs() - compositeStartedAt;
+    const totalAnchorScanMs = this._anchorNowMs() - totalStartedAt;
+    const repeatedScanCount = this._trackRepeatedAnchorScan(traceId, normalizedUrl);
+
+    if (this.config.debugMode) {
+      this.log("[ANCHOR_SCAN]", {
+        stage,
+        snapshotBuildId,
+        traceId,
+        normalizedUrl,
+        anchorScanTotalMs: Math.round(totalAnchorScanMs * 100) / 100,
+        totalAnchorScanMs: Math.round(totalAnchorScanMs * 100) / 100,
+        flatScanMs: Math.round(flatAnchorScanMs * 100) / 100,
+        flatAnchorScanMs: Math.round(flatAnchorScanMs * 100) / 100,
+        compositeScanMs: Math.round(compositeAnchorScanMs * 100) / 100,
+        compositeAnchorScanMs: Math.round(compositeAnchorScanMs * 100) / 100,
+        formScanMs: Math.round((compositeResult.formScanMs || 0) * 100) / 100,
+        dialogScanMs: Math.round((compositeResult.dialogScanMs || 0) * 100) / 100,
+        tableScanMs: Math.round((compositeResult.tableScanMs || 0) * 100) / 100,
+        menuScanMs: Math.round((compositeResult.menuScanMs || 0) * 100) / 100,
+        containerScanMs: Math.round((compositeResult.containerScanMs || 0) * 100) / 100,
+        inspectedContainerCount: compositeResult.inspectedContainerCount || 0,
+        skippedCompositeCount: compositeResult.skippedCompositeCount || 0,
+        finalCompositeCount: compositeResult.finalCompositeCount || compositeAnchors.length,
+        droppedCompositeCount: compositeResult.droppedCompositeCount || 0,
+        repeatedScanCount,
+      });
+    }
+
+    return {
+      anchors,
+      compositeAnchors,
+      anchorMetrics: {
+        snapshotBuildId,
+        traceId,
+        repeatedScanCount,
+        anchorScanTotalMs: totalAnchorScanMs,
+        totalAnchorScanMs,
+        flatScanMs: flatAnchorScanMs,
+        flatAnchorScanMs,
+        compositeScanMs: compositeAnchorScanMs,
+        compositeAnchorScanMs,
+        formScanMs: compositeResult.formScanMs || 0,
+        dialogScanMs: compositeResult.dialogScanMs || 0,
+        tableScanMs: compositeResult.tableScanMs || 0,
+        menuScanMs: compositeResult.menuScanMs || 0,
+        containerScanMs: compositeResult.containerScanMs || 0,
+        flatAnchorCount: anchors.length,
+        compositeAnchorCount: compositeAnchors.length,
+        finalCompositeCount: compositeResult.finalCompositeCount || compositeAnchors.length,
+        compositeSample: compositeAnchors.slice(0, 3).map((anchor) => anchor.descriptor),
+        droppedCompositeCount: compositeResult.droppedCompositeCount || 0,
+        inspectedContainerCount: compositeResult.inspectedContainerCount || 0,
+        skippedCompositeCount: compositeResult.skippedCompositeCount || 0,
+        skippedCompositeReason: Array.isArray(compositeResult.skippedCompositeReasons) &&
+          compositeResult.skippedCompositeReasons.includes("container_too_large")
+          ? "container_too_large"
+          : null,
+      },
+    };
+  }
+
+  // IMPORTANT: Must stay identical to @air/shared/src/anchor-utils.ts
+  // Keep in sync until interceptor can import shared package
+  scanPageAnchors(root = document) {
     const anchors = [];
     // 1. URL Path (Strongest Anchor)
     anchors.push(`URL:${window.location.pathname}`);
 
     // 2. Interactive Elements & Landmarks
     // We only care about things that define the "Function" of the page.
-    const elements = document.querySelectorAll(
+    const elements = root.querySelectorAll(
       'input, button, select, textarea, form, h1, h2, h3, [role="button"]',
     );
 
@@ -1777,15 +2432,20 @@ class AIRInterceptor {
           result = this.captureDOMFallback(Math.min(5, effectiveDepth));
         }
 
-        const anchors = this.scanPageAnchors();
         const controlSignature = this.computeControlSignature(document);
         const pageUrl = window.location.href;
         const normalizedUrl = this.normalizeUrl(pageUrl);
+        const anchorData = this._buildAnchorSnapshotData(document, {
+          stage: "page-snapshot",
+          traceId: this.pendingTraceId || this.lastActionTraceId || null,
+          normalizedUrl,
+        });
         const stabilityState = this._buildSnapshotStability(waitResult);
 
         const snapshot = {
           html: result?.html || "",
-          anchors,
+          anchors: anchorData.anchors,
+          compositeAnchors: anchorData.compositeAnchors,
           controlSignature,
           normalizedUrl,
           isStable: stabilityState.isStable,
@@ -1802,6 +2462,7 @@ class AIRInterceptor {
             busyAtCapture: stabilityState.busy,
             busyReasons: stabilityState.busyReasons,
             forcedCapture: stabilityState.forcedCapture,
+            ...anchorData.anchorMetrics,
             totalMs: Math.round(performance.now() - start),
           },
         };
@@ -1904,9 +2565,15 @@ class AIRInterceptor {
       busy: stabilityState.busy === true,
     });
 
+    const anchorData = this._buildAnchorSnapshotData(document, {
+      stage: "ic-full-page",
+      traceId: this.pendingTraceId || this.lastActionTraceId || null,
+      normalizedUrl,
+    });
     const snapshot = {
       html: result.html,
-      anchors: this.scanPageAnchors(),
+      anchors: anchorData.anchors,
+      compositeAnchors: anchorData.compositeAnchors,
       controlSignature: controlSig,
       normalizedUrl,
       isStable: stabilityState.isStable,
@@ -1925,6 +2592,7 @@ class AIRInterceptor {
         busyAtCapture: stabilityState.busy,
         busyReasons: stabilityState.busyReasons,
         forcedCapture: stabilityState.forcedCapture,
+        ...anchorData.anchorMetrics,
       },
     };
     this._logSnapshotDiagnostics("ic-full-page", snapshot);
@@ -1965,10 +2633,26 @@ class AIRInterceptor {
     }
 
     let anchors = [];
+    let compositeAnchors = [];
+    let anchorMetrics = {
+      flatAnchorCount: 0,
+      compositeAnchorCount: 0,
+      compositeSample: [],
+      droppedCompositeCount: 0,
+      inspectedContainerCount: 0,
+      skippedCompositeReason: null,
+    };
     let controlSignature = null;
 
     try {
-      anchors = this.scanPageAnchors();
+      const anchorData = this._buildAnchorSnapshotData(document, {
+        stage: "subtree-snapshot",
+        traceId: this.pendingTraceId || this.lastActionTraceId || null,
+        normalizedUrl,
+      });
+      anchors = anchorData.anchors;
+      compositeAnchors = anchorData.compositeAnchors;
+      anchorMetrics = anchorData.anchorMetrics;
     } catch (_) {}
 
     try {
@@ -1983,6 +2667,7 @@ class AIRInterceptor {
     return {
       html: bestHtml,
       anchors,
+      compositeAnchors,
       controlSignature,
       normalizedUrl,
       isStable: stabilityState.isStable,
@@ -1992,6 +2677,7 @@ class AIRInterceptor {
       metrics: {
         subtree: true,
         maxChars,
+        ...anchorMetrics,
         contentReady: stabilityState.contentReady,
         settleStable: stabilityState.settleStable,
         busyAtCapture: stabilityState.busy,
@@ -3311,6 +3997,44 @@ class AIRInterceptor {
     return this.lastActionTraceId;
   }
 
+  _isSubmitLikeElement(element) {
+    if (!element || typeof element.tagName !== "string") return false;
+    const tagName = element.tagName.toUpperCase();
+    const inputType = String(element.type || "").toLowerCase();
+
+    if (tagName === "BUTTON") {
+      return inputType !== "button" && inputType !== "reset";
+    }
+
+    if (tagName === "INPUT") {
+      return inputType === "submit" || inputType === "image";
+    }
+
+    return false;
+  }
+
+  _rememberRecentSubmitClick(form, traceId) {
+    if (!form || !traceId) return;
+    this._recentSubmitClick = {
+      form,
+      traceId,
+      createdAt: Date.now(),
+    };
+  }
+
+  _consumeRecentSubmitTrace(form, maxAgeMs = 2000) {
+    const recent = this._recentSubmitClick;
+    if (!recent) return null;
+
+    this._recentSubmitClick = null;
+
+    if (!form || recent.form !== form) return null;
+    if (!recent.traceId || typeof recent.traceId !== "string") return null;
+    if (!recent.createdAt || (Date.now() - recent.createdAt) > maxAgeMs) return null;
+
+    return recent.traceId;
+  }
+
   /** Build a stable string key that identifies a specific form field. */
   _fieldKey(element) {
     return [
@@ -3978,6 +4702,12 @@ class AIRInterceptor {
 
     // 2. Generate ONE Shared Trace ID for both events
     const traceId = this._createActionTraceId();
+    const submitForm = this._isSubmitLikeElement(target) && typeof target.closest === "function"
+      ? target.closest("form")
+      : null;
+    if (submitForm) {
+      this._rememberRecentSubmitClick(submitForm, traceId);
+    }
     const syntheticHoverCandidate = this._findSyntheticHoverCandidate(target);
     if (syntheticHoverCandidate) {
       this._emitSyntheticHover(syntheticHoverCandidate, traceId);
@@ -4496,7 +5226,13 @@ class AIRInterceptor {
       : target;
     const captureTarget = formTarget && formTarget.tagName ? formTarget : null;
     const fingerprint = this.generateFingerprint(captureTarget);
-    const traceId = this._createActionTraceId();
+    const reusedTraceId = captureTarget && captureTarget.tagName === "FORM"
+      ? this._consumeRecentSubmitTrace(captureTarget)
+      : null;
+    const traceId = reusedTraceId || this._createActionTraceId();
+    if (reusedTraceId) {
+      this._markActionTrace(traceId);
+    }
 
     const pageUrl = window.location.href;
     const normalizedUrl = this.normalizeUrl(pageUrl);

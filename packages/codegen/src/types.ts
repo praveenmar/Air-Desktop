@@ -53,13 +53,70 @@ export type ResolverResolvedBy =
   | 'llm-accepted'
   | 'unresolved';
 
-export type ResolverSnapshotSource = 'latest' | 'latest-stable' | 'unavailable';
+export type TemporalClass =
+  | 'pre_action'
+  | 'action_local'
+  | 'post_action'
+  | 'outcome_state'
+  | 'unknown';
+
+export type ResolverSnapshotSource =
+  | 'event-local-pageState'
+  | 'event-local-pageSnapshot'
+  | 'source-node-snapshot'
+  | 'interaction-context-exact'
+  | 'interaction-context-stable-by-url'
+  | 'interaction-context-any-by-url'
+  | 'outcome-event-snapshot'
+  | 'destination-node-snapshot'
+  | 'url-event-fallback'
+  | 'latest'
+  | 'latest-stable'
+  | 'unavailable';
+
+export interface NestedContextData {
+  isShadowDom?: boolean;
+  shadowHostTag?: string | null;
+  isIframe?: boolean;
+  iframeSrc?: string | null;
+  iframeName?: string | null;
+  iframeSameOrigin?: boolean | null;
+  degraded?: boolean;
+  degradedReason?: string | null;
+}
+
+export interface SnapshotSelectionProvenance {
+  source: ResolverSnapshotSource;
+  temporalClass: TemporalClass;
+  reason: string;
+  eventId?: string;
+  sourceNodeId?: string;
+  timestamp?: number;
+  confidenceScore?: number;
+}
+
+export interface SnapshotCandidateTraceEntry {
+  source: ResolverSnapshotSource;
+  temporalClass: TemporalClass;
+  selected: boolean;
+  reason?: string;
+  skipReason?: string;
+  eventId?: string;
+  sourceNodeId?: string;
+  timestamp?: number;
+  confidenceScore?: number;
+  targetPresent?: boolean;
+  shadowDegraded?: boolean;
+}
 
 export interface ResolverMetadata {
   resolvedSelector: string;
   resolvedBy: ResolverResolvedBy;
   bestScore: number;
   effectiveMatchCount: number;
+  matchCount?: number;
+  confidenceScore?: number;
+  ambiguityReason?: string | null;
   snapshotSource: ResolverSnapshotSource;
   validationMethod: string;
   llmAttempted: boolean;
@@ -68,6 +125,14 @@ export interface ResolverMetadata {
   rejectReason: string | null;
   warningCodes: string[];
   resolverVersion: 1;
+  temporalClass?: TemporalClass;
+  selectionReason?: string | null;
+  snapshotSelection?: SnapshotSelectionProvenance;
+  evaluatedCandidates?: SnapshotCandidateTraceEntry[];
+  excerptBuildTotalMs?: number;
+  pruneMs?: number;
+  redactMs?: number;
+  finalExcerptChars?: number;
 }
 
 export interface FingerprintData {
@@ -88,6 +153,18 @@ export interface FingerprintData {
 export interface CodegenStep {
   /** 1-based step index — used as the @air-step breadcrumb in generated code */
   step: number;
+
+  /** Raw AIR event identity for exact event-local snapshot selection. */
+  eventId?: string;
+
+  /** Raw AIR trace identity for provenance and outcome correlation. */
+  traceId?: string;
+
+  /** Original event timestamp used for state-window selection and provenance. */
+  timestamp?: number;
+
+  /** Additive per-step tab identity for state-bounded selection when available. */
+  tabId?: string | null;
 
   /**
    * Semantic intent — the "why" behind this action.
@@ -121,6 +198,9 @@ export interface CodegenStep {
   /** Original captured fingerprint payload for resolver diagnostics and candidate hints. */
   fingerprint?: FingerprintData;
 
+  /** Additive nested-context metadata for shadow DOM / iframe handling. */
+  nestedContext?: NestedContextData;
+
   /** Optional control signature tied to the captured UI state for IC snapshot lookup. */
   controlSignature?: string;
 
@@ -140,6 +220,9 @@ export interface CodegenStep {
    * Used by the code generator to emit waitForURL() assertions.
    */
   navigatesTo?: string;
+
+  /** Destination node used for outcome-state snapshot fallback when available. */
+  destinationNodeId?: string;
 
   /**
    * Assertions to verify AFTER this specific step completes.
@@ -228,6 +311,15 @@ export interface CodegenAssertion {
    * anchor-derived assertions from high-sample nodes score higher.
    */
   confidence: number;
+
+  /**
+   * Additive 2.2A observability for destination-state assertion routing.
+   * Populated only for DOM-backed assertions resolved against outcome-mode
+   * snapshot selection. URL/title assertions do not use this path.
+   */
+  assertionSnapshotSelection?: SnapshotSelectionProvenance;
+  assertionCandidateTrace?: SnapshotCandidateTraceEntry[];
+  assertionTemporalClass?: TemporalClass;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

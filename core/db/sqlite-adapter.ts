@@ -1,5 +1,4 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { DatabaseSync, StatementSync } from 'node:sqlite';
 
 export interface AsyncRunResult {
   changes: number;
@@ -25,8 +24,41 @@ interface TransactionContext {
   txId: number;
 }
 
+interface StatementSyncLike {
+  run(...params: any[]): { changes?: number; lastInsertRowid?: number | bigint };
+  get(...params: any[]): any;
+  all(...params: any[]): any[];
+}
+
+interface DatabaseSyncLike {
+  exec(sql: string): void;
+  prepare(sql: string): StatementSyncLike;
+  close(): void;
+}
+
+type DatabaseSyncCtor = new (filename: string) => DatabaseSyncLike;
+
+function loadDatabaseSyncCtor(): DatabaseSyncCtor {
+  try {
+    // Lazy load avoids Vite/Vitest builtin resolution issues while preserving
+    // the same Node runtime dependency in production.
+    const dynamicRequire = typeof require === 'function' ? require : null;
+    if (!dynamicRequire) {
+      throw new Error('require is unavailable in this runtime');
+    }
+    const mod = dynamicRequire('node:sqlite') as { DatabaseSync?: DatabaseSyncCtor };
+    if (typeof mod?.DatabaseSync === 'function') {
+      return mod.DatabaseSync;
+    }
+  } catch {
+    // Handled by explicit throw below.
+  }
+
+  throw new Error('node:sqlite is unavailable. Use a Node.js runtime that provides node:sqlite (Node 22+).');
+}
+
 class NodeSqliteAsyncStatement implements AsyncStatement {
-  private statement: StatementSync;
+  private statement: StatementSyncLike;
 
   constructor(
     private readonly db: NodeSqliteAsyncDatabase,
@@ -55,7 +87,7 @@ class NodeSqliteAsyncStatement implements AsyncStatement {
 }
 
 export class NodeSqliteAsyncDatabase implements AsyncSQLiteDatabase {
-  public readonly raw: DatabaseSync;
+  public readonly raw: DatabaseSyncLike;
   private closed = false;
   private gate: Promise<void> = Promise.resolve();
   private txCounter = 0;
@@ -63,6 +95,7 @@ export class NodeSqliteAsyncDatabase implements AsyncSQLiteDatabase {
   private readonly txStorage = new AsyncLocalStorage<TransactionContext>();
 
   constructor(dbPath: string) {
+    const DatabaseSync = loadDatabaseSyncCtor();
     this.raw = new DatabaseSync(dbPath);
   }
 

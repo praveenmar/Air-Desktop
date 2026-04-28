@@ -30,11 +30,17 @@ export interface ProcessResult {
 }
 
 export class GraphBuilder {
+  private static readonly SPA_ROUTE_DUPLICATE_WINDOW_MS = 5_000;
+  private static readonly SEMANTIC_DUPLICATE_NEAR_TIME_MS = 3_000;
+  private static readonly STALE_TOLERANCE_MS = 5_000;
+  private static readonly CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
+  private static readonly DEDUP_KEY_TTL_MS = 48 * 60 * 60 * 1000;
   private sessionManager: SessionManager;
   private baselineHandler: BaselineHandler;
   private actionHandler: ActionHandler;
   private outcomeHandler: OutcomeHandler;
   private cleanupInterval: NodeJS.Timeout | null = null;
+  private cleanupTickRunning = false;
 
   constructor(
     private db: AsyncSQLiteDatabase,
@@ -240,6 +246,215 @@ export class GraphBuilder {
       : 'tab-legacy';
   }
 
+  private normalizeDedupPart(value: unknown): string {
+    if (value == null) return '';
+    return String(value).trim().replace(/\s+/g, ' ').toLowerCase();
+  }
+
+  private normalizeOutcomeSettleType(settleType: unknown): string {
+    if (typeof settleType === 'string') {
+      return this.normalizeDedupPart(settleType);
+    }
+    if (settleType && typeof settleType === 'object') {
+      const stable = (settleType as Record<string, unknown>).stable;
+      const reason = (settleType as Record<string, unknown>).reason;
+      return this.normalizeDedupPart(`${stable ?? ''}:${reason ?? ''}`);
+    }
+    return '';
+  }
+
+  private shouldComputeSemanticDedupKey(event: AIREvent): boolean {
+    const traceId = typeof event.traceId === 'string' ? event.traceId : '';
+    if (traceId.startsWith('baseline-')) {
+      return false;
+    }
+
+    return ['click', 'submit', 'custom-select', 'outcome', 'spa-route-change'].includes(event.type);
+  }
+
+  private isCommittedInputEvent(event: AIREvent): boolean {
+    return event.type === 'input' && (event as any).trigger !== 'input:progress';
+  }
+
+  private isPointerDependentEvent(event: AIREvent): boolean {
+    return event.type === 'click'
+      || event.type === 'submit'
+      || event.type === 'custom-select'
+      || this.isCommittedInputEvent(event);
+  }
+
+  private buildSemanticDedupComputation(event: AIREvent, tabId: string): {
+    dedupKey: string;
+    keyPartsSummary: {
+      selectorUsed: string | null;
+      attributesHashUsed: string | null;
+      normalizedUrl: string | null;
+      type: string;
+    };
+  } | null {
+    if (!this.shouldComputeSemanticDedupKey(event)) {
+      return null;
+    }
+
+    const fingerprint = 'fingerprint' in event ? event.fingerprint : null;
+    const selectorUsed = typeof fingerprint?.selector === 'string' ? fingerprint.selector : null;
+    const attributesHashUsed = typeof fingerprint?.attributesHash === 'string' ? fingerprint.attributesHash : null;
+    const normalizedUrl = typeof event.normalizedUrl === 'string' ? event.normalizedUrl : null;
+
+    const baseParts = [
+      'v1',
+      `session:${this.normalizeDedupPart(event.sessionId)}`,
+      `tab:${this.normalizeDedupPart(tabId)}`,
+      `trace:${this.normalizeDedupPart(event.traceId)}`,
+      `type:${this.normalizeDedupPart(event.type)}`,
+      `url:${this.normalizeDedupPart(normalizedUrl)}`,
+    ];
+
+    const eventSpecificParts: string[] = [];
+
+    if (event.type === 'click' || event.type === 'submit') {
+      eventSpecificParts.push(
+        `selector:${this.normalizeDedupPart(selectorUsed)}`,
+        `attributesHash:${this.normalizeDedupPart(attributesHashUsed)}`,
+      );
+
+      if (event.type === 'submit') {
+        eventSpecificParts.push(
+          `form:${this.normalizeDedupPart((event.meta as Record<string, unknown> | undefined)?.formId)}`,
+          `eventType:${this.normalizeDedupPart((event.meta as Record<string, unknown> | undefined)?.eventType)}`,
+        );
+      } else {
+        eventSpecificParts.push(
+          `parent:${this.normalizeDedupPart(fingerprint?.parentSelector)}`,
+        );
+      }
+    } else if (event.type === 'custom-select') {
+      const customSelectEvent = event as any;
+      eventSpecificParts.push(
+        `selector:${this.normalizeDedupPart(selectorUsed)}`,
+        `attributesHash:${this.normalizeDedupPart(attributesHashUsed)}`,
+        `value:${this.normalizeDedupPart(customSelectEvent.selection?.value)}`,
+        `label:${this.normalizeDedupPart(customSelectEvent.selection?.label)}`,
+      );
+    } else if (event.type === 'outcome') {
+      eventSpecificParts.push(
+        `after:${this.normalizeDedupPart((event.meta as Record<string, unknown> | undefined)?.urlAfter || normalizedUrl)}`,
+        `settle:${this.normalizeOutcomeSettleType((event.meta as Record<string, unknown> | undefined)?.settleType)}`,
+      );
+    } else if (event.type === 'spa-route-change') {
+      const spaEvent = event as any;
+      eventSpecificParts.push(
+        `from:${this.normalizeDedupPart(spaEvent.navigation?.from)}`,
+        `to:${this.normalizeDedupPart(spaEvent.navigation?.to)}`,
+        `change:${this.normalizeDedupPart(spaEvent.changeType)}`,
+      );
+    }
+
+    const rawKey = [...baseParts, ...eventSpecificParts].join('|');
+    const dedupKey = crypto.createHash('sha256').update(rawKey).digest('hex');
+
+    return {
+      dedupKey,
+      keyPartsSummary: {
+        selectorUsed,
+        attributesHashUsed,
+        normalizedUrl,
+        type: event.type,
+      },
+    };
+  }
+
+  private async recordSemanticDedupShadowSignal(event: AIREvent, traceId: string, tabId: string): Promise<void> {
+    const computed = this.buildSemanticDedupComputation(event, tabId);
+    if (!computed) {
+      return;
+    }
+
+    const inserted = await this.eventRepo.insertDedupKeyIfAbsent({
+      dedupKey: computed.dedupKey,
+      eventId: event.id,
+      sessionId: event.sessionId ?? null,
+      traceId: traceId ?? null,
+      eventType: event.type,
+      originalTimestamp: Number.isFinite(event.timestamp) ? event.timestamp : null,
+      createdAt: Date.now(),
+    });
+
+    if (inserted) {
+      return;
+    }
+
+    const existing = await this.eventRepo.findDedupKeyByKey(computed.dedupKey);
+    const previousEventTimestamp = Number.isFinite(existing?.originalTimestamp)
+      ? Number(existing?.originalTimestamp)
+      : null;
+    const originalTimestamp = Number.isFinite(event.timestamp) ? event.timestamp : null;
+    const deltaMs =
+      originalTimestamp != null && previousEventTimestamp != null
+        ? Math.abs(originalTimestamp - previousEventTimestamp)
+        : null;
+    const duplicateTimingClass =
+      deltaMs != null && deltaMs < GraphBuilder.SEMANTIC_DUPLICATE_NEAR_TIME_MS
+        ? 'near_time_possible_double_click'
+        : 'delayed_replay_candidate';
+
+    await this.logWithContext('info', 'SEMANTIC_DUPLICATE_DETECTED', {
+      eventId: event.id,
+      previousEventId: existing?.eventId ?? null,
+      originalTimestamp,
+      previousEventTimestamp,
+      deltaMs,
+      duplicateTimingClass,
+      keyPartsSummary: computed.keyPartsSummary,
+      dedupKey: computed.dedupKey,
+      tabId,
+    }, event.sessionId ?? null, traceId ?? null);
+  }
+
+  private async shouldSuppressSpaSyntheticOutcome(
+    event: AIREvent,
+    traceId: string,
+    tabId: string,
+  ): Promise<{
+    suppress: boolean;
+    latestOutcomeTimestamp: number | null;
+    latestOutcomeEventId: string | null;
+  }> {
+    const sessionId = event.sessionId ?? null;
+    if (!sessionId || !traceId) {
+      return {
+        suppress: false,
+        latestOutcomeTimestamp: null,
+        latestOutcomeEventId: null,
+      };
+    }
+
+    const latestOutcome = await this.eventRepo.findLatestOutcomeByTraceSessionAndTab(
+      traceId,
+      sessionId,
+      tabId,
+    );
+
+    if (!latestOutcome) {
+      return {
+        suppress: false,
+        latestOutcomeTimestamp: null,
+        latestOutcomeEventId: null,
+      };
+    }
+
+    const routeTimestamp = Number.isFinite(event.timestamp) ? event.timestamp : Date.now();
+    const suppress =
+      latestOutcome.timestamp < routeTimestamp &&
+      (routeTimestamp - latestOutcome.timestamp) <= GraphBuilder.SPA_ROUTE_DUPLICATE_WINDOW_MS;
+
+    return {
+      suppress,
+      latestOutcomeTimestamp: latestOutcome.timestamp,
+      latestOutcomeEventId: latestOutcome.id,
+    };
+  }
+
   public async getStats(): Promise<GraphStats> {
     try {
       const nodes = await this.db.prepare('SELECT COUNT(*) as count FROM nodes').get<{ count: number }>();
@@ -296,28 +511,6 @@ export class GraphBuilder {
       return { success: false, error: 'Missing sessionId' };
     }
 
-    try {
-      const existing = await this.eventRepo.findById(safeEventId);
-      if (existing) {
-        await this.logWithContext('warn', 'Event stage: duplicate event ID detected - skipping graph work', {
-          eventId: safeEventId,
-          type: event.type,
-        }, sessionId ?? null, traceId ?? null);
-        await this.logGraphResult(
-          'warn',
-          event,
-          safeEventId,
-          traceId ?? null,
-          event.tabId ?? 'tab-legacy',
-          existing.node_id ?? null,
-          { success: true, stage: 'duplicate_skipped', duplicate: true }
-        );
-        return { success: true, eventId: safeEventId, duplicate: true };
-      }
-    } catch (error) {
-      await this.logWithContext('error', 'Failed to check for duplicate', { error: (error as Error).message }, sessionId ?? null, traceId ?? null);
-    }
-
     const normalizedEvent = {
       ...event,
       id: safeEventId,
@@ -341,8 +534,19 @@ export class GraphBuilder {
         const isScroll = normalizedEvent.type === 'scroll';
         const isSubmit = normalizedEvent.type === 'submit';
         const isCustomSelect = normalizedEvent.type === 'custom-select';
+        const isPointerDependentEvent = this.isPointerDependentEvent(normalizedEvent);
         const usesEventLocalSnapshotPolicy = isInput || isSubmit || isCustomSelect;
-        const lastNodeId = await this.sessionManager.getLastNode(normalizedEvent.sessionId, effectiveTabId);
+        const tabState = await this.sessionManager.getTabState(normalizedEvent.sessionId, effectiveTabId);
+        const lastNodeId = tabState?.lastNodeId ?? null;
+        const pointerTimestamp = tabState?.lastEventAt ?? null;
+        const eventTimestamp = Number.isFinite(normalizedEvent.timestamp) ? normalizedEvent.timestamp : null;
+        const isStalePointerEvent = !!(
+          isPointerDependentEvent &&
+          eventTimestamp != null &&
+          pointerTimestamp != null &&
+          eventTimestamp < (pointerTimestamp - GraphBuilder.STALE_TOLERANCE_MS)
+        );
+        const effectiveLastNodeId = isStalePointerEvent ? null : lastNodeId;
         const hasSessionAndTrace =
           typeof event.sessionId === 'string' &&
           event.sessionId.length > 0 &&
@@ -350,7 +554,7 @@ export class GraphBuilder {
           event.traceId.length > 0;
 
         const fallbackDecision = usesEventLocalSnapshotPolicy
-          ? this.evaluateEventLocalSnapshotFallback(normalizedEvent, lastNodeId, hasSessionAndTrace)
+          ? this.evaluateEventLocalSnapshotFallback(normalizedEvent, effectiveLastNodeId, hasSessionAndTrace)
           : { eligible: false, reason: 'not_event_local_snapshot_type', snapshotSource: null as null };
 
         const eventForGraph = fallbackDecision.eligible
@@ -366,7 +570,24 @@ export class GraphBuilder {
           delete slimPayload.pageSnapshot;
           delete slimPayload.pageState;
         }
-        await this.eventRepo.insert(slimPayload as AIREvent, intent, intentRaw);
+        const inserted = await this.eventRepo.insertIfAbsent(slimPayload as AIREvent, intent, intentRaw);
+        if (!inserted) {
+          await this.logWithContext('warn', 'Event stage: duplicate event ID detected - skipping graph work', {
+            eventId: safeEventId,
+            type: event.type,
+          }, sessionId ?? null, traceId ?? null);
+          await this.logGraphResult(
+            'warn',
+            event,
+            safeEventId,
+            traceId ?? null,
+            effectiveTabId,
+            null,
+            { success: true, stage: 'duplicate_skipped', duplicate: true }
+          );
+          return { success: true, eventId: safeEventId, duplicate: true, stage: 'duplicate_skipped', traceId };
+        }
+        await this.recordSemanticDedupShadowSignal(eventForGraph, traceId, effectiveTabId);
         await this.logWithContext(
           'info',
           'EVENT_PERSISTED',
@@ -450,10 +671,39 @@ export class GraphBuilder {
         }
 
         const isHeartbeat = eventForGraph.type === 'input' && (eventForGraph as any).trigger === 'input:progress';
+        const shouldBypassPointerForStaleEvent = isStalePointerEvent && isPointerDependentEvent;
 
         if (eventForGraph.sessionId && currentNodeId) {
+          if (shouldBypassPointerForStaleEvent) {
+            const deltaMs =
+              eventTimestamp != null && pointerTimestamp != null
+                ? pointerTimestamp - eventTimestamp
+                : null;
+            await this.logWithContext('warn', 'STALE_EVENT_POINTER_BYPASS', {
+              eventType: eventForGraph.type,
+              eventTimestamp,
+              pointerTimestamp,
+              deltaMs,
+              traceId,
+              tabId: effectiveTabId,
+              sessionId: eventForGraph.sessionId,
+            }, eventForGraph.sessionId ?? null, traceId ?? null);
+
+            await this.sessionManager.updatePointer(eventForGraph.sessionId, effectiveTabId, currentNodeId, eventForGraph.timestamp);
+            await this.logGraphResult(
+              'warn',
+              eventForGraph,
+              safeEventId,
+              traceId,
+              effectiveTabId,
+              currentNodeId,
+              { success: true, stage: 'stale_pointer_bypassed' }
+            );
+            return { success: true, stage: 'stale_pointer_bypassed', nodeId: currentNodeId, traceId };
+          }
+
           if (['click', 'input', 'submit', 'custom-select'].includes(eventForGraph.type) && !isHeartbeat) {
-            await this.actionHandler.handleAction(eventForGraph, traceId, currentNodeId, lastNodeId, effectiveTabId);
+            await this.actionHandler.handleAction(eventForGraph, traceId, currentNodeId, effectiveLastNodeId, effectiveTabId);
             await this.sessionManager.updatePointer(eventForGraph.sessionId, effectiveTabId, currentNodeId, eventForGraph.timestamp);
             await this.logWithContext('info', 'Event stage: action recorded, pending action registered', {
               eventId: safeEventId,
@@ -499,6 +749,37 @@ export class GraphBuilder {
 
           if (eventForGraph.type === 'spa-route-change') {
             const spaEvent = eventForGraph as any;
+            const suppression = await this.shouldSuppressSpaSyntheticOutcome(
+              eventForGraph,
+              traceId,
+              effectiveTabId,
+            );
+
+            if (suppression.suppress) {
+              await this.logWithContext('info', 'SPA_ROUTE_OBSERVATIONAL_SUPPRESSED_DUPLICATE_OUTCOME', {
+                eventId: safeEventId,
+                type: eventForGraph.type,
+                nodeId: currentNodeId,
+                traceId,
+                tabId: effectiveTabId,
+                latestOutcomeEventId: suppression.latestOutcomeEventId,
+                latestOutcomeTimestamp: suppression.latestOutcomeTimestamp,
+                duplicateWindowMs: GraphBuilder.SPA_ROUTE_DUPLICATE_WINDOW_MS,
+              }, eventForGraph.sessionId ?? null, traceId ?? null);
+
+              await this.sessionManager.updatePointer(eventForGraph.sessionId, effectiveTabId, currentNodeId, eventForGraph.timestamp);
+              await this.logGraphResult(
+                'info',
+                eventForGraph,
+                safeEventId,
+                traceId,
+                effectiveTabId,
+                currentNodeId,
+                { success: true, stage: 'spa_route_observational' }
+              );
+              return { success: true, stage: 'spa_route_observational', nodeId: currentNodeId, traceId };
+            }
+
             try {
               const syntheticOutcome = OutcomeEventSchema.parse({
                 ...eventForGraph,
@@ -587,9 +868,13 @@ export class GraphBuilder {
       clearInterval(this.cleanupInterval);
     }
 
-    this.cleanupInterval = setInterval(() => {
+    void this.runCleanupTick();
+
+    const interval = setInterval(() => {
       void this.runCleanupTick();
-    }, 15000);
+    }, GraphBuilder.CLEANUP_INTERVAL_MS);
+    interval.unref?.();
+    this.cleanupInterval = interval;
   }
 
   private async persistInteractionContext(event: AIREvent): Promise<void> {
@@ -619,6 +904,15 @@ export class GraphBuilder {
     const anchors = Array.isArray(snapshot.anchors)
       ? snapshot.anchors.filter((anchor): anchor is string => typeof anchor === 'string')
       : [];
+    const compositeAnchors = Array.isArray(snapshot.compositeAnchors)
+      ? snapshot.compositeAnchors.filter(
+          (anchor): anchor is Record<string, unknown> =>
+            !!anchor && typeof anchor === 'object' && typeof (anchor as Record<string, unknown>).descriptor === 'string',
+        )
+      : [];
+    const metrics = snapshot.metrics && typeof snapshot.metrics === 'object'
+      ? snapshot.metrics as Record<string, unknown>
+      : null;
 
     const viewport = snapshot.viewport && typeof snapshot.viewport === 'object'
       ? snapshot.viewport as Record<string, unknown>
@@ -661,6 +955,18 @@ export class GraphBuilder {
             : '',
         isStable: snapshot.isStable === false ? false : true,
         persistedIsStable: persistedRow.isStable,
+        persistenceReason: persistedRow.persistenceReason,
+        controlSignatureMissing: persistedRow.controlSignatureMissing,
+        controlSignatureReason: persistedRow.controlSignatureReason ?? null,
+        flatAnchorCount: anchors.length,
+        compositeAnchorCount: compositeAnchors.length,
+        compositeSample: compositeAnchors.slice(0, 3).map((anchor) => anchor.descriptor),
+        droppedCompositeCount:
+          typeof metrics?.droppedCompositeCount === 'number' ? metrics.droppedCompositeCount : 0,
+        inspectedContainerCount:
+          typeof metrics?.inspectedContainerCount === 'number' ? metrics.inspectedContainerCount : 0,
+        skippedCompositeReason:
+          typeof metrics?.skippedCompositeReason === 'string' ? metrics.skippedCompositeReason : null,
       }, event.sessionId ?? null, event.traceId ?? null);
     } catch (error) {
       await this.logWithContext('warn', 'Interaction context persistence failed - event pipeline continues', {
@@ -671,6 +977,11 @@ export class GraphBuilder {
   }
 
   private async runCleanupTick(): Promise<void> {
+    if (this.cleanupTickRunning) {
+      return;
+    }
+
+    this.cleanupTickRunning = true;
     try {
       const cutoffMs = Date.now() - 120_000;
       const deletedCount = await this.pendingRepo.cleanupStale(cutoffMs);
@@ -682,8 +993,31 @@ export class GraphBuilder {
       if (prunedLogs > 0) {
         await this.logWithContext('info', `Pruned ${prunedLogs} old debug log(s)`, {}, null, null);
       }
+
+      try {
+        const dedupCutoffMs = Date.now() - GraphBuilder.DEDUP_KEY_TTL_MS;
+        const deletedDedupRows = await this.eventRepo.cleanupExpiredDedupKeys(dedupCutoffMs);
+        if (deletedDedupRows > 0) {
+          await this.logWithContext('info', 'DEDUP_TTL_CLEANUP', {
+            deletedRowCount: deletedDedupRows,
+            cutoffTimestamp: dedupCutoffMs,
+            ttlMs: GraphBuilder.DEDUP_KEY_TTL_MS,
+          }, null, null);
+        } else {
+          await this.logWithContext('debug', 'DEDUP_TTL_CLEANUP_NOOP', {
+            cutoffTimestamp: dedupCutoffMs,
+            ttlMs: GraphBuilder.DEDUP_KEY_TTL_MS,
+          }, null, null);
+        }
+      } catch (error) {
+        await this.logWithContext('warn', 'DEDUP_TTL_CLEANUP_FAILED', {
+          error: (error as Error).message,
+        }, null, null);
+      }
     } catch (error) {
       await this.logWithContext('error', 'Cleanup tick failed', { error: (error as Error).message }, null, null);
+    } finally {
+      this.cleanupTickRunning = false;
     }
   }
 

@@ -15,6 +15,13 @@ export interface UpsertInteractionContextInput {
 
 export interface UpsertInteractionContextResult {
   isStable: 0 | 1;
+  persistenceReason:
+    | 'inserted_new_ic'
+    | 'stable_replaced_unstable'
+    | 'newer_stable_replaced_older'
+    | 'skipped_older_or_unstable_ic';
+  controlSignatureMissing: boolean;
+  controlSignatureReason?: 'control_signature_missing';
 }
 
 export class InteractionContextRepository {
@@ -23,6 +30,18 @@ export class InteractionContextRepository {
   public async upsert(input: UpsertInteractionContextInput): Promise<UpsertInteractionContextResult> {
     const normalizedControlSignature = input.controlSignature ?? '';
     const requestedIsStable = input.isStable === false ? 0 : 1;
+    const capturedAt = input.capturedAt ?? Date.now();
+    const controlSignatureMissing = normalizedControlSignature.length === 0;
+    const existing = await this.db.prepare(`
+      SELECT is_stable AS isStable, captured_at AS capturedAt
+      FROM interaction_contexts
+      WHERE session_id = ? AND normalized_url = ? AND control_signature = ?
+      LIMIT 1
+    `).get<{ isStable: number; capturedAt: number }>(
+      input.sessionId,
+      input.normalizedUrl,
+      normalizedControlSignature
+    );
     const stmt = this.db.prepare(`
       INSERT INTO interaction_contexts (
         id,
@@ -46,10 +65,13 @@ export class InteractionContextRepository {
         captured_at = excluded.captured_at
       WHERE
         excluded.is_stable = 1
-        AND interaction_contexts.is_stable = 0
+        AND (
+          interaction_contexts.is_stable = 0
+          OR excluded.captured_at > interaction_contexts.captured_at
+        )
     `);
 
-    await stmt.run(
+    const result = await stmt.run(
       crypto.randomUUID(),
       input.sessionId,
       input.normalizedUrl,
@@ -59,7 +81,7 @@ export class InteractionContextRepository {
       requestedIsStable,
       input.viewportWidth ?? null,
       input.viewportHeight ?? null,
-      input.capturedAt ?? Date.now()
+      capturedAt
     );
 
     const persisted = await this.db.prepare(`
@@ -73,8 +95,28 @@ export class InteractionContextRepository {
       normalizedControlSignature
     );
 
+    let persistenceReason: UpsertInteractionContextResult['persistenceReason'] = 'inserted_new_ic';
+    if (existing) {
+      if (result.changes > 0) {
+        if (requestedIsStable === 1 && existing.isStable === 0) {
+          persistenceReason = 'stable_replaced_unstable';
+        } else if (
+          requestedIsStable === 1 &&
+          existing.isStable === 1 &&
+          capturedAt > existing.capturedAt
+        ) {
+          persistenceReason = 'newer_stable_replaced_older';
+        }
+      } else {
+        persistenceReason = 'skipped_older_or_unstable_ic';
+      }
+    }
+
     return {
       isStable: persisted?.isStable === 0 ? 0 : 1,
+      persistenceReason,
+      controlSignatureMissing,
+      controlSignatureReason: controlSignatureMissing ? 'control_signature_missing' : undefined,
     };
   }
 }

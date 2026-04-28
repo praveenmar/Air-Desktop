@@ -1,7 +1,7 @@
-/**
+﻿/**
  * packages/codegen/src/codegen.service.ts
  *
- * The AIR Code Generation Service — "The Compressor".
+ * The AIR Code Generation Service â€” "The Compressor".
  *
  * Reads raw recording data from SQLite and produces a compressed,
  * intent-driven CodegenSession (the Semantic Timeline) that can be
@@ -10,17 +10,17 @@
  * What gets stripped:
  *   - Raw HTML snapshots (can be 100KB-500KB each)
  *   - Network events (not actionable in tests)
- *   - Scroll events (excluded by default — noise for most tests)
+ *   - Scroll events (excluded by default â€” noise for most tests)
  *   - Hover events (excluded by default)
- *   - Input heartbeats (trigger=input:progress — already filtered at DB level)
+ *   - Input heartbeats (trigger=input:progress â€” already filtered at DB level)
  *   - Duplicate edges (deduped by fingerprint hash)
- *   - Pre-navigation UI setup clicks (hamburger expands, container taps)   ← Fix B
- *   - Assertions shared across 2+ destination pages (layout chrome)        ← Fix C
+ *   - Pre-navigation UI setup clicks (hamburger expands, container taps)   â† Fix B
+ *   - Assertions shared across 2+ destination pages (layout chrome)        â† Fix C
  *
  * What gets preserved:
  *   - Selectors + selector priority (how to find the element)
- *   - Intents (why the user interacted — drives self-healing)
- *   - Outcome types (navigation/no_change — drives waitForURL/assertions)
+ *   - Intents (why the user interacted â€” drives self-healing)
+ *   - Outcome types (navigation/no_change â€” drives waitForURL/assertions)
  *   - Confidence + sample size (reliability signal for the AI)
  *   - Anchor fingerprints from destination nodes (drives assertions)
  *   - Page URLs (drives page.goto() when needed)
@@ -39,8 +39,11 @@ import {
   SelectorPriority,
   AssertionType,
   FingerprintData,
+  NestedContextData,
 } from './types';
 import type { ResolverConfig, SnapshotCache } from './selector-resolver';
+import type { SnapshotHandle, SnapshotInventory, SnapshotSelectionMode, StateBoundary } from './snapshot-selector';
+import { selectSnapshotForStep } from './snapshot-selector';
 import {
   getUserDefinedAssertions,
   hasUserAssertionSupport,
@@ -85,26 +88,26 @@ export function getSourceNodeId(
   return event?.nodeId ?? edge?.fromNodeId ?? edge?.toNodeId ?? null;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // ACTION TYPES THAT PRODUCE MEANINGFUL TEST STEPS
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const ACTIONABLE_TYPES = new Set(['click', 'input', 'submit', 'custom-select']);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FIX B — FRAGILE SELECTOR PRIORITIES
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// FIX B â€” FRAGILE SELECTOR PRIORITIES
 // Steps with these priorities AND immediate_action outcome are candidates for
 // pre-navigation setup suppression (hamburger expands, container taps, etc.)
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const FRAGILE_PRIORITIES = new Set<string>(['class', 'path', 'xpath']);
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // ANCHOR PARSING
 // Anchors are stored as JSON arrays of strings like:
 //   ["URL:/dashboard", "BUTTON:text=Log out", "H1:text=Congratulations"]
 // We parse these into CodegenAssertions.
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function parseAnchorsToAssertions(
   anchorsJson: string | null,
@@ -133,7 +136,7 @@ function parseAnchorsToAssertions(
   }
 
   for (const anchor of anchors) {
-    // Skip URL anchors — already handled above
+    // Skip URL anchors â€” already handled above
     if (anchor.startsWith('URL:')) continue;
 
     // Parse format: "TAG:attr=value" e.g. "BUTTON:text=Log out"
@@ -190,10 +193,10 @@ function parseAnchorsToAssertions(
   return assertions;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // SELECTOR EXTRACTION
 // Fingerprint is stored as JSON in event payload.
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function extractFingerprint(payloadJson: string | null): FingerprintData | null {
   if (!payloadJson) return null;
@@ -259,6 +262,30 @@ function extractControlSignature(payloadJson: string | null): string | undefined
   }
 }
 
+function extractNestedContext(payloadJson: string | null): NestedContextData | undefined {
+  if (!payloadJson) return undefined;
+  try {
+    const payload = JSON.parse(payloadJson);
+    const nestedContext = payload?.nestedContext;
+    if (!nestedContext || typeof nestedContext !== 'object') return undefined;
+    return nestedContext as NestedContextData;
+  } catch {
+    return undefined;
+  }
+}
+
+function extractTabId(payloadJson: string | null): string | null | undefined {
+  if (!payloadJson) return undefined;
+  try {
+    const payload = JSON.parse(payloadJson);
+    return typeof payload?.tabId === 'string' && payload.tabId.length > 0
+      ? payload.tabId
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function extractNormalizedUrl(payloadJson: string | null, fallbackPageUrl: string | null): string | undefined {
   if (payloadJson) {
     try {
@@ -287,8 +314,8 @@ function computeFpHash(fp: FingerprintData | null, eventType: string): string {
   return crypto.createHash('sha256').update(raw).digest('hex');
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FIX A — INTENT FROM textExcerpt
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// FIX A â€” INTENT FROM textExcerpt
 //
 // Previously intent was synthesised entirely from the selector string:
 //   click_.oxd_main_menu_item  (same for Admin, PIM and Leave links)
@@ -298,12 +325,12 @@ function computeFpHash(fp: FingerprintData | null, eventType: string): string {
 // which also produces better selector guidance for the AI code generator.
 //
 // Priority order:
-//   1. textExcerpt (visible label — most meaningful)
+//   1. textExcerpt (visible label â€” most meaningful)
 //   2. aria-label attribute (accessibility label)
 //   3. title/alt attribute (icon and tooltip labels)
 //   4. name attribute (form field names)
 //   5. selector string (last resort)
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function buildIntent(eventType: string, fp: FingerprintData): string {
   const candidates = [
@@ -328,25 +355,25 @@ function buildIntent(eventType: string, fp: FingerprintData): string {
   return safeName ? `${eventType}_${safeName}` : eventType;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FIX B — PRE-NAVIGATION SETUP CLICK SUPPRESSION
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// FIX B â€” PRE-NAVIGATION SETUP CLICK SUPPRESSION
 //
 // SPA sidebar navigation produces noise clicks before the real nav trigger:
 //   8.  click .oxd-icon            (immediate_action, fragile class selector)
 //   9.  click div > div:nth-of-type  (immediate_action, fragile path selector)
-//   10. click .oxd-main-menu-item   (navigation)  ← the only step that matters
+//   10. click .oxd-main-menu-item   (navigation)  â† the only step that matters
 //
 // A step is suppressed when ALL three conditions hold:
 //   1. outcomeType is 'immediate_action' (explicitly did not change page state)
 //   2. selectorPriority is fragile (class / path / xpath)
 //   3. Within the next LOOKAHEAD_WINDOW steps on the same page URL, there is a
-//      navigation step — OR there are no further steps on this page at all
+//      navigation step â€” OR there are no further steps on this page at all
 //      (trailing setup clicks with no completion are equally useless).
 //
 // Steps that do NOT meet all three conditions are always kept, so legitimate
 // class-selector clicks that actually change state (e.g. toggling a tab that
 // stays on the same page with state_refresh outcome) are never suppressed.
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const LOOKAHEAD_WINDOW = 4; // scan up to 4 steps ahead for a navigation trigger
 
@@ -380,7 +407,7 @@ export function suppressPreNavSetupClicks(steps: CodegenStep[]): CodegenStep[] {
     }
 
     // Condition 3b: also suppress if this is the last meaningful step on the
-    // page (no further steps exist on this URL — trailing noise).
+    // page (no further steps exist on this URL â€” trailing noise).
     const isTrailing = !foundAnyStepOnSamePage ||
       steps.slice(i + 1).every(s => getStepNormalizedUrl(s) !== stepUrl);
 
@@ -392,8 +419,8 @@ export function suppressPreNavSetupClicks(steps: CodegenStep[]): CodegenStep[] {
   return steps.filter((_, i) => !suppress.has(i));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FIX C — SHARED ASSERTION DEDUPLICATION
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// FIX C â€” SHARED ASSERTION DEDUPLICATION
 //
 // scanPageAnchors() captures global nav/sidebar elements (Add, Reset, Search,
 // Upgrade, checkbox, text input) that appear identically on every page of the
@@ -402,10 +429,10 @@ export function suppressPreNavSetupClicks(steps: CodegenStep[]): CodegenStep[] {
 //
 // Strategy: count how many distinct destination pages each anchor assertion
 // selector appears on. Any selector present on 2+ destination pages is layout
-// chrome — strip it. URL assertions are always unique so they are never
+// chrome â€” strip it. URL assertions are always unique so they are never
 // touched. The result: each nav step keeps only the assertions that are
 // genuinely specific to its destination page.
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function isLikelyTextEntryStep(step: CodegenStep): boolean {
   if (step.action !== 'input') return false;
@@ -485,9 +512,9 @@ export function deduplicateSharedAssertions(steps: CodegenStep[]): CodegenStep[]
   }));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // MAIN SERVICE
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export class CodegenService {
   private db: SqliteDatabase;
@@ -530,10 +557,10 @@ export class CodegenService {
 
   /**
    * Builds the full Semantic Timeline for a session.
-   * This is what gets fed to the AI — no raw HTML, no snapshots.
+   * This is what gets fed to the AI â€” no raw HTML, no snapshots.
    */
   public buildSession(sessionId: string): CodegenSession {
-    // ── 1. Load session metadata ────────────────────────────────────────────
+    // â”€â”€ 1. Load session metadata â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const session = this.db.prepare(`
       SELECT id, started_at, last_event_at, metadata
       FROM sessions
@@ -544,7 +571,7 @@ export class CodegenService {
       throw new Error(`Session not found: ${sessionId}`);
     }
 
-    // ── 2. Load ordered events for this session ─────────────────────────────
+    // â”€â”€ 2. Load ordered events for this session â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const includeTypes = ['click', 'input', 'submit', 'custom-select'];
     if (this.options.includeScrollSteps) includeTypes.push('scroll');
     if (this.options.includeHoverSteps)  includeTypes.push('hover');
@@ -565,7 +592,7 @@ export class CodegenService {
       ORDER BY e.timestamp ASC
     `).all(sessionId, ...includeTypes) as any[];
 
-    // ── 3. Load edges keyed by fingerprint_hash ─────────────────────────────
+    // â”€â”€ 3. Load edges keyed by fingerprint_hash â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // CRITICAL: We join via fingerprint_hash not trigger_event_id.
     // When the same action is recorded multiple times, OutcomeHandler calls
     // resolveOutcome() on the EXISTING edge (first session created it).
@@ -621,7 +648,7 @@ export class CodegenService {
       allEdgeRows.push(...byEvent);
     }
 
-    // Deduplicate edges — keep highest-confidence outcome per fingerprint
+    // Deduplicate edges â€” keep highest-confidence outcome per fingerprint
     const edgeByEventId       = new Map<string, any>();
     const edgeByFingerprint   = new Map<string, any>();
 
@@ -648,7 +675,7 @@ export class CodegenService {
 
     const edgeRows = Array.from(edgeByFingerprint.values());
 
-    // ── 4. Load destination nodes for navigation edges ──────────────────────
+    // â”€â”€ 4. Load destination nodes for navigation edges â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const navEdges  = edgeRows.filter(e => e.outcomeType === 'navigation');
     const toNodeIds = Array.from(new Set(navEdges.map(e => e.toNodeId).filter(Boolean)));
 
@@ -689,7 +716,7 @@ export class CodegenService {
       return resolved;
     };
 
-    // ── 5. Build raw steps ───────────────────────────────────────────────────
+    // â”€â”€ 5. Build raw steps â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const rawSteps: CodegenStep[] = [];
     let stepNum = 0;
     const minConfidence = this.options.minConfidence ?? 0.0;
@@ -730,6 +757,10 @@ export class CodegenService {
 
       const step: CodegenStep = {
         step:             stepNum,
+        eventId:          ev.eventId ?? undefined,
+        traceId:          ev.traceId ?? undefined,
+        timestamp:        typeof ev.timestamp === 'number' ? ev.timestamp : undefined,
+        tabId:            extractTabId(ev.payload) ?? null,
         intent,
         action:           ev.eventType as ActionType,
         selector:         fingerprint.selector,
@@ -737,6 +768,7 @@ export class CodegenService {
         selectorPriority,
         selectorRank,
         fingerprint:      fingerprint ?? undefined,
+        nestedContext:    extractNestedContext(ev.payload),
         controlSignature,
         pageUrl:          ev.pageUrl || '',
         normalizedUrl:    extractNormalizedUrl(ev.payload, ev.pageUrl || ''),
@@ -755,6 +787,7 @@ export class CodegenService {
 
       if (edge) {
         step.outcomeType = edge.outcomeType;
+        step.destinationNodeId = edge.toNodeId ?? undefined;
 
         if (edge.outcomeType === 'navigation' && edge.toNodeId) {
           const destNode = nodeMap.get(edge.toNodeId);
@@ -784,7 +817,7 @@ export class CodegenService {
         resolvedSelector: step.resolvedSelector ?? null,
       });
 
-      // Consecutive duplicate filter — keep last (carries final committed value)
+      // Consecutive duplicate filter â€” keep last (carries final committed value)
       const prev = rawSteps[rawSteps.length - 1];
       if (prev && prev.selector === step.selector && prev.action === step.action) {
         step.step = prev.step;
@@ -795,13 +828,13 @@ export class CodegenService {
       }
     }
 
-    // ── 6. FIX B: suppress pre-navigation setup clicks ──────────────────────
+    // â”€â”€ 6. FIX B: suppress pre-navigation setup clicks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Removes hamburger-expand and container-tap noise clicks that precede
     // every SPA sidebar navigation (e.g. .oxd-icon and div > div:nth-of-type).
     const afterClickInputCollapse = collapseRedundantClickBeforeInput(rawSteps);
     const afterSetupFilter = suppressPreNavSetupClicks(afterClickInputCollapse);
 
-    // ── 7. FIX C: strip assertions shared across multiple destination pages ──
+    // â”€â”€ 7. FIX C: strip assertions shared across multiple destination pages â”€â”€
     // Removes global layout elements (Add, Reset, Search buttons) that appear
     // identically in the anchor set of every page, leaving only page-specific
     // assertions. URL assertions are never stripped.
@@ -810,7 +843,7 @@ export class CodegenService {
     // Re-number steps sequentially after filtering
     finalSteps.forEach((s, i) => { s.step = i + 1; });
 
-    // ── 8. Flow confidence ───────────────────────────────────────────────────
+    // â”€â”€ 8. Flow confidence â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const navProbabilities = edgeRows
       .filter(e => e.outcomeType === 'navigation' && e.probability != null)
       .map(e => e.probability as number);
@@ -819,7 +852,7 @@ export class CodegenService {
       ? navProbabilities.reduce((sum, p) => sum + p, 0) / navProbabilities.length
       : 1.0;
 
-    // ── 9. Starting URL and title ────────────────────────────────────────────
+    // â”€â”€ 9. Starting URL and title â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const firstEvent = events[0];
     const startUrl   = firstEvent?.pageUrl || 'unknown';
     const startTitle = (() => {
@@ -829,7 +862,7 @@ export class CodegenService {
       } catch { return ''; }
     })();
 
-    // ── 10. Unique node count ────────────────────────────────────────────────
+    // â”€â”€ 10. Unique node count â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const visitedNodes = new Set<string>();
     for (const ev of events) {
       if (ev.nodeId) visitedNodes.add(ev.nodeId);
@@ -853,297 +886,649 @@ export class CodegenService {
 
   public async loadSnapshots(session: CodegenSession, options: ResolverConfig = {}): Promise<SnapshotCache> {
     try {
-    const nodeIds = Array.from(
-      new Set(
-        session.steps
-          .map(step => step.sourceNodeId)
-          .filter((nodeId): nodeId is string => typeof nodeId === 'string' && nodeId.length > 0),
-      ),
-    );
-    const normalizedUrls = Array.from(
-      new Set(
-        session.steps
-          .map(step => step.normalizedUrl || normalizeUrl(step.pageUrl))
-          .filter((url): url is string => typeof url === 'string' && url.length > 0),
-      ),
-    );
+      const sourceNodeIds = Array.from(
+        new Set(
+          session.steps
+            .map(step => step.sourceNodeId)
+            .filter((nodeId): nodeId is string => typeof nodeId === 'string' && nodeId.length > 0),
+        ),
+      );
+      const destinationNodeIds = Array.from(
+        new Set(
+          session.steps
+            .map(step => step.destinationNodeId)
+            .filter((nodeId): nodeId is string => typeof nodeId === 'string' && nodeId.length > 0),
+        ),
+      );
+      const normalizedUrls = Array.from(
+        new Set(
+          session.steps
+            .map(step => step.normalizedUrl || normalizeUrl(step.pageUrl))
+            .filter((url): url is string => typeof url === 'string' && url.length > 0),
+        ),
+      );
+      const eventIds = Array.from(
+        new Set(
+          session.steps
+            .map(step => step.eventId)
+            .filter((eventId): eventId is string => typeof eventId === 'string' && eventId.length > 0),
+        ),
+      );
+      const traceIds = Array.from(
+        new Set(
+          session.steps
+            .map(step => step.traceId)
+            .filter((traceId): traceId is string => typeof traceId === 'string' && traceId.length > 0),
+        ),
+      );
 
-    const nodeCache = new Map<string, Document | null>();
-    const icStableCache = new Map<string, Document | null>();
-    const icAnyCache = new Map<string, Document | null>();
-    const icStableByUrlFallback = new Map<string, { doc: Document; capturedAt: number }>();
-    const icAnyByUrlFallback = new Map<string, { doc: Document; capturedAt: number }>();
-    const eventFallbackCache = new Map<string, Document | null>();
-    const maxBytes = options.maxSnapshotBytesForValidation ?? 2_000_000;
-    type JsdomCtor = new (html: string) => { window: { document: Document } };
-    let jsdomCtor: JsdomCtor | null = null;
+      const maxBytes = options.maxSnapshotBytesForValidation ?? 2_000_000;
+      type JsdomCtor = new (html: string) => { window: { document: Document } };
+      let jsdomCtor: JsdomCtor | null = null;
+      let linkedomParse: ((html: string) => { window: { document: Document } }) | null = null;
 
-    const buildIcKey = (normalizedUrl: string, controlSignature?: string | null): string =>
-      `${normalizedUrl}|${controlSignature ?? ''}`;
+      const dynamicImport = new Function(
+        'specifier',
+        'return import(specifier);'
+      ) as (specifier: string) => Promise<any>;
 
-    const dynamicImport = new Function(
-      'specifier',
-      'return import(specifier);'
-    ) as (specifier: string) => Promise<any>;
-
-    let linkedomParse: ((html: string) => { window: { document: Document } }) | null = null;
-
-    try {
-      // Try jsdom first
-      const jsdomModule = await dynamicImport('jsdom');
-      if (typeof jsdomModule.JSDOM === 'function') {
-        jsdomCtor = jsdomModule.JSDOM as JsdomCtor;
-      }
-    } catch (err) {
-      // swallow and try linkedom below
-    }
-
-    if (!jsdomCtor) {
       try {
-        const linkedom = await dynamicImport('linkedom');
-        if (typeof linkedom.parseHTML === 'function') {
-          linkedomParse = linkedom.parseHTML as any;
+        const jsdomModule = await dynamicImport('jsdom');
+        if (typeof jsdomModule.JSDOM === 'function') {
+          jsdomCtor = jsdomModule.JSDOM as JsdomCtor;
         }
-      } catch (err) {
-        // failed to load linkedom as well
+      } catch {
+        // Try linkedom below.
       }
-    }
 
-    const snapshotEngineAvailable = !!(jsdomCtor || linkedomParse);
-    console.log('[DEBUG] loadSnapshots: jsdomCtor=', !!jsdomCtor, 'linkedomParse=', !!linkedomParse);
-    if (!snapshotEngineAvailable) {
-      console.warn('[AIR] Failed to load jsdom or linkedom. Snapshot validation disabled.');
-      console.warn('[AIR] Snapshot engine unavailable — resolver running in degraded mode');
-      for (const nodeId of nodeIds) nodeCache.set(nodeId, null);
-      return {
-        snapshotEngineAvailable,
-        get(nodeId: string, _normalizedUrl?: string, _controlSignature?: string): Document | null {
-          return nodeCache.get(nodeId) ?? null;
-        },
-        getSource(_nodeId?: string, _normalizedUrl?: string, _controlSignature?: string): 'unavailable' {
-          return 'unavailable';
-        },
-      };
-    }
-
-    const parseHtmlToDocument = (html: string, debugLabel: string): Document | null => {
-      if (!html) return null;
-      if (Buffer.byteLength(html, 'utf8') > maxBytes) return null;
-      try {
-        if (jsdomCtor) {
-          const dom = new jsdomCtor(html);
-          return dom.window.document;
-        }
-        if (linkedomParse) {
-          const parsed = linkedomParse(html);
-          return parsed.window.document as Document;
-        }
-        return null;
-      } catch (err) {
-        console.error('[DEBUG] loadSnapshots: parsing error for', debugLabel, err);
-        return null;
-      }
-    };
-
-    if (normalizedUrls.length > 0) {
-      const normalizedPlaceholders = normalizedUrls.map(() => '?').join(', ');
-      const icRows = this.db.prepare(`
-        SELECT
-          normalized_url AS normalizedUrl,
-          control_signature AS controlSignature,
-          snapshot_html AS snapshotHtml,
-          is_stable AS isStable,
-          captured_at AS capturedAt
-        FROM interaction_contexts
-        WHERE session_id = ?
-          AND normalized_url IN (${normalizedPlaceholders})
-        ORDER BY normalized_url ASC, control_signature ASC, is_stable DESC, captured_at DESC
-      `).all(session.sessionId, ...normalizedUrls) as Array<{
-        normalizedUrl: string;
-        controlSignature: string;
-        snapshotHtml: string | null;
-        isStable: number;
-        capturedAt: number;
-      }>;
-
-      for (const row of icRows) {
-        const normalizedUrl = row.normalizedUrl;
-        if (!normalizedUrl || !row.snapshotHtml) continue;
-        const cacheKey = buildIcKey(normalizedUrl, row.controlSignature ?? '');
-
-        const needsAny = !icAnyCache.has(cacheKey);
-        const needsStable = row.isStable === 1 && !icStableCache.has(cacheKey);
-        if (!needsAny && !needsStable) continue;
-
-        const doc = parseHtmlToDocument(
-          row.snapshotHtml,
-          `interaction_contexts:${normalizedUrl}:${row.controlSignature}:${row.capturedAt}`
-        );
-        if (!doc) continue;
-        if (needsAny) icAnyCache.set(cacheKey, doc);
-        if (needsStable) icStableCache.set(cacheKey, doc);
-
-        const existingAny = icAnyByUrlFallback.get(normalizedUrl);
-        if (!existingAny || row.capturedAt > existingAny.capturedAt) {
-          icAnyByUrlFallback.set(normalizedUrl, { doc, capturedAt: row.capturedAt });
-        }
-
-        if (row.isStable === 1) {
-          const existingStable = icStableByUrlFallback.get(normalizedUrl);
-          if (!existingStable || row.capturedAt > existingStable.capturedAt) {
-            icStableByUrlFallback.set(normalizedUrl, { doc, capturedAt: row.capturedAt });
+      if (!jsdomCtor) {
+        try {
+          const linkedom = await dynamicImport('linkedom');
+          if (typeof linkedom.parseHTML === 'function') {
+            linkedomParse = linkedom.parseHTML as any;
           }
+        } catch {
+          // Snapshot engine remains unavailable.
         }
       }
-    }
 
-    const extractSnapshotHtmlFromPayload = (payload: any): string | null => {
-      if (!payload || typeof payload !== 'object') return null;
+      const snapshotEngineAvailable = !!(jsdomCtor || linkedomParse);
+      console.log('[DEBUG] loadSnapshots: jsdomCtor=', !!jsdomCtor, 'linkedomParse=', !!linkedomParse);
 
-      const candidates = [
-        payload?.interactionContext?.html,
-        payload?.pageSnapshot?.html,
-        payload?.pageState?.html,
-      ];
+      const emptyInventory: SnapshotInventory = {
+        snapshotEngineAvailable,
+        hardBoundaries: [],
+        icBoundaryToleranceMs: 75,
+        eventLocalByEventId: new Map(),
+        interactionContextExactStable: new Map(),
+        interactionContextExactAny: new Map(),
+        interactionContextStableByUrl: new Map(),
+        interactionContextAnyByUrl: new Map(),
+        outcomeEventByTraceId: new Map(),
+        sourceNodeById: new Map(),
+        destinationNodeById: new Map(),
+        urlEventFallbackByNormalizedUrl: new Map(),
+      };
 
-      for (const candidate of candidates) {
-        if (typeof candidate === 'string' && candidate.length > 0) {
-          return candidate;
+      if (!snapshotEngineAvailable) {
+        console.warn('[AIR] Failed to load jsdom or linkedom. Snapshot validation disabled.');
+        console.warn('[AIR] Snapshot engine unavailable — resolver running in degraded mode');
+        return {
+          snapshotEngineAvailable,
+          get(_nodeId: string, _normalizedUrl?: string, _controlSignature?: string): Document | null {
+            return null;
+          },
+          getSource(_nodeId?: string, _normalizedUrl?: string, _controlSignature?: string) {
+            return 'unavailable';
+          },
+          selectForStep(step, mode = 'action') {
+            return selectSnapshotForStep(step, emptyInventory, mode);
+          },
+        };
+      }
+
+      const parseHtmlToDocument = (html: string, debugLabel: string): Document | null => {
+        if (!html) return null;
+        if (Buffer.byteLength(html, 'utf8') > maxBytes) return null;
+        try {
+          if (jsdomCtor) {
+            const dom = new jsdomCtor(html);
+            return dom.window.document;
+          }
+          if (linkedomParse) {
+            const parsed = linkedomParse(html);
+            return parsed.window.document as Document;
+          }
+          return null;
+        } catch (err) {
+          console.error('[DEBUG] loadSnapshots: parsing error for', debugLabel, err);
+          return null;
         }
-      }
-      return null;
-    };
+      };
 
-    const normalizePayloadUrl = (payload: any, pageUrl: string | null): string | null => {
-      const candidates = [
-        payload?.interactionContext?.normalizedUrl,
-        payload?.pageSnapshot?.normalizedUrl,
-        payload?.pageState?.normalizedUrl,
-        payload?.normalizedUrl,
-      ];
+      const buildIcKey = (normalizedUrl: string, controlSignature?: string | null): string =>
+        `${normalizedUrl}|${controlSignature ?? ''}`;
 
-      for (const candidate of candidates) {
-        if (typeof candidate === 'string' && candidate.length > 0) {
-          return candidate;
-        }
-      }
-      if (typeof pageUrl === 'string' && pageUrl.length > 0) {
-        return normalizeUrl(pageUrl);
-      }
-      return null;
-    };
-
-    if (normalizedUrls.length > 0) {
-      const normalizedUrlSet = new Set(normalizedUrls);
-      const eventRows = this.db.prepare(`
-        SELECT timestamp, page_url AS pageUrl, payload
-        FROM events
-        WHERE session_id = ?
-        ORDER BY timestamp DESC
-      `).all(session.sessionId) as Array<{
+      type EventRow = {
+        eventId: string;
+        eventType?: string | null;
+        traceId: string | null;
         timestamp: number;
         pageUrl: string | null;
         payload: string | null;
-      }>;
+      };
 
-      for (const row of eventRows) {
-        if (!row.payload) continue;
+      type TimelineEventRow = {
+        eventId: string;
+        eventType: string;
+        traceId: string | null;
+        timestamp: number;
+        pageUrl: string | null;
+        payload: string | null;
+      };
 
-        let payload: any;
+      const payloadRowCache = new Map<string, EventRow | null>();
+      const documentCache = new Map<string, Document | null>();
+
+      const getEventRowStmt = this.db.prepare(`
+        SELECT
+          id AS eventId,
+          type AS eventType,
+          trace_id AS traceId,
+          timestamp,
+          page_url AS pageUrl,
+          payload
+        FROM events
+        WHERE id = ?
+        LIMIT 1
+      `);
+
+      const getNodeSnapshotStmt = this.db.prepare(`
+        SELECT snapshot_html AS snapshotHtml
+        FROM nodes
+        WHERE id = ?
+        LIMIT 1
+      `);
+
+      const getInteractionContextSnapshotStmt = this.db.prepare(`
+        SELECT snapshot_html AS snapshotHtml
+        FROM interaction_contexts
+        WHERE session_id = ? AND normalized_url = ? AND control_signature = ?
+        LIMIT 1
+      `);
+
+      const loadEventRow = (eventId: string): EventRow | null => {
+        if (payloadRowCache.has(eventId)) {
+          return payloadRowCache.get(eventId) ?? null;
+        }
+        const row = getEventRowStmt.get(eventId) as EventRow | undefined;
+        const resolved = row ?? null;
+        payloadRowCache.set(eventId, resolved);
+        return resolved;
+      };
+
+      const parsePayload = (eventId: string): any | null => {
+        const row = loadEventRow(eventId);
+        if (!row?.payload) return null;
         try {
-          payload = JSON.parse(row.payload);
+          return JSON.parse(row.payload);
         } catch {
-          continue;
+          return null;
+        }
+      };
+
+      const parsePayloadJson = (payloadJson: string | null): any | null => {
+        if (!payloadJson) return null;
+        try {
+          return JSON.parse(payloadJson);
+        } catch {
+          return null;
+        }
+      };
+
+      const sessionTimelineRows = this.db.prepare(`
+        SELECT
+          id AS eventId,
+          type AS eventType,
+          trace_id AS traceId,
+          timestamp,
+          page_url AS pageUrl,
+          payload
+        FROM events
+        WHERE session_id = ?
+        ORDER BY timestamp ASC
+      `).all(session.sessionId) as TimelineEventRow[];
+
+      const icTabEvidence = new Map<string, Set<string>>();
+      const hardBoundaries: StateBoundary[] = [];
+      const previousByTab = new Map<string, { normalizedUrl?: string | undefined }>();
+      let previousTimelineEvent: { tabId?: string | null; traceId?: string | null } | null = null;
+
+      for (const row of sessionTimelineRows) {
+        const payload = parsePayloadJson(row.payload);
+        const tabId = extractTabId(row.payload) ?? null;
+        const normalizedUrl = extractNormalizedUrl(row.payload, row.pageUrl);
+        const controlSignature =
+          typeof payload?.interactionContext?.controlSignature === 'string'
+            ? payload.interactionContext.controlSignature
+            : (
+              payload?.interactionContext?.controlSignature === null
+                ? ''
+                : undefined
+            );
+
+        if (tabId && normalizedUrl !== undefined && controlSignature !== undefined) {
+          const icKey = buildIcKey(normalizedUrl, controlSignature);
+          const knownTabs = icTabEvidence.get(icKey) ?? new Set<string>();
+          knownTabs.add(tabId);
+          icTabEvidence.set(icKey, knownTabs);
         }
 
-        const normalizedUrl = normalizePayloadUrl(payload, row.pageUrl);
-        if (!normalizedUrl || !normalizedUrlSet.has(normalizedUrl)) continue;
-        if (eventFallbackCache.has(normalizedUrl)) continue;
+        if (
+          previousTimelineEvent?.tabId &&
+          tabId &&
+          previousTimelineEvent.tabId !== tabId
+        ) {
+          hardBoundaries.push({
+            timestamp: row.timestamp,
+            kind:
+              previousTimelineEvent.traceId &&
+              row.traceId &&
+              previousTimelineEvent.traceId === row.traceId
+                ? 'cross_tab_handoff'
+                : 'tab_change',
+            eventId: row.eventId,
+            traceId: row.traceId,
+            fromTabId: previousTimelineEvent.tabId,
+            toTabId: tabId,
+            tabId,
+          });
+        }
 
-        const html = extractSnapshotHtmlFromPayload(payload);
-        if (!html) continue;
+        if (row.eventType === 'spa-route-change') {
+          hardBoundaries.push({
+            timestamp: row.timestamp,
+            kind: 'spa_route_change',
+            eventId: row.eventId,
+            traceId: row.traceId,
+            tabId,
+            toNormalizedUrl: normalizedUrl ?? null,
+          });
+        }
 
-        const doc = parseHtmlToDocument(html, `events:${normalizedUrl}:${row.timestamp}`);
-        if (!doc) continue;
-        eventFallbackCache.set(normalizedUrl, doc);
+        if (tabId) {
+          const previousForTab = previousByTab.get(tabId);
+          if (
+            previousForTab?.normalizedUrl &&
+            normalizedUrl &&
+            previousForTab.normalizedUrl !== normalizedUrl
+          ) {
+            hardBoundaries.push({
+              timestamp: row.timestamp,
+              kind: row.eventType === 'outcome' ? 'navigation' : 'url_change',
+              eventId: row.eventId,
+              traceId: row.traceId,
+              tabId,
+              fromNormalizedUrl: previousForTab.normalizedUrl,
+              toNormalizedUrl: normalizedUrl,
+            });
+          }
+          previousByTab.set(tabId, { normalizedUrl });
+        }
+
+        previousTimelineEvent = {
+          tabId,
+          traceId: row.traceId,
+        };
       }
-    }
 
-    const getSnapshotStmt = this.db.prepare(`
-      SELECT snapshot_html AS snapshotHtml
-      FROM nodes
-      WHERE id = ?
-      LIMIT 1
-    `);
+      const loadDocumentCached = (cacheKey: string, factory: () => Document | null): Document | null => {
+        if (documentCache.has(cacheKey)) {
+          return documentCache.get(cacheKey) ?? null;
+        }
+        const doc = factory();
+        documentCache.set(cacheKey, doc);
+        return doc;
+      };
 
-    for (const nodeId of nodeIds) {
-      const row = getSnapshotStmt.get(nodeId) as { snapshotHtml?: string | null } | undefined;
-      const snapshotHtml = row?.snapshotHtml;
-      console.log(`[DEBUG] loadSnapshots: nodeId=${nodeId}, snapshotHtml length=${snapshotHtml ? snapshotHtml.length : 0}`);
-      if (!snapshotHtml) {
-        nodeCache.set(nodeId, null);
-        continue;
+      const loadEventSnapshotField = (
+        eventId: string,
+        fieldName: 'pageState' | 'pageSnapshot' | 'interactionContext',
+        sourceLabel: string
+      ): Document | null => {
+        return loadDocumentCached(`event:${eventId}:${fieldName}`, () => {
+          const payload = parsePayload(eventId);
+          const html = payload?.[fieldName]?.html;
+          if (typeof html !== 'string' || html.length === 0) return null;
+          return parseHtmlToDocument(html, `${sourceLabel}:${eventId}:${fieldName}`);
+        });
+      };
+
+      const loadUrlFallbackSnapshot = (eventId: string, normalizedUrl: string): Document | null => {
+        return loadDocumentCached(`url-fallback:${normalizedUrl}:${eventId}`, () => {
+          const payload = parsePayload(eventId);
+          if (!payload || typeof payload !== 'object') return null;
+          const candidates = [
+            payload?.pageState?.html,
+            payload?.pageSnapshot?.html,
+            payload?.interactionContext?.html,
+          ];
+          for (const candidate of candidates) {
+            if (typeof candidate === 'string' && candidate.length > 0) {
+              return parseHtmlToDocument(candidate, `url-fallback:${normalizedUrl}:${eventId}`);
+            }
+          }
+          return null;
+        });
+      };
+
+      const loadNodeSnapshot = (nodeId: string, sourceLabel: string): Document | null => {
+        return loadDocumentCached(`node:${sourceLabel}:${nodeId}`, () => {
+          const row = getNodeSnapshotStmt.get(nodeId) as { snapshotHtml?: string | null } | undefined;
+          const snapshotHtml = row?.snapshotHtml;
+          console.log(`[DEBUG] loadSnapshots: nodeId=${nodeId}, snapshotHtml length=${snapshotHtml ? snapshotHtml.length : 0}`);
+          if (!snapshotHtml) return null;
+          return parseHtmlToDocument(snapshotHtml, `${sourceLabel}:${nodeId}`);
+        });
+      };
+
+      const loadInteractionContext = (
+        normalizedUrl: string,
+        controlSignature: string,
+        sourceLabel: string
+      ): Document | null => {
+        return loadDocumentCached(`ic:${sourceLabel}:${normalizedUrl}:${controlSignature}`, () => {
+          const row = getInteractionContextSnapshotStmt.get(
+            session.sessionId,
+            normalizedUrl,
+            controlSignature
+          ) as { snapshotHtml?: string | null } | undefined;
+          const snapshotHtml = row?.snapshotHtml;
+          if (!snapshotHtml) return null;
+          return parseHtmlToDocument(snapshotHtml, `${sourceLabel}:${normalizedUrl}:${controlSignature}`);
+        });
+      };
+
+      const inventory: SnapshotInventory = {
+        snapshotEngineAvailable,
+        hardBoundaries,
+        icBoundaryToleranceMs: 75,
+        eventLocalByEventId: new Map(),
+        interactionContextExactStable: new Map(),
+        interactionContextExactAny: new Map(),
+        interactionContextStableByUrl: new Map(),
+        interactionContextAnyByUrl: new Map(),
+        outcomeEventByTraceId: new Map(),
+        sourceNodeById: new Map(),
+        destinationNodeById: new Map(),
+        urlEventFallbackByNormalizedUrl: new Map(),
+      };
+
+      for (const eventId of eventIds) {
+        const eventRow = loadEventRow(eventId);
+        const eventNormalizedUrl = extractNormalizedUrl(eventRow?.payload ?? null, eventRow?.pageUrl ?? null);
+        const eventControlSignature = extractControlSignature(eventRow?.payload ?? null);
+        const eventTabId = extractTabId(eventRow?.payload ?? null) ?? null;
+        inventory.eventLocalByEventId.set(eventId, {
+          pageState: {
+            source: 'event-local-pageState',
+            temporalClass: 'action_local',
+            eventId,
+            timestamp: eventRow?.timestamp,
+            tabId: eventTabId,
+            normalizedUrl: eventNormalizedUrl,
+            controlSignature: eventControlSignature,
+            load: () => loadEventSnapshotField(eventId, 'pageState', 'event-local'),
+          },
+          pageSnapshot: {
+            source: 'event-local-pageSnapshot',
+            temporalClass: 'action_local',
+            eventId,
+            timestamp: eventRow?.timestamp,
+            tabId: eventTabId,
+            normalizedUrl: eventNormalizedUrl,
+            controlSignature: eventControlSignature,
+            load: () => loadEventSnapshotField(eventId, 'pageSnapshot', 'event-local'),
+          },
+        });
       }
-      nodeCache.set(nodeId, parseHtmlToDocument(snapshotHtml, `nodes:${nodeId}`));
-    }
 
-    console.log(
-      `[DEBUG] loadSnapshots: icStable=${icStableCache.size}, icAny=${icAnyCache.size}, eventFallback=${eventFallbackCache.size}, nodeFallback=${Array.from(nodeCache.values()).filter(Boolean).length}/${nodeCache.size}`
-    );
+      for (const nodeId of sourceNodeIds) {
+        inventory.sourceNodeById.set(nodeId, {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          sourceNodeId: nodeId,
+          load: () => loadNodeSnapshot(nodeId, 'source-node'),
+        });
+      }
 
-    return {
-      snapshotEngineAvailable,
-      get(nodeId: string, normalizedUrl?: string, controlSignature?: string): Document | null {
-        if (normalizedUrl) {
-          const key = buildIcKey(normalizedUrl, controlSignature ?? '');
-          const stable = icStableCache.get(key);
+      for (const nodeId of destinationNodeIds) {
+        inventory.destinationNodeById.set(nodeId, {
+          source: 'destination-node-snapshot',
+          temporalClass: 'outcome_state',
+          sourceNodeId: nodeId,
+          load: () => loadNodeSnapshot(nodeId, 'destination-node'),
+        });
+      }
+
+      if (normalizedUrls.length > 0) {
+        const normalizedPlaceholders = normalizedUrls.map(() => '?').join(', ');
+        const icRows = this.db.prepare(`
+          SELECT
+            normalized_url AS normalizedUrl,
+            control_signature AS controlSignature,
+            is_stable AS isStable,
+            captured_at AS capturedAt
+          FROM interaction_contexts
+          WHERE session_id = ?
+            AND normalized_url IN (${normalizedPlaceholders})
+          ORDER BY normalized_url ASC, control_signature ASC, is_stable DESC, captured_at DESC
+        `).all(session.sessionId, ...normalizedUrls) as Array<{
+          normalizedUrl: string;
+          controlSignature: string;
+          isStable: number;
+          capturedAt: number;
+        }>;
+
+        for (const row of icRows) {
+          if (!row.normalizedUrl) continue;
+          const cacheKey = buildIcKey(row.normalizedUrl, row.controlSignature ?? '');
+          const reliableIcTabs = icTabEvidence.get(cacheKey);
+          const icTabId =
+            reliableIcTabs && reliableIcTabs.size === 1
+              ? Array.from(reliableIcTabs)[0]
+              : null;
+          const baseHandle: SnapshotHandle = {
+            source: 'interaction-context-exact',
+            temporalClass: row.isStable === 1 ? 'outcome_state' : 'post_action',
+            timestamp: row.capturedAt,
+            tabId: icTabId,
+            normalizedUrl: row.normalizedUrl,
+            controlSignature: row.controlSignature ?? '',
+            load: () =>
+              loadInteractionContext(
+                row.normalizedUrl,
+                row.controlSignature ?? '',
+                row.isStable === 1 ? 'ic-exact-stable' : 'ic-exact-any'
+              ),
+          };
+
+          if (!inventory.interactionContextExactAny.has(cacheKey)) {
+            inventory.interactionContextExactAny.set(cacheKey, baseHandle);
+          }
+
+          if (row.isStable === 1) {
+            if (!inventory.interactionContextExactStable.has(cacheKey)) {
+              inventory.interactionContextExactStable.set(cacheKey, baseHandle);
+            }
+            if (!inventory.interactionContextStableByUrl.has(row.normalizedUrl)) {
+              inventory.interactionContextStableByUrl.set(row.normalizedUrl, {
+                ...baseHandle,
+                source: 'interaction-context-stable-by-url',
+                load: () => loadInteractionContext(row.normalizedUrl, row.controlSignature ?? '', 'ic-stable-by-url'),
+              });
+            }
+          }
+
+          if (!inventory.interactionContextAnyByUrl.has(row.normalizedUrl)) {
+            inventory.interactionContextAnyByUrl.set(row.normalizedUrl, {
+              ...baseHandle,
+              source: 'interaction-context-any-by-url',
+              load: () => loadInteractionContext(row.normalizedUrl, row.controlSignature ?? '', 'ic-any-by-url'),
+            });
+          }
+        }
+      }
+
+      if (traceIds.length > 0) {
+        const tracePlaceholders = traceIds.map(() => '?').join(', ');
+        const outcomeRows = this.db.prepare(`
+          SELECT
+            id AS eventId,
+            trace_id AS traceId,
+            timestamp
+          FROM events
+          WHERE session_id = ?
+            AND type = 'outcome'
+            AND trace_id IN (${tracePlaceholders})
+          ORDER BY trace_id ASC, timestamp DESC
+        `).all(session.sessionId, ...traceIds) as Array<{
+          eventId: string;
+          traceId: string;
+          timestamp: number;
+        }>;
+
+        for (const row of outcomeRows) {
+          if (!row.traceId || inventory.outcomeEventByTraceId.has(row.traceId)) continue;
+          inventory.outcomeEventByTraceId.set(row.traceId, {
+            source: 'outcome-event-snapshot',
+            temporalClass: 'outcome_state',
+            eventId: row.eventId,
+            timestamp: row.timestamp,
+            tabId: extractTabId(loadEventRow(row.eventId)?.payload ?? null) ?? null,
+            load: () => loadEventSnapshotField(row.eventId, 'pageState', 'outcome-event')
+              || loadEventSnapshotField(row.eventId, 'pageSnapshot', 'outcome-event'),
+          });
+        }
+      }
+
+      if (normalizedUrls.length > 0) {
+        const normalizedUrlSet = new Set(normalizedUrls);
+        const eventRows = this.db.prepare(`
+          SELECT id AS eventId, timestamp, page_url AS pageUrl
+          FROM events
+          WHERE session_id = ?
+          ORDER BY timestamp DESC
+        `).all(session.sessionId) as Array<{
+          eventId: string;
+          timestamp: number;
+          pageUrl: string | null;
+        }>;
+
+        for (const row of eventRows) {
+          const normalizedUrl = row.pageUrl ? normalizeUrl(row.pageUrl) : null;
+          if (!normalizedUrl || !normalizedUrlSet.has(normalizedUrl)) continue;
+          if (inventory.urlEventFallbackByNormalizedUrl.has(normalizedUrl)) continue;
+          inventory.urlEventFallbackByNormalizedUrl.set(normalizedUrl, {
+            source: 'url-event-fallback',
+            temporalClass: 'unknown',
+            eventId: row.eventId,
+            timestamp: row.timestamp,
+            load: () => loadUrlFallbackSnapshot(row.eventId, normalizedUrl),
+          });
+        }
+      }
+
+      console.log('[DEBUG] loadSnapshots inventory', {
+        exactEventLocal: inventory.eventLocalByEventId.size,
+        sourceNodes: inventory.sourceNodeById.size,
+        destinationNodes: inventory.destinationNodeById.size,
+        icExactStable: inventory.interactionContextExactStable.size,
+        icExactAny: inventory.interactionContextExactAny.size,
+        icStableByUrl: inventory.interactionContextStableByUrl.size,
+        icAnyByUrl: inventory.interactionContextAnyByUrl.size,
+        outcomeEvents: inventory.outcomeEventByTraceId.size,
+        urlFallback: inventory.urlEventFallbackByNormalizedUrl.size,
+      });
+
+      const legacyGet = (nodeId: string, normalizedUrl?: string, controlSignature?: string): Document | null => {
+        if (normalizedUrl && controlSignature) {
+          const exactKey = buildIcKey(normalizedUrl, controlSignature);
+          const stable = inventory.interactionContextExactStable.get(exactKey)?.load();
           if (stable) return stable;
-
-          const any = icAnyCache.get(key);
+          const any = inventory.interactionContextExactAny.get(exactKey)?.load();
           if (any) return any;
+        }
 
-          const stableByUrl = icStableByUrlFallback.get(normalizedUrl)?.doc;
+        if (normalizedUrl) {
+          const stableByUrl = inventory.interactionContextStableByUrl.get(normalizedUrl)?.load();
           if (stableByUrl) return stableByUrl;
-
-          const anyByUrl = icAnyByUrlFallback.get(normalizedUrl)?.doc;
+          const anyByUrl = inventory.interactionContextAnyByUrl.get(normalizedUrl)?.load();
           if (anyByUrl) return anyByUrl;
-
-          const eventFallback = eventFallbackCache.get(normalizedUrl);
+          const eventFallback = inventory.urlEventFallbackByNormalizedUrl.get(normalizedUrl)?.load();
           if (eventFallback) return eventFallback;
         }
 
         if (!nodeId) return null;
-        return nodeCache.get(nodeId) ?? null;
-      },
-      getSource(nodeId: string, normalizedUrl?: string, controlSignature?: string): 'latest' | 'latest-stable' | 'unavailable' {
-        if (normalizedUrl) {
-          const key = buildIcKey(normalizedUrl, controlSignature ?? '');
-          if (icStableCache.get(key)) return 'latest-stable';
-          if (icAnyCache.get(key)) return 'latest';
-          if (icStableByUrlFallback.get(normalizedUrl)) return 'latest-stable';
-          if (icAnyByUrlFallback.get(normalizedUrl)) return 'latest';
-          if (eventFallbackCache.get(normalizedUrl)) return 'latest';
-        }
+        return inventory.sourceNodeById.get(nodeId)?.load() ?? inventory.destinationNodeById.get(nodeId)?.load() ?? null;
+      };
 
-        if (nodeId && nodeCache.get(nodeId)) {
-          return 'latest';
+      const legacyGetSource = (nodeId?: string, normalizedUrl?: string, controlSignature?: string) => {
+        if (normalizedUrl && controlSignature) {
+          const exactKey = buildIcKey(normalizedUrl, controlSignature);
+          if (inventory.interactionContextExactStable.get(exactKey)?.load()) return 'interaction-context-exact';
+          if (inventory.interactionContextExactAny.get(exactKey)?.load()) return 'interaction-context-exact';
+        }
+        if (normalizedUrl) {
+          if (inventory.interactionContextStableByUrl.get(normalizedUrl)?.load()) return 'interaction-context-stable-by-url';
+          if (inventory.interactionContextAnyByUrl.get(normalizedUrl)?.load()) return 'interaction-context-any-by-url';
+          if (inventory.urlEventFallbackByNormalizedUrl.get(normalizedUrl)?.load()) return 'url-event-fallback';
+        }
+        if (nodeId) {
+          if (inventory.sourceNodeById.get(nodeId)?.load()) return 'source-node-snapshot';
+          if (inventory.destinationNodeById.get(nodeId)?.load()) return 'destination-node-snapshot';
         }
         return 'unavailable';
-      },
-    };
+      };
+
+      return {
+        snapshotEngineAvailable,
+        get(nodeId: string, normalizedUrl?: string, controlSignature?: string): Document | null {
+          return legacyGet(nodeId, normalizedUrl, controlSignature);
+        },
+        getSource(nodeId?: string, normalizedUrl?: string, controlSignature?: string) {
+          return legacyGetSource(nodeId, normalizedUrl, controlSignature);
+        },
+        selectForStep(step, mode: SnapshotSelectionMode = 'action') {
+          return selectSnapshotForStep(step, inventory, mode);
+        },
+      };
     } catch (err) {
       console.error('[AIR] loadSnapshots fatal error:', err);
-      const fallbackCache = new Map<string, Document | null>();
-      for (const nodeId of (session.steps || []).map(s => s.sourceNodeId).filter(Boolean as any)) {
-        fallbackCache.set(nodeId as string, null);
-      }
+      const emptyInventory: SnapshotInventory = {
+        snapshotEngineAvailable: false,
+        hardBoundaries: [],
+        icBoundaryToleranceMs: 75,
+        eventLocalByEventId: new Map(),
+        interactionContextExactStable: new Map(),
+        interactionContextExactAny: new Map(),
+        interactionContextStableByUrl: new Map(),
+        interactionContextAnyByUrl: new Map(),
+        outcomeEventByTraceId: new Map(),
+        sourceNodeById: new Map(),
+        destinationNodeById: new Map(),
+        urlEventFallbackByNormalizedUrl: new Map(),
+      };
       return {
         snapshotEngineAvailable: false,
-        get(nodeId: string, _normalizedUrl?: string, _controlSignature?: string): Document | null {
-          return fallbackCache.get(nodeId) ?? null;
+        get(_nodeId: string, _normalizedUrl?: string, _controlSignature?: string): Document | null {
+          return null;
         },
-        getSource(_nodeId?: string, _normalizedUrl?: string, _controlSignature?: string): 'unavailable' {
+        getSource(_nodeId?: string, _normalizedUrl?: string, _controlSignature?: string) {
           return 'unavailable';
+        },
+        selectForStep(step, mode = 'action') {
+          return selectSnapshotForStep(step, emptyInventory, mode);
         },
       };
     }

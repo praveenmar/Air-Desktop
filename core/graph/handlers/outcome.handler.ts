@@ -86,6 +86,11 @@ export class OutcomeHandler {
       lookupScope: 'session_tab_trace',
     }, sessionId, traceId ?? null);
 
+    const crossTabRecovered = await this.tryResolveExplicitCrossTabRecovery(event, traceId, currentNodeId, tabId);
+    if (crossTabRecovered) {
+      return;
+    }
+
     const recovered = await this.tryRecoverPendingForCrossContextOutcome(event, traceId, currentNodeId, tabId);
     if (recovered) {
       return;
@@ -106,6 +111,74 @@ export class OutcomeHandler {
   private isExplicitNavigationOutcome(event: OutcomeEvent): boolean {
     const settleType = event.meta?.settleType;
     return typeof settleType === 'string' && settleType.toLowerCase() === 'navigation';
+  }
+
+  private isExplicitCrossTabRecovery(event: OutcomeEvent): boolean {
+    return event.meta?.isCrossTabRecovery === true;
+  }
+
+  private doesCrossTabTargetUrlMatch(event: OutcomeEvent): boolean {
+    const targetNormalizedUrl = typeof event.meta?.crossTabTargetNormalizedUrl === 'string'
+      ? event.meta.crossTabTargetNormalizedUrl
+      : null;
+    if (!targetNormalizedUrl) {
+      return false;
+    }
+
+    const outcomeUrl = this.getOutcomeUrl(event);
+    const normalizedOutcomeUrl = outcomeUrl ? normalizeUrl(outcomeUrl) : null;
+    return normalizedOutcomeUrl === targetNormalizedUrl;
+  }
+
+  private async tryResolveExplicitCrossTabRecovery(
+    event: OutcomeEvent,
+    traceId: string,
+    currentNodeId: string,
+    tabId: string
+  ): Promise<boolean> {
+    const sessionId = event.sessionId ?? null;
+    if (!sessionId || !this.isExplicitCrossTabRecovery(event)) {
+      return false;
+    }
+
+    if (!this.doesCrossTabTargetUrlMatch(event)) {
+      await this.logWithContext('warn', 'Skipped explicit cross-tab recovery due to target URL mismatch', {
+        tabId,
+        crossTabTargetNormalizedUrl: event.meta?.crossTabTargetNormalizedUrl ?? null,
+        normalizedOutcomeUrl: this.getOutcomeUrl(event),
+      }, sessionId, traceId ?? null);
+      return false;
+    }
+
+    const pending = await this.pendingRepo.findByTraceAndSessionAnyTab(traceId, sessionId);
+    if (!pending) {
+      await this.logWithContext('debug', 'Explicit cross-tab recovery found no pending action', {
+        tabId,
+        lookupScope: 'session_any_tab_trace',
+      }, sessionId, traceId ?? null);
+      return false;
+    }
+
+    await this.logWithContext('decision', 'PENDING_ACTION_CROSS_TAB_RECOVERED', {
+      fromNode: pending.fromNodeId,
+      toNode: currentNodeId,
+      sourceTabId: pending.tabId ?? 'tab-legacy',
+      destinationTabId: tabId,
+      traceId,
+      crossTabTargetNormalizedUrl: event.meta?.crossTabTargetNormalizedUrl ?? null,
+      crossTabSourceNormalizedUrl: event.meta?.crossTabSourceNormalizedUrl ?? null,
+    }, sessionId, traceId ?? null);
+
+    await this.createExplicitEdge(pending.fromNodeId, currentNodeId, pending, event);
+    const resolveTabId = pending.tabId ?? 'tab-legacy';
+    const resolvedCount = await this.pendingRepo.resolve(traceId, sessionId, resolveTabId);
+    await this.logWithContext('debug', 'PENDING_ACTION_SCOPED_RESOLVED', {
+      tabId: resolveTabId,
+      resolvedCount,
+      resolveScope: 'session_source_tab_trace',
+      destinationTabId: tabId,
+    }, sessionId, traceId ?? null);
+    return true;
   }
 
   private async tryRecoverPendingForCrossContextOutcome(

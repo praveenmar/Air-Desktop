@@ -25,12 +25,33 @@ function mapOutcomeRow(row: any): Outcome | null {
 export class OutcomeRepository {
   constructor(private db: AsyncSQLiteDatabase) {}
 
-  public async insert(id: string, edgeId: string, targetNodeId: string, timestamp: number): Promise<void> {
+  public async insert(
+    id: string,
+    edgeId: string,
+    targetNodeId: string,
+    timestamp: number,
+  ): Promise<{ inserted: boolean; touched: boolean }> {
     const stmt = this.db.prepare(`
-      INSERT INTO outcomes (id, edge_id, target_node_id, probability, decayed_count, last_observed) 
+      INSERT OR IGNORE INTO outcomes (id, edge_id, target_node_id, probability, decayed_count, last_observed) 
       VALUES (?, ?, ?, 1.0, 1.0, ?)
     `);
-    await stmt.run(id, edgeId, targetNodeId, timestamp);
+    const result = await stmt.run(id, edgeId, targetNodeId, timestamp);
+
+    if ((result?.changes ?? 0) > 0) {
+      return { inserted: true, touched: false };
+    }
+
+    const updateStmt = this.db.prepare(`
+      UPDATE outcomes
+      SET last_observed = CASE
+        WHEN last_observed IS NULL OR last_observed < ?
+        THEN ?
+        ELSE last_observed
+      END
+      WHERE edge_id = ? AND target_node_id = ?
+    `);
+    await updateStmt.run(timestamp, timestamp, edgeId, targetNodeId);
+    return { inserted: false, touched: true };
   }
 
   public async findByEdge(edgeId: string): Promise<Outcome[]> {

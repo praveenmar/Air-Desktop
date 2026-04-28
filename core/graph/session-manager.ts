@@ -102,4 +102,34 @@ export class SessionManager {
     }, sessionId, null);
     return null;
   }
+
+  public async getTabState(
+    sessionId: string | null | undefined,
+    tabId: string | null | undefined
+  ): Promise<{ lastNodeId: string | null; lastEventAt: number | null } | null> {
+    if (!sessionId || !tabId) return null;
+    if (tabId === 'tab-legacy') {
+      await this.logWithContext('info', 'TAB_LEGACY_FALLBACK_USED', {
+        reason: 'missing_tab_id_on_event',
+        tabId,
+      }, sessionId, null);
+    }
+
+    const tabState = await this.sessionRepo.getTabState(sessionId, tabId);
+    if (tabState) {
+      await this.logWithContext('debug', 'TAB_STATE_READ', {
+        tabId,
+        nodeId: tabState.lastNodeId,
+        lastEventAt: tabState.lastEventAt,
+        source: 'session_tab_state',
+      }, sessionId, null);
+      return tabState;
+    }
+
+    await this.logWithContext('debug', 'TAB_STATE_MISSING', {
+      tabId,
+      source: 'session_tab_state',
+    }, sessionId, null);
+    return null;
+  }
 }

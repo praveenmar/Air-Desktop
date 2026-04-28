@@ -26,6 +26,25 @@ function mapSessionRow(row: any): Session | null {
 export class SessionRepository {
   constructor(private db: AsyncSQLiteDatabase) {}
 
+  public async getTabState(sessionId: string, tabId: string): Promise<{ lastNodeId: string | null; lastEventAt: number | null } | null> {
+    const stmt = this.db.prepare(`
+      SELECT last_node_id, last_event_at
+      FROM session_tab_state
+      WHERE session_id = ? AND tab_id = ?
+      LIMIT 1
+    `);
+    const result = await stmt.get(sessionId, tabId) as
+      | { last_node_id: string | null; last_event_at: number | null }
+      | undefined;
+    if (!result) {
+      return null;
+    }
+    return {
+      lastNodeId: result.last_node_id || null,
+      lastEventAt: typeof result.last_event_at === 'number' ? result.last_event_at : null,
+    };
+  }
+
   public async findById(sessionId: string): Promise<Session | null> {
     if (!sessionId) return null;
     const stmt = this.db.prepare('SELECT * FROM sessions WHERE id = ?');
@@ -94,14 +113,8 @@ export class SessionRepository {
   }
 
   public async getLastNodeForTab(sessionId: string, tabId: string): Promise<string | null> {
-    const stmt = this.db.prepare(`
-      SELECT last_node_id
-      FROM session_tab_state
-      WHERE session_id = ? AND tab_id = ?
-      LIMIT 1
-    `);
-    const result = await stmt.get(sessionId, tabId) as { last_node_id: string | null } | undefined;
-    return result?.last_node_id || null;
+    const state = await this.getTabState(sessionId, tabId);
+    return state?.lastNodeId || null;
   }
 
   public async getAll(limit: number = 20): Promise<Session[]> {

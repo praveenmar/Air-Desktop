@@ -60,6 +60,20 @@ export class PendingActionRepository {
     return mapPendingActionRow(row); // Run the row through the mapper before returning
   }
 
+  public async findByTraceAndSessionAnyTab(traceId: string, sessionId: string): Promise<PendingAction | null> {
+    await this.ensureReady();
+    const stmt = this.db.prepare(`
+      SELECT *
+      FROM pending_actions
+      WHERE trace_id = ?
+        AND session_id = ?
+        AND status = 'pending'
+      LIMIT 1
+    `);
+    const row = await stmt.get(traceId, sessionId);
+    return mapPendingActionRow(row);
+  }
+
   public async findRecentPendingForSessionAndTab(
     sessionId: string,
     tabId: string,

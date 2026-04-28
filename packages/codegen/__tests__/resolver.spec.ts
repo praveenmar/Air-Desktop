@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   resolveSelectorsForSession,
   validateCSSCandidate,
+  validateTextCandidate,
   SnapshotCache,
 } from '../src/selector-resolver';
 import { getSourceNodeId } from '../src/codegen.service';
@@ -9,13 +10,16 @@ import { CodegenSession, CodegenStep } from '../src/types';
 
 type TestElement = {
   id?: string;
+  tagName?: string;
   textContent?: string;
   style?: string;
   className?: string;
   parentElement?: TestElement | null;
+  children?: TestElement[];
   attrs: Record<string, string>;
   hasAttribute: (name: string) => boolean;
   getAttribute: (name: string) => string | null;
+  querySelectorAll?: (selector: string) => Array<Element>;
 };
 
 type TestDocument = Document & {
@@ -25,20 +29,33 @@ type TestDocument = Document & {
 
 function makeElement(
   attrs: Record<string, string> = {},
-  options: { text?: string; style?: string; id?: string; className?: string; parent?: TestElement | null } = {}
+  options: {
+    text?: string;
+    style?: string;
+    id?: string;
+    className?: string;
+    parent?: TestElement | null;
+    tagName?: string;
+    children?: TestElement[];
+  } = {}
 ): Element {
   const element: TestElement = {
     id: options.id,
+    tagName: options.tagName || 'DIV',
     textContent: options.text || '',
     style: options.style || '',
     className: options.className || '',
     parentElement: options.parent || null,
+    children: options.children || [],
     attrs: { ...attrs, ...(options.style ? { style: options.style } : {}) },
     hasAttribute(name: string) {
       return Object.prototype.hasOwnProperty.call(this.attrs, name);
     },
     getAttribute(name: string) {
       return this.attrs[name] ?? null;
+    },
+    querySelectorAll() {
+      return [];
     },
   };
 
@@ -438,7 +455,323 @@ describe('selector-resolver', () => {
     expect(validation.reason).toBe('unique-visible');
   });
 
-  it('accepts valid LLM fallback when deterministic resolution stays unresolved', async () => {
+  it('treats matches inside hidden ancestors as non-visible during validation', () => {
+    const hiddenAncestor = makeElement({ style: 'display:none' }, { text: 'wrapper' }) as any;
+    const hiddenChild = makeElement({ name: 'save' }, { text: 'Hidden Save', parent: hiddenAncestor });
+    const visible = makeElement({ name: 'save' }, { text: 'Visible Save' });
+    const document = makeDocument({
+      '[name="save"]': [hiddenChild, visible],
+    });
+
+    const validation = validateCSSCandidate('[name="save"]', document);
+    expect(validation.totalMatchCount).toBe(2);
+    expect(validation.visibleMatchCount).toBe(1);
+    expect(validation.effectiveMatchCount).toBe(1);
+    expect(validation.reason).toBe('unique-visible');
+  });
+
+  it('matches text selectors against input value and placeholder', () => {
+    const emailInput = makeElement({ name: 'email', value: 'alice@example.com', placeholder: 'Email address' });
+    const document = makeDocument({
+      '*': [emailInput],
+      input: [emailInput],
+    });
+
+    const valueValidation = validateTextCandidate('text=alice@example.com', document);
+    expect(valueValidation.effectiveMatchCount).toBe(1);
+    expect(valueValidation.reason).toBe('unique-visible');
+
+    const placeholderValidation = validateTextCandidate('text=Email address', document);
+    expect(placeholderValidation.effectiveMatchCount).toBe(1);
+    expect(placeholderValidation.reason).toBe('unique-visible');
+  });
+
+  it('matches text selectors against aria-label when textContent is empty', () => {
+    const button = makeElement({ 'aria-label': 'Save Changes' });
+    const document = makeDocument({
+      '*': [button],
+      button: [button],
+    });
+
+    const validation = validateTextCandidate('text=save changes', document);
+    expect(validation.effectiveMatchCount).toBe(1);
+    expect(validation.reason).toBe('unique-visible');
+  });
+
+  it('resolves overly broad selectors deterministically after pruning', () => {
+    const buttons = Array.from({ length: 60 }, (_, idx) =>
+      makeElement({ type: 'button', 'data-idx': String(idx) }, { text: `Button ${idx}`, tagName: 'BUTTON' }),
+    );
+    const document = makeDocument({
+      button: buttons,
+    });
+
+    const validation = validateCSSCandidate('button', document, makeStep(1, {
+      selector: 'button',
+      intent: 'click_button',
+      fingerprint: {
+        selector: 'button',
+        selectorPriority: 'other',
+        selectorRank: 10,
+        tagName: 'button',
+        attributes: {},
+      },
+    }));
+    expect(validation.totalMatchCount).toBe(60);
+    expect(validation.reason).toBe('too-broad');
+    expect(validation.effectiveMatchCount).toBe(1);
+    expect(validation.matchCount).toBe(60);
+    expect(validation.resolvedElement).toBeTruthy();
+  });
+
+  it('uses parent proximity to disambiguate repeated buttons', () => {
+    const formScope = makeElement({ id: 'profile-form' }, { tagName: 'FORM' }) as any;
+    const saveA = makeElement({ 'aria-label': 'Save' }, { text: 'Save', tagName: 'BUTTON', parent: formScope });
+    const saveB = makeElement({ 'aria-label': 'Save' }, { text: 'Save', tagName: 'BUTTON' });
+
+    const step = makeStep(1, {
+      selector: 'button',
+      intent: 'click_save',
+      fingerprint: {
+        selector: 'button',
+        selectorPriority: 'other',
+        selectorRank: 10,
+        tagName: 'button',
+        textExcerpt: 'Save',
+        parentSelector: '#profile-form',
+        attributes: { 'aria-label': 'Save' },
+      },
+    });
+
+    const document = makeDocument({
+      button: [saveA, saveB],
+      '#profile-form': [formScope],
+    });
+
+    const validation = validateCSSCandidate('button', document, step);
+    expect(validation.reason).toBe('resolved-multi-match');
+    expect(validation.effectiveMatchCount).toBe(1);
+    expect(validation.matchCount).toBe(2);
+    expect(validation.resolvedElement).toBe(saveA);
+    expect(validation.ambiguityReason).toBeUndefined();
+  });
+
+  it('uses context proximity to disambiguate same-label menu options in different groups', () => {
+    const accountMenu = makeElement({ id: 'account-menu' }, { tagName: 'UL' }) as any;
+    const settingsMenu = makeElement({ id: 'settings-menu' }, { tagName: 'UL' }) as any;
+    const profileAccount = makeElement(
+      { role: 'menuitem', 'aria-label': 'Profile' },
+      { text: 'Profile', tagName: 'LI', parent: accountMenu },
+    );
+    const profileSettings = makeElement(
+      { role: 'menuitem', 'aria-label': 'Profile' },
+      { text: 'Profile', tagName: 'LI', parent: settingsMenu },
+    );
+
+    const step = makeStep(1, {
+      selector: '[role="menuitem"]',
+      intent: 'click_profile',
+      fingerprint: {
+        selector: '[role="menuitem"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'li',
+        textExcerpt: 'Profile',
+        parentSelector: '#settings-menu',
+        attributes: { 'aria-label': 'Profile', role: 'menuitem' },
+      },
+    });
+
+    const document = makeDocument({
+      '[role="menuitem"]': [profileAccount, profileSettings],
+      '#account-menu': [accountMenu],
+      '#settings-menu': [settingsMenu],
+    });
+
+    const validation = validateCSSCandidate('[role="menuitem"]', document, step);
+    expect(validation.reason).toBe('resolved-multi-match');
+    expect(validation.effectiveMatchCount).toBe(1);
+    expect(validation.matchCount).toBe(2);
+    expect(validation.resolvedElement).toBe(profileSettings);
+    expect(validation.ambiguityReason).toBeUndefined();
+  });
+
+  it('uses parent row context to disambiguate repeated row actions', () => {
+    const rowA = makeElement({ id: 'row-alpha' }, { tagName: 'TR' }) as any;
+    const rowB = makeElement({ id: 'row-beta' }, { tagName: 'TR' }) as any;
+    const editAlpha = makeElement(
+      { 'aria-label': 'Edit', 'data-testid': 'edit-alpha' },
+      { text: 'Edit', tagName: 'BUTTON', parent: rowA },
+    );
+    const editBeta = makeElement(
+      { 'aria-label': 'Edit', 'data-testid': 'edit-beta' },
+      { text: 'Edit', tagName: 'BUTTON', parent: rowB },
+    );
+
+    const step = makeStep(1, {
+      selector: 'button',
+      intent: 'click_edit',
+      fingerprint: {
+        selector: 'button',
+        selectorPriority: 'other',
+        selectorRank: 10,
+        tagName: 'button',
+        textExcerpt: 'Edit',
+        parentSelector: '#row-beta',
+        attributes: { 'aria-label': 'Edit' },
+      },
+    });
+
+    const document = makeDocument({
+      button: [editAlpha, editBeta],
+      '#row-alpha': [rowA],
+      '#row-beta': [rowB],
+    });
+
+    const validation = validateCSSCandidate('button', document, step);
+    expect(validation.reason).toBe('resolved-multi-match');
+    expect(validation.effectiveMatchCount).toBe(1);
+    expect(validation.matchCount).toBe(2);
+    expect(validation.resolvedElement).toBe(editBeta);
+    expect(validation.ambiguityReason).toBeUndefined();
+  });
+
+  it('prefers a slightly better ranked element over DOM order when repeated matches are similar', () => {
+    const saveA = makeElement({}, { text: 'Save', tagName: 'BUTTON' });
+    const saveB = makeElement(
+      { 'data-testid': 'primary-save', 'aria-label': 'Save' },
+      { text: 'Save', tagName: 'BUTTON' },
+    );
+
+    const step = makeStep(1, {
+      selector: 'button',
+      intent: 'click_save',
+      fingerprint: {
+        selector: 'button',
+        selectorPriority: 'other',
+        selectorRank: 10,
+        tagName: 'button',
+        textExcerpt: 'Save',
+        attributes: { 'data-testid': 'primary-save', 'aria-label': 'Save' },
+      },
+    });
+
+    const document = makeDocument({
+      button: [saveA, saveB],
+    });
+
+    const validation = validateCSSCandidate('button', document, step);
+    expect(validation.reason).toBe('resolved-multi-match');
+    expect(validation.effectiveMatchCount).toBe(1);
+    expect(validation.matchCount).toBe(2);
+    expect(validation.resolvedElement).toBe(saveB);
+    expect(validation.ambiguityReason).toBeUndefined();
+  });
+
+  it('uses DOM order tiebreaker when repeated matches score the same', () => {
+    const saveA = makeElement({}, { text: 'Save', tagName: 'BUTTON' });
+    const saveB = makeElement({}, { text: 'Save', tagName: 'BUTTON' });
+    const step = makeStep(1, {
+      selector: 'button',
+      intent: 'click_save',
+      fingerprint: {
+        selector: 'button',
+        selectorPriority: 'other',
+        selectorRank: 10,
+        tagName: 'button',
+        textExcerpt: 'Save',
+        attributes: {},
+      },
+    });
+
+    const document = makeDocument({
+      button: [saveA, saveB],
+    });
+
+    const validation = validateCSSCandidate('button', document, step);
+    expect(validation.reason).toBe('resolved-multi-match');
+    expect(validation.resolvedElement).toBe(saveA);
+    expect(validation.ambiguityReason).toBe('resolved_by_dom_order_tiebreaker');
+    expect(validation.confidenceScore).toBeLessThan(0.7);
+  });
+
+  it('records ambiguity metadata on deterministic multi-match resolution', async () => {
+    const saveA = makeElement({}, { text: 'Save', tagName: 'BUTTON' });
+    const saveB = makeElement({}, { text: 'Save', tagName: 'BUTTON' });
+    const step = makeStep(1, {
+      selector: 'button',
+      selectorPriority: 'unknown',
+      selectorRank: 10,
+      intent: 'click_save',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: 'button',
+        selectorPriority: 'other',
+        selectorRank: 10,
+        tagName: 'button',
+        textExcerpt: 'Save',
+        attributes: {},
+      },
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        button: [saveA, saveB],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      { enableLLMFallback: false },
+    );
+
+    const resolution = result.resolutions[0];
+    expect(resolution.resolverMetadata.matchCount).toBe(2);
+    expect(resolution.resolverMetadata.ambiguityReason).toBe('resolved_by_dom_order_tiebreaker');
+    expect(resolution.resolverMetadata.confidenceScore).toBeGreaterThan(0);
+  });
+
+  it('preserves threshold safety for truly identical elements resolved by DOM order', async () => {
+    const saveA = makeElement({}, { text: 'Save', tagName: 'BUTTON' });
+    const saveB = makeElement({}, { text: 'Save', tagName: 'BUTTON' });
+    const step = makeStep(1, {
+      selector: 'button',
+      selectorPriority: 'unknown',
+      selectorRank: 10,
+      intent: 'click_save',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: 'button',
+        selectorPriority: 'other',
+        selectorRank: 10,
+        tagName: 'button',
+        textExcerpt: 'Save',
+        attributes: {},
+      },
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        button: [saveA, saveB],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      { enableLLMFallback: false },
+    );
+
+    const resolution = result.resolutions[0];
+    expect(resolution.resolverMetadata.resolvedBy).toBe('unresolved');
+    expect(resolution.resolverMetadata.matchCount).toBe(2);
+    expect(resolution.resolverMetadata.ambiguityReason).toBe('resolved_by_dom_order_tiebreaker');
+    expect(resolution.resolverMetadata.confidenceScore).toBeLessThan(0.7);
+    expect(resolution.resolverMetadata.warningCodes).toContain('deterministic-below-threshold');
+  });
+
+  it('accepts valid LLM fallback when deterministic candidates stay below threshold', async () => {
     const step = makeStep(1, {
       selector: 'button',
       selectorPriority: 'unknown',
@@ -461,7 +794,7 @@ describe('selector-resolver', () => {
       snapshotCache,
       {
         enableLLMFallback: true,
-        resolverMinScore: 1.1,
+        resolverMinScore: 1.3,
       },
       async () => [{ stepNumber: 1, selector: 'button[aria-label="submit"]' }],
     );
@@ -526,7 +859,7 @@ describe('selector-resolver', () => {
     const result = await resolveSelectorsForSession(
       makeSession([step]),
       snapshotCache,
-      { enableLLMFallback: true, resolverMinScore: 1.1 },
+      { enableLLMFallback: true, resolverMinScore: 1.3 },
       async () => [
         { stepNumber: 1, selector: 'button[aria-label="submit"]' },
         { stepNumber: 1, selector: 'button[aria-label="cancel"]' },
@@ -563,7 +896,7 @@ describe('selector-resolver', () => {
     const result = await resolveSelectorsForSession(
       makeSession(steps),
       makeSnapshotCache(snapshotEntries),
-      { enableLLMFallback: true, resolverMinScore: 1.1 },
+      { enableLLMFallback: true, resolverMinScore: 1.3 },
       llmProvider,
     );
 
@@ -604,7 +937,7 @@ describe('selector-resolver', () => {
       snapshotCache,
       {
         enableLLMFallback: true,
-        resolverMinScore: 1.1,
+        resolverMinScore: 1.3,
       },
       async () => [
         {
@@ -632,7 +965,7 @@ describe('selector-resolver', () => {
     expect(resolution.resolverMetadata.rejectReason).toBe('llm-intent-mismatch');
   });
 
-  it('does not use non-interactive container as low-score fallback for field click intent', async () => {
+  it('accepts a valid field selector via LLM instead of using a non-interactive container fallback', async () => {
     const step = makeStep(1, {
       selector: 'input[name="username"]',
       selectorPriority: 'attribute',
@@ -668,10 +1001,11 @@ describe('selector-resolver', () => {
 
     const resolution = result.resolutions[0];
     expect(resolution.resolvedSelector).toBe('input[name="username"]');
-    expect(resolution.resolverMetadata.resolvedBy).toBe('unresolved');
-    expect(resolution.resolverMetadata.warningCodes).toContain('deterministic-low-score-rejected');
+    expect(resolution.resolverMetadata.resolvedBy).toBe('llm-accepted');
+    expect(result.llmAttemptedStepNumbers).toEqual([1]);
+    expect(result.llmAcceptedStepNumbers).toEqual([1]);
     expect(resolution.resolverMetadata.warningCodes).not.toContain('deterministic-low-score-fallback');
-    expect(result.llmAcceptedStepNumbers).toHaveLength(0);
+    expect(resolution.resolverMetadata.rejectReason).toBeNull();
   });
 
   it('rejects false-positive LLM selector when intent token does not match target element context', async () => {
@@ -700,7 +1034,7 @@ describe('selector-resolver', () => {
       snapshotCache,
       {
         enableLLMFallback: true,
-        resolverMinScore: 1.1,
+        resolverMinScore: 1.3,
       },
       async () => [
         { stepNumber: 1, selector: 'a[href="/web/index.php/admin/viewAdminModule"]' },

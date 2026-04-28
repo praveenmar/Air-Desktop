@@ -8,16 +8,125 @@ import { AsyncSQLiteDatabase } from '../sqlite-adapter';
 export class EventRepository {
   constructor(private db: AsyncSQLiteDatabase) {}
 
-  public async insert(event: AIREvent, intent: string, intentRaw: string | null): Promise<void> {
+  public async insertDedupKeyIfAbsent(input: {
+    dedupKey: string;
+    eventId: string;
+    sessionId: string | null;
+    traceId: string | null;
+    eventType: string;
+    originalTimestamp: number | null;
+    createdAt: number;
+  }): Promise<boolean> {
+    const stmt = this.db.prepare(`
+      INSERT OR IGNORE INTO event_dedup_keys (
+        dedup_key,
+        event_id,
+        session_id,
+        trace_id,
+        event_type,
+        original_timestamp,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const result = await stmt.run(
+      input.dedupKey,
+      input.eventId,
+      input.sessionId,
+      input.traceId,
+      input.eventType,
+      input.originalTimestamp,
+      input.createdAt,
+    );
+
+    return (result?.changes ?? 0) > 0;
+  }
+
+  public async findDedupKeyByKey(dedupKey: string): Promise<{
+    dedupKey: string;
+    eventId: string;
+    sessionId: string | null;
+    traceId: string | null;
+    eventType: string;
+    originalTimestamp: number | null;
+    createdAt: number;
+  } | null> {
+    const stmt = this.db.prepare(`
+      SELECT
+        dedup_key AS dedupKey,
+        event_id AS eventId,
+        session_id AS sessionId,
+        trace_id AS traceId,
+        event_type AS eventType,
+        original_timestamp AS originalTimestamp,
+        created_at AS createdAt
+      FROM event_dedup_keys
+      WHERE dedup_key = ?
+      LIMIT 1
+    `);
+
+    const row = await stmt.get(dedupKey) as
+      | {
+          dedupKey: string;
+          eventId: string;
+          sessionId: string | null;
+          traceId: string | null;
+          eventType: string;
+          originalTimestamp: number | null;
+          createdAt: number;
+        }
+      | undefined;
+    return row ?? null;
+  }
+
+  public async cleanupExpiredDedupKeys(cutoffMs: number): Promise<number> {
+    const stmt = this.db.prepare(`
+      DELETE FROM event_dedup_keys
+      WHERE created_at < ?
+    `);
+    const result = await stmt.run(cutoffMs);
+    return result?.changes ?? 0;
+  }
+
+  public async findLatestOutcomeByTraceSessionAndTab(
+    traceId: string,
+    sessionId: string,
+    tabId: string,
+  ): Promise<{ id: string; timestamp: number; traceId: string | null; sessionId: string; tabId: string | null } | null> {
+    const stmt = this.db.prepare(`
+      SELECT
+        id,
+        timestamp,
+        trace_id AS traceId,
+        session_id AS sessionId,
+        json_extract(payload, '$.tabId') AS tabId
+      FROM events
+      WHERE type = 'outcome'
+        AND trace_id = ?
+        AND session_id = ?
+        AND (
+          json_extract(payload, '$.tabId') = ?
+          OR (json_extract(payload, '$.tabId') IS NULL AND ? = 'tab-legacy')
+        )
+      ORDER BY timestamp DESC
+      LIMIT 1
+    `);
+    const row = await stmt.get(traceId, sessionId, tabId, tabId) as
+      | { id: string; timestamp: number; traceId: string | null; sessionId: string; tabId: string | null }
+      | undefined;
+    return row ?? null;
+  }
+
+  public async insertIfAbsent(event: AIREvent, intent: string, intentRaw: string | null): Promise<boolean> {
     const payloadStr = JSON.stringify(event);
 
     const stmt = this.db.prepare(`
-      INSERT INTO events (
+      INSERT OR IGNORE INTO events (
         id, type, timestamp, session_id, trace_id, page_url, payload, processed, intent, intent_raw
       ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
     `);
 
-    await stmt.run(
+    const result = await stmt.run(
       event.id,
       event.type,
       event.timestamp,
@@ -28,6 +137,8 @@ export class EventRepository {
       intent,
       intentRaw
     );
+
+    return (result?.changes ?? 0) > 0;
   }
 
   public async findById(id: string): Promise<any | null> {

@@ -24,10 +24,33 @@ export const ViewportSchema = z.object({
 });
 export type Viewport = z.infer<typeof ViewportSchema>;
 
+export const CompositeAnchorKindSchema = z.enum([
+  'form_cluster',
+  'container_controls',
+  'table_row',
+  'dialog_actions',
+  'menu_group',
+]);
+export type CompositeAnchorKind = z.infer<typeof CompositeAnchorKindSchema>;
+
+export const CompositeAnchorSchema = z.object({
+  kind: CompositeAnchorKindSchema,
+  scopeTag: z.string().nullable().optional(),
+  scopeRole: z.string().nullable().optional(),
+  scopeId: z.string().nullable().optional(),
+  scopeName: z.string().nullable().optional(),
+  scopeLabel: z.string().nullable().optional(),
+  tokens: z.array(z.string()),
+  descriptor: z.string(),
+  confidence: z.number(),
+});
+export type CompositeAnchor = z.infer<typeof CompositeAnchorSchema>;
+
 /** DOM Snapshot Data */
 export const PageSnapshotSchema = z.object({
   html: z.string(),
   anchors: z.array(z.string()).optional(),
+  compositeAnchors: z.array(CompositeAnchorSchema).optional(),
   controlSignature: z.string().nullable().optional(),
   isStable: z.boolean().optional(),
   viewport: ViewportSchema.optional(),
