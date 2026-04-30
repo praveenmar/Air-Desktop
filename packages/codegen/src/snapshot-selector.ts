@@ -301,54 +301,7 @@ function trySelectorPresence(step: CodegenStep, snapshot: Document): boolean | n
 }
 
 function tryFingerprintPresence(step: CodegenStep, snapshot: Document): boolean {
-  const fingerprint = step.fingerprint;
-  if (!fingerprint) return false;
-
-  const id = fingerprint.attributes?.id;
-  if (id) {
-    try {
-      if (snapshot.querySelector(`#${cssEscape(id)}`)) return true;
-    } catch {
-      // Ignore invalid selector fragments and continue.
-    }
-  }
-
-  const dataTestId =
-    fingerprint.attributes?.['data-testid'] ??
-    fingerprint.attributes?.['data-test-id'] ??
-    fingerprint.attributes?.['data-qa'];
-  if (dataTestId) {
-    try {
-      if (snapshot.querySelector(`[data-testid="${cssEscape(dataTestId)}"]`)) return true;
-    } catch {
-      // Ignore invalid selector fragments and continue.
-    }
-  }
-
-  const name = fingerprint.attributes?.name;
-  if (name) {
-    try {
-      if (snapshot.querySelector(`[name="${cssEscape(name)}"]`)) return true;
-    } catch {
-      // Ignore invalid selector fragments and continue.
-    }
-  }
-
-  const tagName = fingerprint.tagName?.toLowerCase() || '*';
-  const targetText = normalizeText(fingerprint.textExcerpt || '');
-  if (targetText) {
-    try {
-      const candidates = Array.from(snapshot.querySelectorAll(tagName));
-      return candidates.some(candidate => {
-        if (!isVisibleElement(candidate)) return false;
-        return normalizeText(candidate.textContent || '').includes(targetText);
-      });
-    } catch {
-      return false;
-    }
-  }
-
-  return false;
+  return !!findTargetEvidence(step, snapshot);
 }
 
 function cssEscape(value: string): string {
@@ -358,6 +311,137 @@ function cssEscape(value: string): string {
     .replace(/\n/g, '\\A ')
     .replace(/\r/g, '\\D ')
     .replace(/\t/g, '\\9 ');
+}
+
+function inferStepControlFamily(step: CodegenStep): string {
+  const attrs = step.fingerprint?.attributes ?? {};
+  const role = (attrs.role || '').toLowerCase();
+  const type = (attrs.type || '').toLowerCase();
+  const tagName = (step.fingerprint?.tagName || '').toLowerCase();
+  const text = normalizeText(step.fingerprint?.textExcerpt || '');
+  const selector = (step.selector || '').toLowerCase();
+
+  if (role === 'menuitem') return 'menuitem';
+  if (role === 'combobox') return 'combobox';
+  if (type === 'password') return 'password-input';
+  if (type === 'submit' || step.action === 'submit') return 'submit-button';
+  if (attrs.href || tagName === 'a' || selector.startsWith('a') || selector.includes('[href=')) return 'nav-link';
+  if (role === 'button' || tagName === 'button') return 'button';
+  if (tagName === 'select') return 'combobox';
+  if (role === 'textbox' || role === 'searchbox' || tagName === 'input' || tagName === 'textarea') {
+    return type === 'password' ? 'password-input' : 'text-input';
+  }
+  if (
+    step.action === 'custom-select' ||
+    text === '-- select --' ||
+    selector.includes('select') ||
+    role === 'listbox'
+  ) {
+    return 'select-trigger';
+  }
+  return 'generic-container';
+}
+
+function inferElementControlFamily(element: Element): string {
+  const tagName = (((element as HTMLElement).tagName) || '').toLowerCase();
+  const role = (element.getAttribute('role') || '').toLowerCase();
+  const type = (element.getAttribute('type') || '').toLowerCase();
+  const placeholder = normalizeText(element.getAttribute('placeholder') || '');
+
+  if (role === 'menuitem') return 'menuitem';
+  if (role === 'combobox' || role === 'listbox' || tagName === 'select') return 'combobox';
+  if (type === 'password') return 'password-input';
+  if (type === 'submit') return 'submit-button';
+  if (tagName === 'a' || !!element.getAttribute('href')) return 'nav-link';
+  if (tagName === 'button' || role === 'button') return 'button';
+  if (tagName === 'input' || tagName === 'textarea' || role === 'textbox' || role === 'searchbox') {
+    if (placeholder.includes('search') || type === 'search') return 'text-input';
+    return 'text-input';
+  }
+  if (placeholder === '-- select --') return 'select-trigger';
+  return 'generic-container';
+}
+
+function textSignalsFromElement(element: Element): string[] {
+  const signals = [
+    element.textContent || '',
+    element.getAttribute('aria-label') || '',
+    element.getAttribute('placeholder') || '',
+    element.getAttribute('value') || '',
+  ];
+  return signals.map(normalizeText).filter(Boolean);
+}
+
+function findTargetEvidence(step: CodegenStep, snapshot: Document): string | null {
+  const selector = step.selector?.trim();
+  if (selector && isLikelyCssSelector(selector)) {
+    try {
+      const match = snapshot.querySelector(selector);
+      if (match) return 'selector_match';
+    } catch {
+      // Ignore invalid selector fragments and continue.
+    }
+  }
+
+  const fingerprint = step.fingerprint;
+  if (!fingerprint) return null;
+  const attrs = fingerprint.attributes ?? {};
+
+  const attrChecks: Array<[string, string | undefined, (value: string) => string]> = [
+    ['id', attrs.id, (value) => `#${cssEscape(value)}`],
+    ['name', attrs.name, (value) => `[name="${cssEscape(value)}"]`],
+    ['placeholder', attrs.placeholder, (value) => `[placeholder="${cssEscape(value)}"]`],
+    ['role', attrs.role, (value) => `[role="${cssEscape(value)}"]`],
+    ['href', attrs.href, (value) => `[href="${cssEscape(value)}"]`],
+    ['data-testid', attrs.dataTestId ?? attrs['data-testid'], (value) => `[data-testid="${cssEscape(value)}"]`],
+    ['data-cy', attrs.dataCy ?? attrs['data-cy'], (value) => `[data-cy="${cssEscape(value)}"]`],
+    ['data-qa', attrs.dataQa ?? attrs['data-qa'], (value) => `[data-qa="${cssEscape(value)}"]`],
+  ];
+
+  for (const [label, value, selectorFactory] of attrChecks) {
+    if (!value) continue;
+    try {
+      if (snapshot.querySelector(selectorFactory(value))) return `fingerprint_attribute:${label}`;
+    } catch {
+      // Ignore invalid selector fragments and continue.
+    }
+  }
+
+  const targetText = normalizeText(fingerprint.textExcerpt || '');
+  if (targetText) {
+    try {
+      const tagName = fingerprint.tagName?.toLowerCase() || '*';
+      const candidates = Array.from(snapshot.querySelectorAll(tagName));
+      const textMatch = candidates.some(candidate => {
+        if (!isVisibleElement(candidate)) return false;
+        return textSignalsFromElement(candidate).some(signal => signal.includes(targetText));
+      });
+      if (textMatch) return 'fingerprint_text';
+    } catch {
+      // Ignore selector errors and continue.
+    }
+  }
+
+  if (fingerprint.parentSelector && isLikelyCssSelector(fingerprint.parentSelector)) {
+    try {
+      if (snapshot.querySelector(fingerprint.parentSelector)) return 'parent_context';
+    } catch {
+      // Ignore selector errors and continue.
+    }
+  }
+
+  const stepFamily = inferStepControlFamily(step);
+  if (stepFamily !== 'generic-container') {
+    try {
+      const all = Array.from(snapshot.querySelectorAll('*'));
+      const familyMatch = all.some(element => inferElementControlFamily(element) === stepFamily);
+      if (familyMatch) return 'control_family';
+    } catch {
+      // Ignore selector errors and continue.
+    }
+  }
+
+  return null;
 }
 
 function deriveBaseConfidence(candidate: SnapshotCandidateOption, mode: SnapshotSelectionMode): number {
@@ -583,15 +667,16 @@ function evaluateTargetPresence(
   candidate: SnapshotCandidateOption,
   snapshot: Document,
   mode: SnapshotSelectionMode
-): { targetPresent?: boolean; skipReason?: string; confidenceScore?: number; shadowDegraded?: boolean } {
+) : { targetPresent?: boolean; skipReason?: string; confidenceScore?: number; shadowDegraded?: boolean; evidenceReason?: string | null } {
   const destructive = isDestructiveAction(step);
   const cheapPresence = trySelectorPresence(step, snapshot);
   if (cheapPresence === true) {
-    return { targetPresent: true };
+    return { targetPresent: true, evidenceReason: 'selector_match' };
   }
 
   const runExpensive = shouldRunExpensivePresenceValidation(step, candidate, mode);
-  const expensivePresence = runExpensive ? tryFingerprintPresence(step, snapshot) : false;
+  const evidenceReason = runExpensive ? findTargetEvidence(step, snapshot) : null;
+  const expensivePresence = !!evidenceReason;
   const targetPresent = cheapPresence === false ? expensivePresence : cheapPresence ?? expensivePresence;
 
   const probableClosedShadow =
@@ -602,6 +687,7 @@ function evaluateTargetPresence(
       skipReason: SNAPSHOT_SKIP_REASONS.CLOSED_SHADOW_DOM_UNOBSERVABLE,
       shadowDegraded: true,
       confidenceScore: destructive ? 0 : 0.2,
+      evidenceReason: null,
     };
   }
 
@@ -611,6 +697,7 @@ function evaluateTargetPresence(
       skipReason: SNAPSHOT_SKIP_REASONS.SHADOW_DOM_NOT_SERIALIZED,
       shadowDegraded: true,
       confidenceScore: destructive ? 0 : 0.25,
+      evidenceReason: null,
     };
   }
 
@@ -619,10 +706,11 @@ function evaluateTargetPresence(
       targetPresent: false,
       skipReason: SNAPSHOT_SKIP_REASONS.TARGET_MISSING_IN_SNAPSHOT,
       confidenceScore: destructive ? 0 : 0.35,
+      evidenceReason: null,
     };
   }
 
-  return { targetPresent: true };
+  return { targetPresent: true, evidenceReason: evidenceReason ?? 'selector_match' };
 }
 
 function selectFromCandidates(
@@ -635,6 +723,15 @@ function selectFromCandidates(
   let selectedSnapshot: Document | null = null;
   let selectedCandidate: SnapshotCandidateOption | null = null;
   let selectedConfidence = 0;
+  let targetMissingFallback:
+    | {
+      snapshot: Document;
+      candidate: SnapshotCandidateOption;
+      confidenceScore: number;
+      evidenceReason: string | null;
+      traceIndex: number;
+    }
+    | null = null;
 
   for (const candidate of candidates) {
     if (selectedCandidate) {
@@ -723,20 +820,25 @@ function selectFromCandidates(
     }
 
     if (targetEvaluation.skipReason && !destructive) {
-      evaluatedCandidates.push(
+      const traceIndex = evaluatedCandidates.push(
         createTraceEntry(candidate, {
-          selected: true,
-          reason: candidate.reasonIfSelected,
+          selected: false,
           confidenceScore,
           targetPresent: targetEvaluation.targetPresent,
+          snapshotTargetEvidenceReason: targetEvaluation.evidenceReason ?? targetEvaluation.skipReason ?? null,
           shadowDegraded: targetEvaluation.shadowDegraded,
-          skipReason: icStateEvaluation.annotationReason
-            ?? (icTabUnknown ? SNAPSHOT_SKIP_REASONS.IC_TAB_UNKNOWN : undefined),
+          skipReason: targetEvaluation.skipReason,
         })
-      );
-      selectedSnapshot = snapshot;
-      selectedCandidate = candidate;
-      selectedConfidence = confidenceScore;
+      ) - 1;
+      if (!targetMissingFallback) {
+        targetMissingFallback = {
+          snapshot,
+          candidate,
+          confidenceScore,
+          evidenceReason: targetEvaluation.evidenceReason ?? targetEvaluation.skipReason ?? null,
+          traceIndex,
+        };
+      }
       continue;
     }
 
@@ -746,6 +848,7 @@ function selectFromCandidates(
         reason: candidate.reasonIfSelected,
         confidenceScore,
         targetPresent: true,
+        snapshotTargetEvidenceReason: targetEvaluation.evidenceReason ?? 'selector_match',
         skipReason: icStateEvaluation.annotationReason
           ?? (icTabUnknown ? SNAPSHOT_SKIP_REASONS.IC_TAB_UNKNOWN : undefined),
       })
@@ -753,6 +856,17 @@ function selectFromCandidates(
     selectedSnapshot = snapshot;
     selectedCandidate = candidate;
     selectedConfidence = confidenceScore;
+  }
+
+  if (!selectedCandidate && targetMissingFallback) {
+    selectedSnapshot = targetMissingFallback.snapshot;
+    selectedCandidate = targetMissingFallback.candidate;
+    selectedConfidence = targetMissingFallback.confidenceScore;
+    evaluatedCandidates[targetMissingFallback.traceIndex] = {
+      ...evaluatedCandidates[targetMissingFallback.traceIndex],
+      selected: true,
+      reason: targetMissingFallback.candidate.reasonIfSelected,
+    };
   }
 
   if (!selectedCandidate) {
@@ -767,6 +881,16 @@ function selectFromCandidates(
     sourceNodeId: selectedCandidate.sourceNodeId ?? selectedCandidate.handle?.sourceNodeId,
     timestamp: selectedCandidate.timestamp ?? selectedCandidate.handle?.timestamp,
     confidenceScore: selectedConfidence,
+    snapshotTargetEvidence: evaluatedCandidates.find(entry =>
+      entry.selected &&
+      entry.source === selectedCandidate?.source &&
+      entry.temporalClass === selectedCandidate?.temporalClass,
+    )?.targetPresent,
+    snapshotTargetEvidenceReason: evaluatedCandidates.find(entry =>
+      entry.selected &&
+      entry.source === selectedCandidate?.source &&
+      entry.temporalClass === selectedCandidate?.temporalClass,
+    )?.snapshotTargetEvidenceReason ?? null,
   };
 
   return {

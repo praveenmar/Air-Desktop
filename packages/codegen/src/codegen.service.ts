@@ -198,11 +198,132 @@ function parseAnchorsToAssertions(
 // Fingerprint is stored as JSON in event payload.
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+function logFingerprintWarning(
+  code: 'FINGERPRINT_ATTRIBUTE_MISSING_AT_CAPTURE' | 'FINGERPRINT_ATTRIBUTE_DROPPED_DOWNSTREAM',
+  details: Record<string, unknown>,
+): void {
+  console.warn(code, details);
+}
+
+function normalizeFingerprintAttributes(raw: unknown): FingerprintData['attributes'] | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const source = raw as Record<string, unknown>;
+  const normalized: Record<string, string> = {};
+
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value === 'string' && value.length > 0) {
+      normalized[key] = value;
+    }
+  }
+
+  const aliasPairs: Array<[string, string]> = [
+    ['ariaLabel', 'aria-label'],
+    ['dataTestId', 'data-testid'],
+    ['dataCy', 'data-cy'],
+    ['dataQa', 'data-qa'],
+  ];
+
+  for (const [camelKey, kebabKey] of aliasPairs) {
+    const camelValue = normalized[camelKey];
+    const kebabValue = normalized[kebabKey];
+    if (camelValue && !kebabValue) normalized[kebabKey] = camelValue;
+    if (kebabValue && !camelValue) normalized[camelKey] = kebabValue;
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function normalizeFingerprint(raw: unknown): FingerprintData | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const fingerprint = raw as Record<string, unknown>;
+  const attributes = normalizeFingerprintAttributes(fingerprint.attributes);
+  const contextRaw =
+    fingerprint.context && typeof fingerprint.context === 'object' && !Array.isArray(fingerprint.context)
+      ? fingerprint.context as Record<string, unknown>
+      : undefined;
+
+  const normalized: FingerprintData = {
+    selector: typeof fingerprint.selector === 'string' ? fingerprint.selector : undefined,
+    selectorPriority: typeof fingerprint.selectorPriority === 'string' ? fingerprint.selectorPriority : undefined,
+    selectorRank: typeof fingerprint.selectorRank === 'number' ? fingerprint.selectorRank : undefined,
+    tagName: typeof fingerprint.tagName === 'string' ? fingerprint.tagName : undefined,
+    parentSelector:
+      fingerprint.parentSelector === null
+        ? null
+        : (typeof fingerprint.parentSelector === 'string' ? fingerprint.parentSelector : undefined),
+    textExcerpt:
+      fingerprint.textExcerpt === null
+        ? null
+        : (typeof fingerprint.textExcerpt === 'string' ? fingerprint.textExcerpt : undefined),
+    context: contextRaw
+      ? {
+        parentTag:
+          contextRaw.parentTag === null
+            ? null
+            : (typeof contextRaw.parentTag === 'string' ? contextRaw.parentTag : undefined),
+        nearestContainerTag:
+          contextRaw.nearestContainerTag === null
+            ? null
+            : (typeof contextRaw.nearestContainerTag === 'string' ? contextRaw.nearestContainerTag : undefined),
+      }
+      : undefined,
+    attributes,
+    attributesHash: typeof fingerprint.attributesHash === 'string' ? fingerprint.attributesHash : undefined,
+  };
+
+  if (
+    fingerprint.attributes != null &&
+    (typeof fingerprint.attributes !== 'object' || Array.isArray(fingerprint.attributes))
+  ) {
+    logFingerprintWarning('FINGERPRINT_ATTRIBUTE_DROPPED_DOWNSTREAM', {
+      reason: 'attributes-unparseable',
+      rawType: typeof fingerprint.attributes,
+    });
+  }
+
+  const expectedAliases: Array<[string, string]> = [
+    ['ariaLabel', 'aria-label'],
+    ['dataTestId', 'data-testid'],
+    ['dataCy', 'data-cy'],
+    ['dataQa', 'data-qa'],
+  ];
+
+  for (const [camelKey, kebabKey] of expectedAliases) {
+    const source = fingerprint.attributes as Record<string, unknown> | undefined;
+    const sourceHasValue = typeof source?.[camelKey] === 'string' || typeof source?.[kebabKey] === 'string';
+    const normalizedHasValue = typeof attributes?.[camelKey] === 'string' || typeof attributes?.[kebabKey] === 'string';
+    if (sourceHasValue && !normalizedHasValue) {
+      logFingerprintWarning('FINGERPRINT_ATTRIBUTE_DROPPED_DOWNSTREAM', {
+        attribute: camelKey,
+        alias: kebabKey,
+      });
+    }
+  }
+
+  return normalized;
+}
+
 function extractFingerprint(payloadJson: string | null): FingerprintData | null {
   if (!payloadJson) return null;
   try {
     const payload = JSON.parse(payloadJson);
-    return payload.fingerprint || null;
+    if (payload.fingerprint && typeof payload.fingerprint === 'object' && !Array.isArray(payload.fingerprint)) {
+      const rawFingerprint = payload.fingerprint as Record<string, unknown>;
+      for (const field of ['selector', 'selectorPriority', 'attributes']) {
+        if (rawFingerprint[field] == null) {
+          logFingerprintWarning('FINGERPRINT_ATTRIBUTE_MISSING_AT_CAPTURE', {
+            field,
+          });
+        }
+      }
+    }
+    const fingerprint = normalizeFingerprint(payload.fingerprint);
+    if (payload.fingerprint && !fingerprint) {
+      logFingerprintWarning('FINGERPRINT_ATTRIBUTE_DROPPED_DOWNSTREAM', {
+        reason: 'fingerprint-unparseable',
+      });
+    }
+    return fingerprint;
   } catch {
     return null;
   }

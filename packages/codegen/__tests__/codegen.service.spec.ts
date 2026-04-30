@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { 
   CodegenService,
   normalizeSelectorPriority,
@@ -22,6 +22,10 @@ const createStep = (overrides: Partial<CodegenStep> = {}): CodegenStep => ({
   assertions: [],
   userAssertions: [],
   ...overrides,
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe('CodegenService - Priority & Rank', () => {
@@ -653,5 +657,234 @@ describe('CodegenService - Step Metadata Preservation', () => {
     expect(session.steps[0].sourceNodeId).toBe('node-click');
     expect(session.steps[1].action).toBe('submit');
     expect(session.steps[1].sourceNodeId).toBe('node-click');
+  });
+
+  it('preserves extended fingerprint attributes and aliases into CodegenStep.fingerprint', () => {
+    const eventPayload = JSON.stringify({
+      normalizedUrl: 'https://app.test/profile',
+      fingerprint: {
+        selector: '[data-cy="save-profile"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'button',
+        parentSelector: '#profile-form',
+        textExcerpt: 'Save Profile',
+        context: {
+          parentTag: 'div',
+          nearestContainerTag: 'form',
+        },
+        attributes: {
+          id: 'save-profile',
+          name: 'saveProfile',
+          role: 'button',
+          ariaLabel: 'Save profile',
+          class: 'btn btn-primary profile-save',
+          classList: 'btn btn-primary profile-save',
+          placeholder: 'unused',
+          type: 'submit',
+          href: 'https://app.test/profile/save',
+          title: 'Save profile',
+          alt: 'Save icon',
+          value: 'Save',
+          dataTestId: 'save-profile',
+          dataCy: 'save-profile',
+          'data-qa': 'save-profile',
+        },
+        attributesHash: 'fingerprint-hash-123',
+      },
+    });
+
+    const fakeDb = {
+      prepare(sql: string) {
+        if (sql.includes('FROM sessions')) {
+          return {
+            get: () => ({
+              id: 'session-test',
+              started_at: 1_700_000_000_000,
+            }),
+          };
+        }
+
+        if (sql.includes('FROM events e')) {
+          return {
+            all: () => ([{
+              eventId: 'ev-1',
+              eventType: 'click',
+              timestamp: 1_700_000_000_100,
+              pageUrl: 'https://app.test/profile',
+              traceId: 'trace-1',
+              nodeId: 'node-1',
+              payload: eventPayload,
+            }]),
+          };
+        }
+
+        if (sql.includes('WHERE ed.fingerprint_hash IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('WHERE ed.trigger_event_id IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('SELECT control_signature AS controlSignature')) {
+          return { get: () => undefined };
+        }
+
+        if (sql.includes('FROM nodes')) {
+          return {
+            all: () => [],
+            get: () => undefined,
+          };
+        }
+
+        return {
+          get: () => undefined,
+          all: () => [],
+        };
+      },
+      close() {
+        return undefined;
+      },
+    };
+
+    const service = Object.create(CodegenService.prototype) as any;
+    service.db = fakeDb;
+    service.options = {
+      dbPath: ':memory:',
+      minConfidence: 0,
+      includeScrollSteps: false,
+      includeHoverSteps: false,
+    };
+
+    const session = (service as CodegenService).buildSession('session-test');
+    expect(session.steps).toHaveLength(1);
+    expect(session.steps[0].fingerprint).toEqual(expect.objectContaining({
+      selector: '[data-cy="save-profile"]',
+      selectorPriority: 'attribute',
+      selectorRank: 3,
+      tagName: 'button',
+      parentSelector: '#profile-form',
+      textExcerpt: 'Save Profile',
+      attributesHash: 'fingerprint-hash-123',
+      context: {
+        parentTag: 'div',
+        nearestContainerTag: 'form',
+      },
+      attributes: expect.objectContaining({
+        id: 'save-profile',
+        name: 'saveProfile',
+        role: 'button',
+        ariaLabel: 'Save profile',
+        'aria-label': 'Save profile',
+        class: 'btn btn-primary profile-save',
+        classList: 'btn btn-primary profile-save',
+        placeholder: 'unused',
+        type: 'submit',
+        href: 'https://app.test/profile/save',
+        title: 'Save profile',
+        alt: 'Save icon',
+        value: 'Save',
+        dataTestId: 'save-profile',
+        'data-testid': 'save-profile',
+        dataCy: 'save-profile',
+        'data-cy': 'save-profile',
+        dataQa: 'save-profile',
+        'data-qa': 'save-profile',
+      }),
+    }));
+  });
+
+  it('preserves OrangeHRM Admin href in click fingerprint from payload into CodegenStep', () => {
+    const eventPayload = JSON.stringify({
+      normalizedUrl: 'https://opensource-demo.orangehrmlive.com/web/index.php/dashboard/index',
+      fingerprint: {
+        selector: '.oxd-main-menu-item',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'a',
+        parentSelector: 'li',
+        textExcerpt: 'Admin',
+        context: {
+          parentTag: 'li',
+          nearestContainerTag: 'nav',
+        },
+        attributes: {
+          href: 'https://opensource-demo.orangehrmlive.com/web/index.php/admin/viewAdminModule',
+          role: 'link',
+        },
+        attributesHash: 'admin-hash-456',
+      },
+    });
+
+    const fakeDb = {
+      prepare(sql: string) {
+        if (sql.includes('FROM sessions')) {
+          return {
+            get: () => ({
+              id: 'session-test',
+              started_at: 1_700_000_000_000,
+            }),
+          };
+        }
+
+        if (sql.includes('FROM events e')) {
+          return {
+            all: () => ([{
+              eventId: 'ev-1',
+              eventType: 'click',
+              timestamp: 1_700_000_000_100,
+              pageUrl: 'https://opensource-demo.orangehrmlive.com/web/index.php/dashboard/index',
+              traceId: 'trace-1',
+              nodeId: 'node-1',
+              payload: eventPayload,
+            }]),
+          };
+        }
+
+        if (sql.includes('WHERE ed.fingerprint_hash IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('WHERE ed.trigger_event_id IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('SELECT control_signature AS controlSignature')) {
+          return { get: () => undefined };
+        }
+
+        if (sql.includes('FROM nodes')) {
+          return {
+            all: () => [],
+            get: () => undefined,
+          };
+        }
+
+        return {
+          get: () => undefined,
+          all: () => [],
+        };
+      },
+      close() {
+        return undefined;
+      },
+    };
+
+    const service = Object.create(CodegenService.prototype) as any;
+    service.db = fakeDb;
+    service.options = {
+      dbPath: ':memory:',
+      minConfidence: 0,
+      includeScrollSteps: false,
+      includeHoverSteps: false,
+    };
+
+    const session = (service as CodegenService).buildSession('session-test');
+    expect(session.steps).toHaveLength(1);
+    expect(session.steps[0].fingerprint?.attributes?.href).toBe(
+      'https://opensource-demo.orangehrmlive.com/web/index.php/admin/viewAdminModule'
+    );
+    expect(session.steps[0].fingerprint?.textExcerpt).toBe('Admin');
   });
 });

@@ -94,6 +94,92 @@ function emptyInventory(): SnapshotInventory {
 }
 
 describe('snapshot-selector IC policy', () => {
+  it('marks event-local snapshot target evidence when original target is present', () => {
+    const doc = makeDocument({
+      '[name="email"]': [makeElement({ name: 'email' }, 'Email')],
+      '*': [makeElement({ name: 'email' }, 'Email')],
+    });
+    const inventory = emptyInventory();
+    inventory.eventLocalByEventId.set('ev-1', {
+      pageState: handle('event-local-pageState', 'action_local', doc, {
+        eventId: 'ev-1',
+        timestamp: 1000,
+        tabId: 'tab-1',
+      }),
+    });
+
+    const result = selectSnapshotForStep(baseStep(), inventory, 'action');
+
+    expect(result.provenance.source).toBe('event-local-pageState');
+    expect(result.provenance.snapshotTargetEvidence).toBe(true);
+    expect(result.provenance.snapshotTargetEvidenceReason).toBe('selector_match');
+  });
+
+  it('keeps exact interaction-context snapshot valid when target evidence exists', () => {
+    const doc = makeDocument({
+      '[name="email"]': [makeElement({ name: 'email' }, 'Email')],
+      '*': [makeElement({ name: 'email' }, 'Email')],
+    });
+    const inventory = emptyInventory();
+    inventory.interactionContextExactAny.set(
+      'https://app.test/profile|sig-1',
+      handle('interaction-context-exact', 'post_action', doc, {
+        timestamp: 1001,
+        tabId: 'tab-1',
+        normalizedUrl: 'https://app.test/profile',
+        controlSignature: 'sig-1',
+      }),
+    );
+
+    const result = selectSnapshotForStep(
+      baseStep({ controlSignature: 'sig-1', sourceNodeId: undefined, eventId: undefined }),
+      inventory,
+      'action',
+    );
+
+    expect(result.provenance.source).toBe('interaction-context-exact');
+    expect(result.provenance.snapshotTargetEvidence).toBe(true);
+  });
+
+  it('falls through target-missing action snapshots and surfaces missing-target fallback explicitly', () => {
+    const sourceDoc = makeDocument({
+      '[name="email"]': [],
+      '*': [makeElement({ placeholder: 'Search', type: 'search' })],
+    });
+    const inventory = emptyInventory();
+    inventory.sourceNodeById.set(
+      'node-1',
+      handle('source-node-snapshot', 'pre_action', sourceDoc, {
+        sourceNodeId: 'node-1',
+        timestamp: 990,
+        tabId: 'tab-1',
+      }),
+    );
+
+    const result = selectSnapshotForStep(
+      baseStep({
+        selector: 'div > div:nth-of-type(1)',
+        selectorPriority: 'path',
+        selectorRank: 10,
+        intent: 'click_Select',
+        fingerprint: {
+          selector: 'div > div:nth-of-type(1)',
+          selectorPriority: 'path',
+          selectorRank: 10,
+          tagName: 'div',
+          textExcerpt: '-- Select --',
+          attributes: {},
+        },
+      }),
+      inventory,
+      'action',
+    );
+
+    expect(result.provenance.source).toBe('source-node-snapshot');
+    expect(result.provenance.snapshotTargetEvidence).toBe(false);
+    expect(result.provenance.snapshotTargetEvidenceReason).toBe('target_missing_in_snapshot');
+  });
+
   it('skips exact IC when controlSignature is missing and downgrades stable-by-url fallback', () => {
     const doc = makeDocument({
       '[name="email"]': [makeElement({ name: 'email' }, 'Email')],
@@ -115,7 +201,7 @@ describe('snapshot-selector IC policy', () => {
     expect(result.provenance.confidenceScore).toBeLessThanOrEqual(0.3);
     expect(result.evaluatedCandidates[3]?.skipReason).toBe('exact_ic_skipped_missing_control_signature');
     expect(result.evaluatedCandidates[4]?.selected).toBe(true);
-    expect(result.evaluatedCandidates[4]?.skipReason).toBe('ic_stale');
+    expect(result.evaluatedCandidates[4]?.skipReason).toBeUndefined();
   });
 
   it('keeps outcome post-boundary IC valid', () => {
@@ -154,5 +240,33 @@ describe('snapshot-selector IC policy', () => {
     expect(result.provenance.reason).toBe('selected_ic_exact_stable_for_outcome_state');
     expect(result.evaluatedCandidates[0]?.selected).toBe(true);
     expect(result.evaluatedCandidates[0]?.skipReason).toBeUndefined();
+  });
+
+  it('keeps outcome snapshot selection permissive even when original action target is absent', () => {
+    const doc = makeDocument({
+      '[name="email"]': [],
+      '*': [makeElement({}, 'Dashboard')],
+    });
+    const inventory = emptyInventory();
+    inventory.destinationNodeById.set(
+      'node-dest',
+      handle('destination-node-snapshot', 'outcome_state', doc, {
+        sourceNodeId: 'node-dest',
+        timestamp: 1100,
+        tabId: 'tab-1',
+      }),
+    );
+
+    const result = selectSnapshotForStep(
+      baseStep({
+        outcomeType: 'navigation',
+        destinationNodeId: 'node-dest',
+      }),
+      inventory,
+      'outcome',
+    );
+
+    expect(result.provenance.source).toBe('destination-node-snapshot');
+    expect(result.evaluatedCandidates.some(candidate => candidate.selected)).toBe(true);
   });
 });

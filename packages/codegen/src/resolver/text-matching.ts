@@ -1,6 +1,21 @@
 import type { CodegenStep } from '../types';
 import type { StepSignalAttributes } from './types';
 
+export interface SemanticTextSignal {
+  value: string;
+  source: string;
+}
+
+function logFingerprintInference(
+  attribute: string,
+  selector: string,
+): void {
+  console.warn('FINGERPRINT_ATTRIBUTE_INFERRED_DOWNSTREAM', {
+    attribute,
+    selector,
+  });
+}
+
 export function cssEscape(value: string): string {
   return value
     .replace(/\\/g, '\\\\')
@@ -63,22 +78,55 @@ export function inferStepSignalAttributes(step: CodegenStep): StepSignalAttribut
   const fingerprint = step.fingerprint;
   const fpAttrs = fingerprint?.attributes;
 
-  attrs.id = fpAttrs?.id || extractId(selector) || undefined;
-  attrs.name = fpAttrs?.name || extractAttributeValue(selector, 'name') || undefined;
-  attrs.dataTestId =
-    fpAttrs?.dataTestId ||
-    fpAttrs?.['data-testid'] ||
-    extractAttributeValue(selector, 'data-testid') ||
-    undefined;
-  attrs.ariaLabel =
-    fpAttrs?.ariaLabel ||
-    fpAttrs?.['aria-label'] ||
-    extractAttributeValue(selector, 'aria-label') ||
-    undefined;
-  attrs.placeholder =
-    fpAttrs?.placeholder || extractAttributeValue(selector, 'placeholder') || undefined;
-  attrs.role = fpAttrs?.role || extractAttributeValue(selector, 'role') || undefined;
-  attrs.class = extractClass(selector) ?? undefined;
+  const preferFingerprint = (
+    field: string,
+    fingerprintValue: string | undefined,
+    inferredValue: string | null,
+  ): string | undefined => {
+    if (typeof fingerprintValue === 'string' && fingerprintValue.length > 0) {
+      return fingerprintValue;
+    }
+    if (typeof inferredValue === 'string' && inferredValue.length > 0) {
+      logFingerprintInference(field, selector);
+      return inferredValue;
+    }
+    return undefined;
+  };
+
+  attrs.id = preferFingerprint('id', fpAttrs?.id, extractId(selector));
+  attrs.name = preferFingerprint('name', fpAttrs?.name, extractAttributeValue(selector, 'name'));
+  attrs.dataTestId = preferFingerprint(
+    'data-testid',
+    fpAttrs?.dataTestId || fpAttrs?.['data-testid'],
+    extractAttributeValue(selector, 'data-testid'),
+  );
+  attrs.dataCy = preferFingerprint(
+    'data-cy',
+    fpAttrs?.dataCy || fpAttrs?.['data-cy'],
+    extractAttributeValue(selector, 'data-cy'),
+  );
+  attrs.dataQa = preferFingerprint(
+    'data-qa',
+    fpAttrs?.dataQa || fpAttrs?.['data-qa'],
+    extractAttributeValue(selector, 'data-qa'),
+  );
+  attrs.ariaLabel = preferFingerprint(
+    'aria-label',
+    fpAttrs?.ariaLabel || fpAttrs?.['aria-label'],
+    extractAttributeValue(selector, 'aria-label'),
+  );
+  attrs.placeholder = preferFingerprint(
+    'placeholder',
+    fpAttrs?.placeholder,
+    extractAttributeValue(selector, 'placeholder'),
+  );
+  attrs.role = preferFingerprint('role', fpAttrs?.role, extractAttributeValue(selector, 'role'));
+  attrs.href = preferFingerprint('href', fpAttrs?.href, extractAttributeValue(selector, 'href'));
+  attrs.type = preferFingerprint('type', fpAttrs?.type, extractAttributeValue(selector, 'type'));
+  attrs.title = preferFingerprint('title', fpAttrs?.title, extractAttributeValue(selector, 'title'));
+  attrs.alt = preferFingerprint('alt', fpAttrs?.alt, extractAttributeValue(selector, 'alt'));
+  attrs.value = preferFingerprint('value', fpAttrs?.value, extractAttributeValue(selector, 'value'));
+  attrs.class = (fpAttrs as Record<string, string | undefined> | undefined)?.class || extractClass(selector) || undefined;
   attrs.tagName = fingerprint?.tagName?.toLowerCase();
   attrs.parentSelector = fingerprint?.parentSelector ?? undefined;
 
@@ -112,6 +160,173 @@ export function getElementTextSignals(element: Element): string[] {
   push(htmlElement.textContent || '');
 
   return values;
+}
+
+function pushSemanticSignal(
+  signals: SemanticTextSignal[],
+  value: string | null | undefined,
+  source: string,
+): void {
+  if (typeof value !== 'string') return;
+  const normalized = normalizeStaticText(value);
+  if (!normalized) return;
+  if (signals.some(signal => signal.value === normalized && signal.source === source)) return;
+  signals.push({ value: normalized, source });
+}
+
+function getDirectChildren(element: Element): Element[] {
+  const rawChildren = (element as HTMLElement & { children?: ArrayLike<Element> }).children;
+  if (!rawChildren) return [];
+  return Array.from(rawChildren as ArrayLike<Element>);
+}
+
+function getChildSemanticTextSignals(element: Element): SemanticTextSignal[] {
+  const signals: SemanticTextSignal[] = [];
+  for (const child of getDirectChildren(element)) {
+    const tagName = (((child as HTMLElement).tagName) || '').toLowerCase();
+    if (tagName === 'svg') {
+      for (const grandChild of getDirectChildren(child)) {
+        const grandTag = (((grandChild as HTMLElement).tagName) || '').toLowerCase();
+        if (grandTag === 'title') {
+          pushSemanticSignal(signals, grandChild.textContent || '', 'icon_child_svg_title');
+        }
+      }
+      continue;
+    }
+    if (tagName === 'img') {
+      pushSemanticSignal(signals, child.getAttribute('alt'), 'icon_child_alt');
+    }
+    pushSemanticSignal(signals, child.getAttribute('aria-label'), 'icon_child_aria_label');
+    pushSemanticSignal(signals, child.getAttribute('title'), 'icon_child_title');
+  }
+  return signals;
+}
+
+function getAssociatedLabelSignals(element: Element, snapshot: Document): SemanticTextSignal[] {
+  const signals: SemanticTextSignal[] = [];
+  const htmlElement = element as HTMLElement;
+  const id = htmlElement.getAttribute('id') || htmlElement.id || '';
+  if (id) {
+    try {
+      for (const label of Array.from(snapshot.querySelectorAll('label'))) {
+        if (label.getAttribute('for') !== id) continue;
+        pushSemanticSignal(signals, label.textContent || '', 'label_for');
+      }
+    } catch {
+      // Ignore selector support issues in synthetic test docs.
+    }
+  }
+
+  const labelledBy = htmlElement.getAttribute('aria-labelledby') || '';
+  if (labelledBy) {
+    for (const refId of labelledBy.split(/\s+/).filter(Boolean)) {
+      try {
+        const ref = snapshot.querySelector(`#${cssEscape(refId)}`);
+        if (ref) {
+          pushSemanticSignal(signals, ref.textContent || '', 'aria_labelledby');
+        }
+      } catch {
+        // Ignore selector support issues in synthetic test docs.
+      }
+    }
+  }
+
+  const parent = htmlElement.parentElement;
+  const parentTag = (((parent as HTMLElement | null)?.tagName) || '').toLowerCase();
+  if (parent && parentTag === 'label') {
+    pushSemanticSignal(signals, parent.textContent || '', 'wrapped_label');
+  }
+
+  return signals;
+}
+
+function getStrictParentWrapperSignals(element: Element): SemanticTextSignal[] {
+  const signals: SemanticTextSignal[] = [];
+  const parent = (element as HTMLElement).parentElement as (HTMLElement & { children?: ArrayLike<Element> }) | null;
+  if (!parent) return signals;
+
+  const parentTag = (parent.tagName || '').toLowerCase();
+  const disallowed = new Set(['html', 'body', 'main', 'section', 'article', 'form', 'table', 'tbody', 'thead']);
+  if (disallowed.has(parentTag)) return signals;
+
+  const children = parent.children ? Array.from(parent.children as ArrayLike<Element>) : [];
+  const compatibleControls = children.filter(child => {
+    const tagName = (((child as HTMLElement).tagName) || '').toLowerCase();
+    return ['input', 'textarea', 'select', 'button', 'a', 'label'].includes(tagName);
+  });
+  if (compatibleControls.length !== 1) return signals;
+
+  const text = normalizeStaticText(parent.textContent || '');
+  if (!text || text.length > 80) return signals;
+  pushSemanticSignal(signals, text, 'parent_wrapper_text');
+  return signals;
+}
+
+export function getElementSemanticTextSignals(element: Element, snapshot?: Document): SemanticTextSignal[] {
+  const signals: SemanticTextSignal[] = [];
+  const htmlElement = element as HTMLElement & { value?: string };
+  const tagName = (htmlElement.tagName || '').toLowerCase();
+
+  pushSemanticSignal(signals, htmlElement.textContent || '', 'visible_text');
+  pushSemanticSignal(signals, htmlElement.getAttribute('aria-label'), 'aria_label');
+  pushSemanticSignal(signals, htmlElement.getAttribute('placeholder'), 'placeholder');
+  pushSemanticSignal(signals, htmlElement.getAttribute('title'), 'title');
+  pushSemanticSignal(signals, htmlElement.getAttribute('alt'), 'alt');
+
+  const type = (htmlElement.getAttribute('type') || '').toLowerCase();
+  const attrValue = htmlElement.getAttribute('value');
+  if (
+    attrValue &&
+    tagName !== 'input' &&
+    tagName !== 'textarea'
+  ) {
+    pushSemanticSignal(signals, attrValue, 'value');
+  } else if (
+    attrValue &&
+    ['checkbox', 'radio', 'option'].includes(type)
+  ) {
+    pushSemanticSignal(signals, attrValue, 'value');
+  }
+
+  if (snapshot) {
+    for (const signal of getAssociatedLabelSignals(element, snapshot)) {
+      pushSemanticSignal(signals, signal.value, signal.source);
+    }
+  }
+
+  for (const signal of getStrictParentWrapperSignals(element)) {
+    pushSemanticSignal(signals, signal.value, signal.source);
+  }
+
+  if (tagName === 'button' || tagName === 'a') {
+    for (const signal of getChildSemanticTextSignals(element)) {
+      pushSemanticSignal(signals, signal.value, signal.source);
+    }
+  }
+
+  return signals;
+}
+
+export function getElementContextHints(element: Element): {
+  parentTag?: string;
+  nearestContainerTag?: string;
+} {
+  const parent = (element as HTMLElement).parentElement;
+  const parentTag = parent ? ((parent.tagName || '').toLowerCase() || undefined) : undefined;
+
+  let nearestContainerTag: string | undefined;
+  let current = parent as HTMLElement | null;
+  const containerTags = new Set(['form', 'dialog', 'nav', 'menu', 'table', 'tr']);
+  while (current) {
+    const tagName = (current.tagName || '').toLowerCase();
+    if (containerTags.has(tagName)) {
+      nearestContainerTag = tagName;
+      break;
+    }
+    current = current.parentElement as HTMLElement | null;
+  }
+
+  return { parentTag, nearestContainerTag };
 }
 
 export function textFromElement(element: Element): string | null {

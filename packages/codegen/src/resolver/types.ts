@@ -75,6 +75,10 @@ export interface CandidateScore {
   candidate: RawCandidate;
   validation: CandidateValidation;
   score: number;
+  idEntropyScore?: number;
+  idPenaltyReason?: string[];
+  classEntropyScore?: number;
+  classPenaltyReason?: string[];
 }
 
 export interface RankedElementScore {
@@ -137,13 +141,38 @@ export interface SelectorResolverResult {
   llmAcceptedStepNumbers: number[];
 }
 
+export type ResolverRejectReason =
+  | 'href_mismatch'
+  | 'control_family_mismatch'
+  | 'text_mismatch'
+  | 'snapshot_target_missing';
+
+export type ControlFamily =
+  | 'text-input'
+  | 'password-input'
+  | 'submit-button'
+  | 'nav-link'
+  | 'menuitem'
+  | 'select-trigger'
+  | 'combobox'
+  | 'icon-button'
+  | 'button'
+  | 'generic-container';
+
 export interface StepSignalAttributes {
   id?: string;
   name?: string;
   dataTestId?: string;
+  dataCy?: string;
+  dataQa?: string;
   ariaLabel?: string;
   placeholder?: string;
   role?: string;
+  href?: string;
+  type?: string;
+  title?: string;
+  alt?: string;
+  value?: string;
   class?: string;
   tagName?: string;
   parentSelector?: string | null;

@@ -1,12 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  generateCandidates,
   resolveSelectorsForSession,
+  scoreCandidate,
   validateCSSCandidate,
   validateTextCandidate,
   SnapshotCache,
 } from '../src/selector-resolver';
 import { getSourceNodeId } from '../src/codegen.service';
 import { CodegenSession, CodegenStep } from '../src/types';
+import type { SnapshotSelectionResult } from '../src/snapshot-selector';
+import { inferStepSignalAttributes } from '../src/resolver/text-matching';
 
 type TestElement = {
   id?: string;
@@ -40,11 +44,11 @@ function makeElement(
   } = {}
 ): Element {
   const element: TestElement = {
-    id: options.id,
+    id: options.id ?? attrs.id,
     tagName: options.tagName || 'DIV',
     textContent: options.text || '',
     style: options.style || '',
-    className: options.className || '',
+    className: options.className ?? attrs.class ?? '',
     parentElement: options.parent || null,
     children: options.children || [],
     attrs: { ...attrs, ...(options.style ? { style: options.style } : {}) },
@@ -104,6 +108,17 @@ function makeSnapshotCache(
   };
 }
 
+function makeSnapshotCacheWithSelection(
+  entries: Record<string, Document | null>,
+  selectionFactory: (step: CodegenStep, mode?: 'action' | 'outcome') => SnapshotSelectionResult,
+  snapshotEngineAvailable = true,
+): SnapshotCache {
+  return {
+    ...makeSnapshotCache(entries, snapshotEngineAvailable),
+    selectForStep: selectionFactory,
+  };
+}
+
 function makeStep(step: number, overrides: Partial<CodegenStep> = {}): CodegenStep {
   return {
     step,
@@ -135,7 +150,1314 @@ function makeSession(steps: CodegenStep[]): CodegenSession {
   };
 }
 
+function scoreResolvedCandidate(
+  step: CodegenStep,
+  snapshot: Document,
+  selector: string,
+): { score: number; reason: string | undefined } {
+  const candidate = generateCandidates(step, snapshot).find(entry => entry.selector === selector);
+  if (!candidate) {
+    throw new Error(`Missing candidate for selector: ${selector}`);
+  }
+  const validation = selector.startsWith('text=')
+    ? validateTextCandidate(selector, snapshot, step)
+    : validateCSSCandidate(selector, snapshot, step);
+  return {
+    score: scoreCandidate(candidate, validation, step, snapshot),
+    reason: undefined,
+  };
+}
+
+function scoreExplicitCandidate(
+  step: CodegenStep,
+  snapshot: Document,
+  selector: string,
+  source: 'class' | 'path' | 'text' | 'parent-scope' | 'id' | 'name' | 'testid' | 'aria' | 'placeholder' | 'role+name' | 'original',
+  rank: number,
+): number {
+  const validation = selector.startsWith('text=')
+    ? validateTextCandidate(selector, snapshot, step)
+    : validateCSSCandidate(selector, snapshot, step);
+  const effectiveSource = (source === 'path' ? 'original' : source);
+  return scoreCandidate({ selector, source: effectiveSource, rank }, validation, step, snapshot);
+}
+
 describe('selector-resolver', () => {
+  it('prefers preserved fingerprint href over selector-string inference', () => {
+    const step = makeStep(1, {
+      selector: 'a[href="/wrong"]',
+      fingerprint: {
+        selector: 'a[href="/wrong"]',
+        attributes: {
+          href: '/admin/viewAdminModule',
+        },
+      },
+    });
+
+    const attrs = inferStepSignalAttributes(step);
+    expect(attrs.href).toBe('/admin/viewAdminModule');
+  });
+
+  it('prefers preserved placeholder and exposes data-cy/data-qa signal attributes', () => {
+    const step = makeStep(1, {
+      selector: 'input[placeholder="Wrong"][data-cy="fallback-cy"][data-qa="fallback-qa"]',
+      action: 'input',
+      fingerprint: {
+        selector: 'input[placeholder="Wrong"][data-cy="fallback-cy"][data-qa="fallback-qa"]',
+        attributes: {
+          placeholder: 'Search',
+          dataCy: 'employee-search',
+          'data-qa': 'employee-search',
+        },
+      },
+    });
+
+    const attrs = inferStepSignalAttributes(step);
+    expect(attrs.placeholder).toBe('Search');
+    expect(attrs.dataCy).toBe('employee-search');
+    expect(attrs.dataQa).toBe('employee-search');
+  });
+
+  it('falls back to selector-string inference when recorded fingerprint field is missing', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const step = makeStep(1, {
+      selector: 'input[name="username"][placeholder="Username"]',
+      action: 'input',
+      fingerprint: {
+        selector: 'input[name="username"][placeholder="Username"]',
+        attributes: {},
+      },
+    });
+
+    const attrs = inferStepSignalAttributes(step);
+    expect(attrs.name).toBe('username');
+    expect(attrs.placeholder).toBe('Username');
+    expect(warnSpy).toHaveBeenCalledWith(
+      'FINGERPRINT_ATTRIBUTE_INFERRED_DOWNSTREAM',
+      expect.objectContaining({ attribute: 'name' }),
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      'FINGERPRINT_ATTRIBUTE_INFERRED_DOWNSTREAM',
+      expect.objectContaining({ attribute: 'placeholder' }),
+    );
+  });
+
+  it('rejects unique href-mismatched deterministic candidate', async () => {
+    const adminWrong = makeElement(
+      { class: 'menu-item', href: '/web/index.php/pim/viewPimModule' },
+      { text: 'Admin', tagName: 'A' },
+    );
+    const otherLinks = Array.from({ length: 59 }, (_, idx) =>
+      makeElement(
+        { class: 'menu-item', href: `/web/index.php/module/${idx}` },
+        { text: `Item ${idx}`, tagName: 'A' },
+      ),
+    );
+    const menuItems = [adminWrong, ...otherLinks];
+    const step = makeStep(1, {
+      selector: '.menu-item',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_Admin',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: '.menu-item',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'a',
+        textExcerpt: 'Admin',
+        attributes: {
+          href: '/web/index.php/admin/viewAdminModule',
+        },
+      },
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.menu-item': menuItems,
+        'text=admin': [adminWrong],
+        'a:has-text("Admin")': [adminWrong],
+        '*': menuItems,
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toBe('.menu-item');
+    expect(resolution.resolverMetadata.resolvedBy).toBe('blocked-semantic-mismatch');
+    expect(resolution.resolverMetadata.rejectReason).toBe('href_mismatch');
+    expect(resolution.resolverMetadata.semanticRejectReason).toBe('href_mismatch');
+    expect(resolution.resolverMetadata.rejectedCandidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ selector: 'text=admin', reason: 'href_mismatch' }),
+      ]),
+    );
+  });
+
+  it('does not resolve select-like "-- Select --" interaction to search input', async () => {
+    const searchInput = makeElement(
+      { placeholder: 'Search', type: 'search' },
+      { tagName: 'INPUT' },
+    );
+    const unrelated = makeElement({}, { text: 'Other', tagName: 'DIV' });
+    const step = makeStep(1, {
+      selector: 'div > div:nth-of-type(1)',
+      selectorPriority: 'path',
+      selectorRank: 10,
+      intent: 'click_Select',
+      action: 'click',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: 'div > div:nth-of-type(1)',
+        selectorPriority: 'path',
+        selectorRank: 10,
+        tagName: 'div',
+        textExcerpt: '-- Select --',
+        attributes: {},
+      },
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        'div > div:nth-of-type(1)': [],
+        '[placeholder="Search"]': [searchInput],
+        'input[placeholder="Search"]': [searchInput],
+        '*': [searchInput, unrelated],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toBe('div > div:nth-of-type(1)');
+    expect(resolution.resolverMetadata.resolvedBy).toBe('blocked-semantic-mismatch');
+    expect(resolution.resolverMetadata.rejectReason).toBe('control_family_mismatch');
+    expect(resolution.resolverMetadata.semanticRejectReason).toBe('control_family_mismatch');
+  });
+
+  it('rejects unique candidate with wrong menu role/control family', async () => {
+    const logoutButton = makeElement(
+      { role: 'button' },
+      { text: 'Logout', tagName: 'BUTTON' },
+    );
+    const otherButtons = Array.from({ length: 59 }, (_, idx) =>
+      makeElement(
+        { role: 'button' },
+        { text: `Action ${idx}`, tagName: 'BUTTON' },
+      ),
+    );
+    const menuEntries = [logoutButton, ...otherButtons];
+    const step = makeStep(1, {
+      selector: '.menu-entry',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_Logout',
+      action: 'click',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: '.menu-entry',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'li',
+        textExcerpt: 'Logout',
+        attributes: {
+          role: 'menuitem',
+        },
+      },
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.menu-entry': menuEntries,
+        'text=logout': [logoutButton],
+        'button:has-text("Logout")': [logoutButton],
+        '*': menuEntries,
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toBe('.menu-entry');
+    expect(resolution.resolverMetadata.resolvedBy).toBe('blocked-semantic-mismatch');
+    expect(resolution.resolverMetadata.rejectReason).toBe('control_family_mismatch');
+    expect(resolution.resolverMetadata.semanticRejectReason).toBe('control_family_mismatch');
+  });
+
+  it('still resolves good Admin navigation candidate when text and href align', async () => {
+    const admin = makeElement(
+      { class: 'menu-item', href: '/web/index.php/admin/viewAdminModule' },
+      { text: 'Admin', tagName: 'A' },
+    );
+    const pim = makeElement(
+      { class: 'menu-item', href: '/web/index.php/pim/viewPimModule' },
+      { text: 'PIM', tagName: 'A' },
+    );
+    const step = makeStep(1, {
+      selector: '.menu-item',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_Admin',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: '.menu-item',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'a',
+        textExcerpt: 'Admin',
+        attributes: {
+          href: '/web/index.php/admin/viewAdminModule',
+        },
+      },
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.menu-item': [admin, pim],
+        'text=admin': [admin],
+        'a:has-text("Admin")': [admin],
+        '*': [admin, pim],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toMatch(/admin/i);
+    expect(resolution.resolverMetadata.resolvedBy).toBe('deterministic-override');
+    expect(resolution.resolverMetadata.rejectReason).toBeNull();
+    expect(resolution.resolverMetadata.semanticCompatibilityScore).toBeGreaterThan(0);
+  });
+
+  it('allows deterministic override when event-local snapshot reports target evidence present', async () => {
+    const admin = makeElement(
+      { class: 'menu-item', href: '/web/index.php/admin/viewAdminModule' },
+      { text: 'Admin', tagName: 'A' },
+    );
+    const pim = makeElement(
+      { class: 'menu-item', href: '/web/index.php/pim/viewPimModule' },
+      { text: 'PIM', tagName: 'A' },
+    );
+    const step = makeStep(1, {
+      selector: '.menu-item',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_Admin',
+      sourceNodeId: 'node-1',
+      eventId: 'ev-1',
+      fingerprint: {
+        selector: '.menu-item',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'a',
+        textExcerpt: 'Admin',
+        attributes: {
+          href: '/web/index.php/admin/viewAdminModule',
+        },
+      },
+    });
+
+    const snapshot = makeDocument({
+      '.menu-item': [admin, pim],
+      'text=admin': [admin],
+      'a:has-text("Admin")': [admin],
+      '*': [admin, pim],
+    });
+
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'event-local-pageState',
+          temporalClass: 'action_local',
+          reason: 'selected_event_local_pageState_by_eventId',
+          eventId: 'ev-1',
+          confidenceScore: 1,
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+        },
+        evaluatedCandidates: [
+          {
+            source: 'event-local-pageState',
+            temporalClass: 'action_local',
+            selected: true,
+            reason: 'selected_event_local_pageState_by_eventId',
+            eventId: 'ev-1',
+            confidenceScore: 1,
+            targetPresent: true,
+            snapshotTargetEvidenceReason: 'selector_match',
+          },
+        ],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toMatch(/admin/i);
+    expect(resolution.resolverMetadata.resolvedBy).toBe('deterministic-override');
+  });
+
+  it('uses explicit label text as semantic compatibility evidence for field candidates', async () => {
+    const labelUser = makeElement({ for: 'username' }, { text: 'Username', tagName: 'LABEL' });
+    const labelPassword = makeElement({ for: 'password' }, { text: 'Password', tagName: 'LABEL' });
+    const usernameInput = makeElement(
+      { id: 'username', name: 'username', class: 'field-input' },
+      { tagName: 'INPUT', id: 'username' },
+    );
+    const passwordInput = makeElement(
+      { id: 'password', name: 'password', class: 'field-input' },
+      { tagName: 'INPUT', id: 'password' },
+    );
+
+    const step = makeStep(1, {
+      selector: '.field-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'input_username',
+      action: 'input',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: '.field-input',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'input',
+        textExcerpt: 'Username',
+        attributes: {},
+      },
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.field-input': [usernameInput, passwordInput],
+        '#username': [usernameInput],
+        '[id="username"]': [usernameInput],
+        'input[name="username"]': [usernameInput],
+        '*': [labelUser, labelPassword, usernameInput, passwordInput],
+        label: [labelUser, labelPassword],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toMatch(/username/i);
+    expect(resolution.resolverMetadata.resolvedBy).toBe('deterministic-override');
+    expect(resolution.resolverMetadata.semanticCompatibilityReasons).toEqual(
+      expect.arrayContaining(['text_match:label_for']),
+    );
+  });
+
+  it('keeps stable semantic IDs strong without over-penalizing them', async () => {
+    const usernameInput = makeElement(
+      { id: 'username', name: 'username', class: 'field-input' },
+      { tagName: 'INPUT' },
+    );
+    const passwordInput = makeElement(
+      { id: 'password', name: 'password', class: 'field-input' },
+      { tagName: 'INPUT' },
+    );
+
+    const step = makeStep(1, {
+      selector: '.field-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'input_username',
+      action: 'input',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: '.field-input',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'input',
+        attributes: {
+          id: 'username',
+          name: 'username',
+        },
+      },
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.field-input': [usernameInput, passwordInput],
+        '#username': [usernameInput],
+        '[id="username"]': [usernameInput],
+        '[name="username"]': [usernameInput],
+        'input[name="username"]': [usernameInput],
+        '*': [usernameInput, passwordInput],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect([ '#username', 'input[name="username"]' ]).toContain(resolution.resolvedSelector);
+    expect(scoreResolvedCandidate(step, snapshotCache.get('node-1')!, '[id="username"]').score).toBeGreaterThanOrEqual(0.65);
+  });
+
+  it('uses title and icon alt as bounded semantic compatibility evidence', async () => {
+    const iconChild = makeElement({ alt: 'Upload Avatar' }, { tagName: 'IMG' }) as any;
+    const uploadButton = makeElement(
+      { 'data-testid': 'upload-avatar', title: 'Upload Avatar' },
+      { tagName: 'BUTTON', children: [iconChild] },
+    ) as any;
+    iconChild.parentElement = uploadButton;
+    const otherButton = makeElement(
+      { 'data-testid': 'cancel-avatar', title: 'Cancel Avatar' },
+      { tagName: 'BUTTON' },
+    );
+
+    const step = makeStep(1, {
+      selector: '.icon-btn',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_upload_avatar',
+      action: 'click',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: '.icon-btn',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'button',
+        attributes: {
+          dataTestId: 'upload-avatar',
+          title: 'Upload Avatar',
+          alt: 'Upload Avatar',
+        },
+      },
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.icon-btn': [uploadButton, otherButton],
+        '[data-testid="upload-avatar"]': [uploadButton],
+        'button[data-testid="upload-avatar"]': [uploadButton],
+        '*': [uploadButton, iconChild, otherButton],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toContain('upload-avatar');
+    expect(resolution.resolverMetadata.resolvedBy).toBe('deterministic-override');
+    expect(resolution.resolverMetadata.semanticCompatibilityReasons).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^text_match:(title|icon_child_alt)$/),
+      ]),
+    );
+  });
+
+  it('penalizes generated headlessui IDs but does not reject them', async () => {
+    const logout = makeElement(
+      { id: 'headlessui-menu-item-12', role: 'menuitem' },
+      { text: 'Logout', tagName: 'BUTTON' },
+    );
+    const other = makeElement(
+      { id: 'headlessui-menu-item-13', role: 'menuitem' },
+      { text: 'Profile', tagName: 'BUTTON' },
+    );
+
+    const step = makeStep(1, {
+      selector: '.menu-entry',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_Logout',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: '.menu-entry',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'button',
+        textExcerpt: 'Logout',
+        attributes: {
+          role: 'menuitem',
+        },
+      },
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.menu-entry': [logout, other],
+        '[id="headlessui-menu-item-12"]': [logout],
+        'text=logout': [logout],
+        'button:has-text("Logout")': [logout],
+        '*': [logout, other],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).not.toContain('headlessui');
+    expect(resolution.resolverMetadata.rejectReason).toBeNull();
+  });
+
+  it('records bounded nav/menu context as semantic compatibility evidence', async () => {
+    const navRoot = makeElement({ id: 'main-nav' }, { tagName: 'NAV' }) as any;
+    const navItem = makeElement({}, { tagName: 'LI', parent: navRoot }) as any;
+    const pimItem = makeElement({}, { tagName: 'LI', parent: navRoot }) as any;
+    const adminLink = makeElement(
+      { class: 'menu-item', href: '/web/index.php/admin/viewAdminModule' },
+      { text: 'Admin', tagName: 'A', parent: navItem },
+    );
+    const pimLink = makeElement(
+      { class: 'menu-item', href: '/web/index.php/pim/viewPimModule' },
+      { text: 'PIM', tagName: 'A', parent: pimItem },
+    );
+    const step = makeStep(1, {
+      selector: '.menu-item',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_Admin',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: '.menu-item',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'a',
+        textExcerpt: 'Admin',
+        parentSelector: '#main-nav',
+        context: {
+          parentTag: 'li',
+          nearestContainerTag: 'nav',
+        },
+        attributes: {
+          href: '/web/index.php/admin/viewAdminModule',
+        },
+      },
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.menu-item': [adminLink, pimLink],
+        '#main-nav': [navRoot],
+        'text=admin': [adminLink],
+        'a:has-text("Admin")': [adminLink],
+        '*': [navRoot, navItem, pimItem, adminLink, pimLink],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolverMetadata.semanticCompatibilityReasons).toEqual(
+      expect.arrayContaining([
+        'parent_selector_match',
+        'parent_tag_match:li',
+        'nearest_container_match:nav',
+      ]),
+    );
+  });
+
+  it('penalizes UUID-like and long numeric IDs in candidate scoring', () => {
+    const uuidElement = makeElement(
+      { id: 'user-7f4c2f31-1e1a-4bd4-a1a2-99f9f6a5f123' },
+      { tagName: 'DIV' },
+    );
+    const longNumericElement = makeElement(
+      { id: 'account-1234567890' },
+      { tagName: 'DIV' },
+    );
+    const stableElement = makeElement({ id: 'usernameField' }, { tagName: 'DIV', id: 'usernameField' });
+    const snapshot = makeDocument({
+      '.item': [uuidElement, longNumericElement],
+      '.stable-item': [stableElement],
+      '[id="user-7f4c2f31-1e1a-4bd4-a1a2-99f9f6a5f123"]': [uuidElement],
+      '[id="account-1234567890"]': [longNumericElement],
+      '[id="usernameField"]': [stableElement],
+      '#usernameField': [stableElement],
+      '*': [uuidElement, longNumericElement, stableElement],
+    });
+
+    const uuidStep = makeStep(1, {
+      selector: '.item',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.item',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        attributes: {
+          id: 'user-7f4c2f31-1e1a-4bd4-a1a2-99f9f6a5f123',
+        },
+      },
+    });
+    const longNumericStep = makeStep(1, {
+      selector: '.item',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.item',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        attributes: {
+          id: 'account-1234567890',
+        },
+      },
+    });
+    const stableStep = makeStep(1, {
+      selector: '.stable-item',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.stable-item',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        attributes: {
+          id: 'usernameField',
+        },
+      },
+    });
+
+    const stableScore = scoreResolvedCandidate(stableStep, snapshot, '#usernameField').score;
+    expect(scoreResolvedCandidate(uuidStep, snapshot, '[id="user-7f4c2f31-1e1a-4bd4-a1a2-99f9f6a5f123"]').score).toBeLessThan(stableScore);
+    expect(scoreResolvedCandidate(longNumericStep, snapshot, '[id="account-1234567890"]').score).toBeLessThan(stableScore);
+  });
+
+  it('does not over-penalize readable IDs with small numeric suffixes', () => {
+    const addressLine = makeElement({ id: 'addressLine2' }, { tagName: 'INPUT', id: 'addressLine2' });
+    const step = makeStep(1, {
+      selector: '.field-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      action: 'input',
+      fingerprint: {
+        selector: '.field-input',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'input',
+        attributes: {
+          id: 'addressLine2',
+          name: 'addressLine2',
+        },
+      },
+    });
+    const snapshot = makeDocument({
+      '.field-input': [addressLine],
+      '#addressLine2': [addressLine],
+      '[id="addressLine2"]': [addressLine],
+      '*': [addressLine],
+    });
+
+    expect(scoreResolvedCandidate(step, snapshot, '#addressLine2').score).toBeGreaterThanOrEqual(0.65);
+  });
+
+  it('gives readable fingerprint-aligned IDs a small bonus', () => {
+    const usernameInput = makeElement(
+      { id: 'usernameField', name: 'username' },
+      { tagName: 'INPUT', id: 'usernameField' },
+    );
+    const snapshot = makeDocument({
+      '.field-input': [usernameInput],
+      '#usernameField': [usernameInput],
+      '[id="usernameField"]': [usernameInput],
+      '[name="username"]': [usernameInput],
+      '*': [usernameInput],
+    });
+
+    const unalignedStep = makeStep(1, {
+      selector: '.field-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      action: 'input',
+      fingerprint: {
+        selector: '.field-input',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'input',
+        attributes: {},
+      },
+    });
+    const alignedStep = makeStep(1, {
+      ...unalignedStep,
+      fingerprint: {
+        selector: '.field-input',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'input',
+        attributes: {
+          name: 'username',
+        },
+      },
+      intent: 'input_username',
+    });
+
+    expect(scoreResolvedCandidate(alignedStep, snapshot, '[id="usernameField"]').score)
+      .toBeGreaterThan(scoreResolvedCandidate(unalignedStep, snapshot, '[id="usernameField"]').score);
+  });
+
+  it('semantic class beats hashed class in candidate scoring', () => {
+    const semanticElement = makeElement({ class: 'username-field' }, { tagName: 'INPUT' });
+    const hashedElement = makeElement({ class: 'a1b2c3d4e5' }, { tagName: 'INPUT' });
+    const semanticSnapshot = makeDocument({
+      '.field': [semanticElement],
+      '.username-field': [semanticElement],
+      'input.username-field': [semanticElement],
+      '*': [semanticElement],
+    });
+    const hashedSnapshot = makeDocument({
+      '.field': [hashedElement],
+      '.a1b2c3d4e5': [hashedElement],
+      'input.a1b2c3d4e5': [hashedElement],
+      '*': [hashedElement],
+    });
+
+    const semanticStep = makeStep(1, {
+      selector: '.field',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      action: 'input',
+      fingerprint: {
+        selector: '.field',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'input',
+        attributes: {
+          name: 'username',
+        },
+      },
+      intent: 'input_username',
+    });
+    const hashedStep = makeStep(1, {
+      ...semanticStep,
+      fingerprint: {
+        selector: '.field',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'input',
+        attributes: {
+          class: 'a1b2c3d4e5',
+        },
+      },
+    });
+
+    expect(scoreExplicitCandidate(semanticStep, semanticSnapshot, '.username-field', 'class', 7))
+      .toBeGreaterThan(scoreExplicitCandidate(hashedStep, hashedSnapshot, '.a1b2c3d4e5', 'class', 7));
+  });
+
+  it('utility-only Tailwind class list is penalized', () => {
+    const utilityElement = makeElement({ class: 'flex items-center justify-center bg-blue-500 text-white p-4' }, { tagName: 'DIV' });
+    const semanticElement = makeElement({ class: 'sidebar-button flex mt-4' }, { tagName: 'DIV' });
+    const utilitySnapshot = makeDocument({
+      '.target': [utilityElement],
+      '.flex': [utilityElement],
+      '*': [utilityElement],
+    });
+    const semanticSnapshot = makeDocument({
+      '.target': [semanticElement],
+      '.sidebar-button': [semanticElement],
+      '*': [semanticElement],
+    });
+
+    const utilityStep = makeStep(1, {
+      selector: '.target',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.target',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        attributes: {
+          class: 'flex items-center justify-center bg-blue-500 text-white p-4',
+        },
+      },
+    });
+    const semanticStep = makeStep(1, {
+      ...utilityStep,
+      fingerprint: {
+        selector: '.target',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        attributes: {
+          class: 'sidebar-button flex mt-4',
+        },
+      },
+      intent: 'click_sidebar_button',
+    });
+
+    expect(scoreExplicitCandidate(utilityStep, utilitySnapshot, '.flex', 'class', 7))
+      .toBeLessThan(scoreExplicitCandidate(semanticStep, semanticSnapshot, '.sidebar-button', 'class', 7));
+  });
+
+  it('does not generate or prefer compound utility selectors', () => {
+    const element = makeElement({ class: 'flex items-center justify-center bg-blue-500 text-white p-4 rounded-md' }, { tagName: 'DIV' });
+    const snapshot = makeDocument({
+      '.target': [element],
+      '*': [element],
+    });
+    const step = makeStep(1, {
+      selector: '.target',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.target',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        attributes: {
+          class: 'flex items-center justify-center bg-blue-500 text-white p-4 rounded-md',
+        },
+      },
+    });
+
+    const candidates = generateCandidates(step, snapshot).map(candidate => candidate.selector);
+    expect(candidates.some(selector => selector.includes('.flex.items-center'))).toBe(false);
+  });
+
+  it('semantic class mixed with utility classes remains usable', async () => {
+    const sidebarItem = makeElement({ class: 'oxd-sidebar-item flex mt-4' }, { tagName: 'DIV' });
+    const otherItem = makeElement({ class: 'oxd-sidebar-link flex mt-4' }, { tagName: 'DIV', text: 'Other' });
+    const step = makeStep(1, {
+      selector: '.oxd-sidebar-item',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_sidebar_item',
+      fingerprint: {
+        selector: '.oxd-sidebar-item',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        attributes: {
+          class: 'oxd-sidebar-item flex mt-4',
+        },
+      },
+    });
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.oxd-sidebar-item': [sidebarItem],
+        'div.oxd-sidebar-item': [sidebarItem],
+        '*': [sidebarItem, otherItem],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toContain('oxd-sidebar-item');
+  });
+
+  it('generic framework class is penalized but not rejected', async () => {
+    const menuItem = makeElement({ class: 'oxd-main-menu-item' }, { tagName: 'DIV', text: 'Admin' });
+    const semanticMenuItem = makeElement({ class: 'admin-menu-item' }, { tagName: 'DIV', text: 'Admin' });
+    const step = makeStep(1, {
+      selector: '.oxd-main-menu-item',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_Admin',
+      fingerprint: {
+        selector: '.oxd-main-menu-item',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        textExcerpt: 'Admin',
+        attributes: {
+          class: 'oxd-main-menu-item',
+        },
+      },
+    });
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.oxd-main-menu-item': [menuItem],
+        'div.oxd-main-menu-item': [menuItem],
+        '*': [menuItem],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolverMetadata.rejectReason).toBeNull();
+    expect(scoreExplicitCandidate(step, snapshotCache.get('node-1')!, '.oxd-main-menu-item', 'class', 7))
+      .toBeLessThan(scoreExplicitCandidate(
+        {
+          ...step,
+          selector: '.admin-menu-item',
+          fingerprint: {
+            ...step.fingerprint,
+            selector: '.admin-menu-item',
+            attributes: {
+              class: 'admin-menu-item',
+            },
+          },
+        },
+        makeDocument({
+          '.admin-menu-item': [semanticMenuItem],
+          '*': [semanticMenuItem],
+        }),
+        '.admin-menu-item',
+        'class',
+        7,
+      ));
+  });
+
+  it('BEM-like class remains usable', () => {
+    const bemElement = makeElement({ class: 'user-menu__logout' }, { tagName: 'BUTTON' });
+    const frameworkElement = makeElement({ class: 'oxd-main-menu-item' }, { tagName: 'BUTTON' });
+    const bemSnapshot = makeDocument({
+      '.target': [bemElement],
+      '.user-menu__logout': [bemElement],
+      '*': [bemElement],
+    });
+    const frameworkSnapshot = makeDocument({
+      '.target': [frameworkElement],
+      '.oxd-main-menu-item': [frameworkElement],
+      '*': [frameworkElement],
+    });
+
+    const bemStep = makeStep(1, {
+      selector: '.target',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_logout',
+      fingerprint: {
+        selector: '.target',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'button',
+        textExcerpt: 'Logout',
+        attributes: {
+          class: 'user-menu__logout',
+        },
+      },
+    });
+    const frameworkStep = makeStep(1, {
+      ...bemStep,
+      fingerprint: {
+        selector: '.target',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'button',
+        textExcerpt: 'Logout',
+        attributes: {
+          class: 'oxd-main-menu-item',
+        },
+      },
+    });
+
+    expect(scoreExplicitCandidate(bemStep, bemSnapshot, '.user-menu__logout', 'class', 7))
+      .toBeGreaterThan(scoreExplicitCandidate(frameworkStep, frameworkSnapshot, '.oxd-main-menu-item', 'class', 7));
+  });
+
+  it('class-only selector remains available if no better truth exists', async () => {
+    const classOnly = makeElement({ class: 'product-card' }, { tagName: 'DIV', text: 'Card' });
+    const step = makeStep(1, {
+      selector: '.product-card',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.product-card',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        attributes: {
+          class: 'product-card',
+        },
+      },
+    });
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.product-card': [classOnly],
+        '*': [classOnly],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    expect(['kept-original', 'deterministic-override']).toContain(result.resolutions[0].resolverMetadata.resolvedBy);
+  });
+
+  it('penalized class still outranks brittle structural fallback when no stronger semantic candidate exists', () => {
+    const button = makeElement({ class: 'flex items-center justify-center' }, { tagName: 'BUTTON', text: 'Open' });
+    const snapshot = makeDocument({
+      '.target': [button],
+      '.flex': [button],
+      'div > main > div:nth-child(3) > span > button': [button],
+      '*': [button],
+    });
+    const step = makeStep(1, {
+      selector: 'div > main > div:nth-child(3) > span > button',
+      selectorPriority: 'path',
+      selectorRank: 10,
+      fingerprint: {
+        selector: 'div > main > div:nth-child(3) > span > button',
+        selectorPriority: 'path',
+        selectorRank: 10,
+        tagName: 'button',
+        attributes: {
+          class: 'flex items-center justify-center',
+        },
+      },
+    });
+
+    expect(scoreExplicitCandidate(step, snapshot, '.flex', 'class', 7))
+      .toBeGreaterThan(scoreExplicitCandidate(step, snapshot, 'div > main > div:nth-child(3) > span > button', 'path', 10));
+  });
+
+  it('surfaces class penalty reasons in metadata', async () => {
+    const utilityElement = makeElement({ class: 'flex text-white bg-blue-500' }, { tagName: 'DIV', text: '' });
+    const step = makeStep(1, {
+      selector: '.missing-target',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.missing-target',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        attributes: {
+          class: 'flex text-white bg-blue-500',
+        },
+      },
+    });
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.flex': [utilityElement],
+        'div.flex': [utilityElement],
+        '*': [utilityElement],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    expect(result.resolutions[0].resolverMetadata.classPenaltyReason ?? []).toContain('utility_class');
+  });
+
+  it('does not treat unrelated parent wrapper text as a semantic text match', async () => {
+    const wrapper = makeElement({}, { text: 'Approve request', tagName: 'DIV' }) as any;
+    const siblingWrapper = makeElement({}, { text: 'Reject request', tagName: 'DIV' }) as any;
+    const editButton = makeElement(
+      { 'data-testid': 'edit-row' },
+      { text: 'Edit', tagName: 'BUTTON', parent: wrapper },
+    );
+    const rejectButton = makeElement(
+      { 'data-testid': 'reject-row' },
+      { text: 'Reject', tagName: 'BUTTON', parent: siblingWrapper },
+    );
+    wrapper.children = [editButton as any];
+    siblingWrapper.children = [rejectButton as any];
+
+    const step = makeStep(1, {
+      selector: '.row-action',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_Approve',
+      action: 'click',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: '.row-action',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'button',
+        textExcerpt: 'Approve',
+        attributes: {
+          dataTestId: 'edit-row',
+        },
+      },
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.row-action': [editButton, rejectButton],
+        '[data-testid="edit-row"]': [editButton],
+        'button[data-testid="edit-row"]': [editButton],
+        '*': [wrapper, siblingWrapper, editButton, rejectButton],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolverMetadata.resolvedBy).toBe('deterministic-override');
+    expect(resolution.resolverMetadata.semanticCompatibilityReasons ?? []).not.toEqual(
+      expect.arrayContaining(['text_match:parent_wrapper_text']),
+    );
+  });
+
+  it('keeps generated IDs above fragile structural selectors', () => {
+    const button = makeElement({ id: 'headlessui-menu-button-12' }, { tagName: 'BUTTON', text: 'Open' });
+    const snapshot = makeDocument({
+      'div > main > div:nth-child(3) > span > button': [button],
+      '[id="headlessui-menu-button-12"]': [button],
+      '*': [button],
+    });
+    const step = makeStep(1, {
+      selector: 'div > main > div:nth-child(3) > span > button',
+      selectorPriority: 'path',
+      selectorRank: 10,
+      fingerprint: {
+        selector: 'div > main > div:nth-child(3) > span > button',
+        selectorPriority: 'path',
+        selectorRank: 10,
+        tagName: 'button',
+        attributes: {
+          id: 'headlessui-menu-button-12',
+        },
+      },
+    });
+
+    const idScore = scoreResolvedCandidate(step, snapshot, '[id="headlessui-menu-button-12"]').score;
+    const structuralScore = scoreResolvedCandidate(step, snapshot, 'div > main > div:nth-child(3) > span > button').score;
+    expect(idScore).toBeGreaterThan(structuralScore);
+  });
+
+  it('emits attribute ID selectors for React runtime IDs and leading-digit IDs', () => {
+    const reactElement = makeElement({ id: ':r1:' }, { tagName: 'DIV' });
+    const numericElement = makeElement({ id: '123-login' }, { tagName: 'DIV' });
+    const snapshot = makeDocument({
+      '.item': [reactElement, numericElement],
+      '*': [reactElement, numericElement],
+    });
+
+    const reactStep = makeStep(1, {
+      selector: '.item',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.item',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        attributes: {
+          id: ':r1:',
+        },
+      },
+    });
+    const digitStep = makeStep(1, {
+      selector: '.item',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.item',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        attributes: {
+          id: '123-login',
+        },
+      },
+    });
+
+    expect(generateCandidates(reactStep, snapshot).map(candidate => candidate.selector)).toContain('[id=":r1:"]');
+    expect(generateCandidates(reactStep, snapshot).map(candidate => candidate.selector)).not.toContain('#:r1:');
+    expect(generateCandidates(digitStep, snapshot).map(candidate => candidate.selector)).toContain('[id="123-login"]');
+    expect(generateCandidates(digitStep, snapshot).map(candidate => candidate.selector)).not.toContain('#123-login');
+  });
+
+  it('blocks deterministic rescue when selected action snapshot reports target evidence missing', async () => {
+    const searchInput = makeElement(
+      { placeholder: 'Search', type: 'search' },
+      { tagName: 'INPUT' },
+    );
+    const snapshot = makeDocument({
+      '[placeholder="Search"]': [searchInput],
+      'input[placeholder="Search"]': [searchInput],
+      '*': [searchInput],
+    });
+    const step = makeStep(1, {
+      selector: 'div > div:nth-of-type(1)',
+      selectorPriority: 'path',
+      selectorRank: 10,
+      intent: 'click_Select',
+      sourceNodeId: 'node-1',
+      eventId: 'ev-1',
+      fingerprint: {
+        selector: 'div > div:nth-of-type(1)',
+        selectorPriority: 'path',
+        selectorRank: 10,
+        tagName: 'div',
+        textExcerpt: '-- Select --',
+        attributes: {},
+      },
+    });
+
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'selected_source_node_snapshot_after_event_local_missing',
+          sourceNodeId: 'node-1',
+          confidenceScore: 0.35,
+          snapshotTargetEvidence: false,
+          snapshotTargetEvidenceReason: 'target_missing_in_snapshot',
+        },
+        evaluatedCandidates: [
+          {
+            source: 'source-node-snapshot',
+            temporalClass: 'pre_action',
+            selected: true,
+            reason: 'selected_source_node_snapshot_after_event_local_missing',
+            sourceNodeId: 'node-1',
+            confidenceScore: 0.35,
+            targetPresent: false,
+            snapshotTargetEvidenceReason: 'target_missing_in_snapshot',
+          },
+        ],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toBe('div > div:nth-of-type(1)');
+    expect(resolution.resolverMetadata.resolvedBy).toBe('blocked-snapshot-target-missing');
+    expect(resolution.resolverMetadata.rejectReason).toBe('snapshot_target_missing');
+  });
+
+  it('still resolves Logout menu item when role and text align', async () => {
+    const logout = makeElement(
+      { role: 'menuitem', href: '/web/index.php/auth/logout' },
+      { text: 'Logout', tagName: 'A' },
+    );
+    const changePassword = makeElement(
+      { role: 'menuitem', href: '/web/index.php/pim/changePassword' },
+      { text: 'Change Password', tagName: 'A' },
+    );
+    const step = makeStep(1, {
+      selector: '[role="menuitem"]',
+      selectorPriority: 'attribute',
+      selectorRank: 3,
+      intent: 'click_Logout',
+      action: 'click',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: '[role="menuitem"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'a',
+        textExcerpt: 'Logout',
+        attributes: {
+          role: 'menuitem',
+          href: '/web/index.php/auth/logout',
+        },
+      },
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '[role="menuitem"]': [logout, changePassword],
+        'text=logout': [logout],
+        '[role="menuitem"]:has-text("Logout")': [logout],
+        '*': [logout, changePassword],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toContain('Logout');
+    expect(resolution.resolverMetadata.resolvedBy).toBe('deterministic-override');
+    expect(resolution.resolverMetadata.rejectReason).toBeNull();
+  });
+
   it('keeps valid unique original selector', async () => {
     const step = makeStep(1, {
       selector: '[id="submit-btn"]',

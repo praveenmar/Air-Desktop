@@ -43,7 +43,7 @@ export const CompositeAnchorSchema = z.object({
   tokens: z.array(z.string()),
   descriptor: z.string(),
   confidence: z.number(),
-});
+}).passthrough();
 export type CompositeAnchor = z.infer<typeof CompositeAnchorSchema>;
 
 /** DOM Snapshot Data */
@@ -58,7 +58,7 @@ export const PageSnapshotSchema = z.object({
   normalizedUrl: z.string().optional(),
   timestamp: z.number().optional(),
   metrics: z.record(z.string(), z.unknown()).optional(),
-});
+}).passthrough();
 export type PageSnapshot = z.infer<typeof PageSnapshotSchema>;
 
 export const NestedContextSchema = z.object({
@@ -70,7 +70,7 @@ export const NestedContextSchema = z.object({
   iframeSameOrigin: z.boolean().nullable().optional(),
   degraded: z.boolean().optional(),
   degradedReason: z.string().nullable().optional(),
-});
+}).passthrough();
 export type NestedContext = z.infer<typeof NestedContextSchema>;
 
 /** Base fields shared by all events */
@@ -95,6 +95,7 @@ export const ClickEventSchema = BaseEventSchema.extend({
   viewport: ViewportSchema.optional(),
   fingerprint: ElementFingerprintSchema.nullable().optional(),
   seek: SeekStrategySchema.optional(),
+  pageSnapshot: PageSnapshotSchema.nullable().optional(),
   pageState: PageSnapshotSchema.nullable().optional(),
   meta: z.record(z.string(), z.unknown()).optional(),
 });

@@ -50,8 +50,16 @@ export type SelectorPriority =
 export type ResolverResolvedBy =
   | 'kept-original'
   | 'deterministic-override'
+  | 'blocked-semantic-mismatch'
+  | 'blocked-snapshot-target-missing'
+  | 'blocked-unsafe-override'
   | 'llm-accepted'
   | 'unresolved';
+
+export interface RejectedCandidateTrace {
+  selector: string;
+  reason: string;
+}
 
 export type TemporalClass =
   | 'pre_action'
@@ -93,6 +101,8 @@ export interface SnapshotSelectionProvenance {
   sourceNodeId?: string;
   timestamp?: number;
   confidenceScore?: number;
+  snapshotTargetEvidence?: boolean;
+  snapshotTargetEvidenceReason?: string | null;
 }
 
 export interface SnapshotCandidateTraceEntry {
@@ -106,6 +116,7 @@ export interface SnapshotCandidateTraceEntry {
   timestamp?: number;
   confidenceScore?: number;
   targetPresent?: boolean;
+  snapshotTargetEvidenceReason?: string | null;
   shadowDegraded?: boolean;
 }
 
@@ -123,16 +134,49 @@ export interface ResolverMetadata {
   llmAccepted: boolean;
   llmAlternative: string | null;
   rejectReason: string | null;
+  semanticRejectReason?: string | null;
+  rejectedCandidates?: RejectedCandidateTrace[];
+  semanticCompatibilityScore?: number;
+  semanticCompatibilityReasons?: string[];
+  idEntropyScore?: number;
+  idPenaltyReason?: string[];
+  classEntropyScore?: number;
+  classPenaltyReason?: string[];
   warningCodes: string[];
   resolverVersion: 1;
   temporalClass?: TemporalClass;
   selectionReason?: string | null;
   snapshotSelection?: SnapshotSelectionProvenance;
   evaluatedCandidates?: SnapshotCandidateTraceEntry[];
+  snapshotTargetEvidence?: boolean;
+  snapshotTargetEvidenceReason?: string | null;
   excerptBuildTotalMs?: number;
   pruneMs?: number;
   redactMs?: number;
   finalExcerptChars?: number;
+}
+
+export interface FingerprintAttributes {
+  [key: string]: string | undefined;
+  id?: string;
+  name?: string;
+  role?: string;
+  ariaLabel?: string;
+  'aria-label'?: string;
+  placeholder?: string;
+  type?: string;
+  href?: string;
+  title?: string;
+  alt?: string;
+  value?: string;
+  dataTestId?: string;
+  'data-testid'?: string;
+  dataCy?: string;
+  'data-cy'?: string;
+  dataQa?: string;
+  'data-qa'?: string;
+  class?: string;
+  classList?: string;
 }
 
 export interface FingerprintData {
@@ -146,7 +190,7 @@ export interface FingerprintData {
     parentTag?: string | null;
     nearestContainerTag?: string | null;
   };
-  attributes?: Record<string, string>;
+  attributes?: FingerprintAttributes;
   attributesHash?: string;
 }
 

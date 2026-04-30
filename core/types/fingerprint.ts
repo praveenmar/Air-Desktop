@@ -22,7 +22,7 @@ export type SelectorPriority = z.infer<typeof SelectorPrioritySchema>;
 export const FingerprintContextSchema = z.object({
   parentTag: z.string().nullable(),
   nearestContainerTag: z.string().nullable(),
-});
+}).passthrough();
 export type FingerprintContext = z.infer<typeof FingerprintContextSchema>;
 
 /** Compact fingerprint for an element (4-layer identification) */
@@ -36,5 +36,5 @@ export const ElementFingerprintSchema = z.object({
   context: FingerprintContextSchema,
   attributes: z.record(z.string(), z.string().optional()),
   attributesHash: z.string(),
-});
+}).passthrough();
 export type ElementFingerprint = z.infer<typeof ElementFingerprintSchema>;

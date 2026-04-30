@@ -9,12 +9,14 @@ import {
   attachAssertionOutcomeSelections,
   type CandidateScore,
   type CandidateValidation,
+  type ControlFamily,
   type LlmFallbackRequest,
   type LlmFallbackStep,
   type LlmFallbackSuggestion,
   type RawCandidate,
   type ResolveContext,
   type ResolvedResolverConfig,
+  type ResolverRejectReason,
   type ResolverConfig,
   type SelectorFallbackProvider,
   type SelectorResolution,
@@ -24,16 +26,21 @@ import {
 } from './resolver/types';
 import {
   cssEscape,
+  extractAttributeValue,
   escapeTextSelectorValue,
   extractStableParentSelector,
   extractTextExcerpt,
   findStableClassFromAttributes,
+  getElementContextHints,
+  getElementSemanticTextSignals,
   getElementTextSignals,
   inferStepSignalAttributes,
   isDynamicText,
   isLikelyCssSelector,
   isTextSelector,
+  normalizeTextForMatch,
   textFromElement,
+  type SemanticTextSignal,
 } from './resolver/text-matching';
 import {
   enrichSignalAttributesFromElement,
@@ -119,6 +126,309 @@ function resolveConfig(config?: ResolverConfig): ResolvedResolverConfig {
 
 function rankScore(rank: number): number {
   return RANK_SCORES[rank] ?? 0.3;
+}
+
+function isSafeHashIdSelector(id: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_-]*$/.test(id);
+}
+
+function buildIdSelectors(id: string): string[] {
+  const attributeSelector = `[id="${cssEscape(id)}"]`;
+  if (!isSafeHashIdSelector(id)) {
+    return [attributeSelector];
+  }
+  return [`#${cssEscape(id)}`, attributeSelector];
+}
+
+function candidateUsesIdSelector(candidate: RawCandidate): boolean {
+  return candidate.source === 'id' || /\[id=(?:"[^"]+"|'[^']+')\]/i.test(candidate.selector) || /(?:^|\s)#/.test(candidate.selector);
+}
+
+function candidateUsesClassSelector(candidate: RawCandidate): boolean {
+  return candidate.source === 'class' || /(?:^|[\s>])(?:[a-z0-9_-]+)?\.[a-z0-9:_-]+/i.test(candidate.selector);
+}
+
+function extractCandidateId(selector: string): string | null {
+  const attrId = extractAttributeValue(selector, 'id');
+  if (attrId) return attrId;
+  if (!selector.startsWith('#')) return null;
+  const match = selector.slice(1).match(/^[A-Za-z0-9_-]+/);
+  return match?.[0] ?? null;
+}
+
+function tokenizeSemanticParts(value: string | null | undefined): string[] {
+  if (!value) return [];
+  return value
+    .toLowerCase()
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .split(/[^a-z0-9]+/)
+    .map(token => token.trim())
+    .filter(token => token.length >= 2);
+}
+
+function extractHrefTokens(href?: string): string[] {
+  if (!href) return [];
+  try {
+    const url = new URL(href, 'https://air.local');
+    return tokenizeSemanticParts(url.pathname);
+  } catch {
+    return tokenizeSemanticParts(href);
+  }
+}
+
+function isVeryOpaqueMixedId(id: string): boolean {
+  if (id.length < 18) return false;
+  if (!/[a-z]/i.test(id) || !/\d/.test(id)) return false;
+  if (!/^[a-z0-9_-]+$/i.test(id)) return false;
+  const tokens = id.split(/[-_]/).filter(Boolean);
+  if (tokens.length <= 1) {
+    return /[a-z]{2,}\d{2,}[a-z0-9]{6,}/i.test(id);
+  }
+  return tokens.every(token => token.length >= 4 && /[a-z]/i.test(token) && /\d/.test(token));
+}
+
+function hasOpaqueHyphenatedSegments(id: string): boolean {
+  const tokens = id.split(/[-_]/).filter(Boolean);
+  if (tokens.length < 3) return false;
+  const opaqueTokens = tokens.filter(token =>
+    token.length >= 4 &&
+    /[a-z]/i.test(token) &&
+    (/\d/.test(token) || token.length >= 8) &&
+    !/(user|admin|menu|nav|search|input|button|dialog|modal|form|table|row|col|step|line|email|name|leave|logout|login|address)/i.test(token),
+  );
+  return opaqueTokens.length >= 2;
+}
+
+function isUtilityClassToken(token: string): boolean {
+  return (
+    /^(?:flex|grid|block|hidden)$/i.test(token) ||
+    /^(?:items|justify|content|self|place)-/i.test(token) ||
+    /^(?:p|m)(?:[trblxy])?-\d+/i.test(token) ||
+    /^(?:text|bg|border|rounded)-/i.test(token) ||
+    /^(?:w|h|min|max)-/i.test(token) ||
+    /^(?:gap|space-[xy]|inset|top|left|right|bottom)-/i.test(token) ||
+    /^(?:hover|focus|active|disabled):/i.test(token)
+  );
+}
+
+function isStateClassToken(token: string): boolean {
+  return /^(?:active|selected|open|disabled|expanded|collapsed|checked|focused)$/i.test(token);
+}
+
+function isFrameworkClassToken(token: string): boolean {
+  return /^(?:oxd-|mui|ant-|chakra-)/i.test(token);
+}
+
+function isGenericShellClassToken(token: string): boolean {
+  return /^(?:container|wrapper|row|item|content|layout|shell|panel|section|body|header|footer)$/i.test(token);
+}
+
+function isCssInJsClassToken(token: string): boolean {
+  return /^(?:css-|sc-)/i.test(token);
+}
+
+function isBemLikeClassToken(token: string): boolean {
+  return /(?:__|--)/.test(token);
+}
+
+function isHashedRandomClassToken(token: string): boolean {
+  if (isCssInJsClassToken(token)) return true;
+  if (token.length < 8) return false;
+  if (!/[a-z]/i.test(token)) return false;
+  if (/^(?:oxd-|mui|ant-|chakra-)/i.test(token)) return false;
+  if (/^[a-z0-9_-]+$/i.test(token) && /\d/.test(token)) {
+    const parts = token.split(/[-_]/).filter(Boolean);
+    if (parts.length <= 1) {
+      return /[a-z]{2,}\d{2,}[a-z0-9]{4,}/i.test(token);
+    }
+    return parts.every(part => part.length >= 3 && (/\d/.test(part) || /^[a-z]{6,}$/i.test(part)));
+  }
+  return false;
+}
+
+function extractCandidateClassTokens(selector: string): string[] {
+  return Array.from(selector.matchAll(/\.([A-Za-z0-9:_-]+)/g))
+    .map(match => match[1] ?? '')
+    .filter(Boolean);
+}
+
+function extractClassContextTokens(step: CodegenStep): Set<string> {
+  const attrs = inferStepSignalAttributes(step);
+  return new Set<string>([
+    ...tokenizeSemanticParts(step.fingerprint?.textExcerpt ?? extractTextExcerpt(step)),
+    ...tokenizeSemanticParts(attrs.name),
+    ...tokenizeSemanticParts(attrs.placeholder),
+    ...extractHrefTokens(attrs.href),
+    ...tokenizeSemanticParts(step.intent),
+  ]);
+}
+
+function evaluateClassTokenEntropy(
+  classToken: string,
+  step: CodegenStep,
+  candidate: RawCandidate,
+): { adjustment: number; score: number; reasons: string[] } {
+  let penalty = 0;
+  const reasons: string[] = [];
+  const addPenalty = (amount: number, reason: string): void => {
+    if (reasons.includes(reason)) return;
+    penalty += amount;
+    reasons.push(reason);
+  };
+
+  if (isUtilityClassToken(classToken)) addPenalty(0.24, 'utility_class');
+  if (isCssInJsClassToken(classToken)) addPenalty(0.22, 'css_in_js_class');
+  if (isHashedRandomClassToken(classToken)) addPenalty(0.2, 'hashed_random_class');
+  if (isStateClassToken(classToken)) addPenalty(0.18, 'state_class');
+  if (isFrameworkClassToken(classToken)) addPenalty(0.14, 'framework_structural_class');
+  if (isGenericShellClassToken(classToken)) addPenalty(0.12, 'generic_shell_class');
+
+  penalty = Math.min(0.28, penalty);
+
+  const contextTokens = extractClassContextTokens(step);
+  const classTokens = tokenizeSemanticParts(classToken);
+  let bonus = 0;
+  if (isBemLikeClassToken(classToken)) {
+    bonus += 0.03;
+  }
+  const overlapCount = classTokens.filter(token => contextTokens.has(token)).length;
+  if (overlapCount >= 2) {
+    bonus += 0.04;
+  } else if (overlapCount === 1) {
+    bonus += 0.02;
+  }
+
+  const calendarScopedClass =
+    candidate.source === 'parent-scope' &&
+    (looksDateValue(step.value) || step.action === 'input') &&
+    classTokens.some(token => token === 'date' || token === 'calendar');
+  if (calendarScopedClass) {
+    bonus += 0.08;
+  }
+
+  const adjustment = Math.max(-0.28, Math.min(0.04, bonus - penalty));
+  return {
+    adjustment,
+    score: adjustment,
+    reasons,
+  };
+}
+
+function computeClassEntropy(
+  step: CodegenStep,
+  candidate: RawCandidate,
+  validation: CandidateValidation,
+  snapshot?: Document,
+): { adjustment: number; score: number; reasons: string[] } {
+  if (!candidateUsesClassSelector(candidate)) {
+    return { adjustment: 0, score: 0, reasons: [] };
+  }
+
+  const element =
+    validation.resolvedElement ??
+    (snapshot ? getCandidateElement(snapshot, candidate.selector) : null);
+  const selectorClassTokens = extractCandidateClassTokens(candidate.selector);
+  const elementClassTokens = (element?.getAttribute('class') || '')
+    .split(/\s+/)
+    .map(token => token.trim())
+    .filter(Boolean);
+  const candidateClassTokens = Array.from(new Set([
+    ...selectorClassTokens,
+    ...elementClassTokens,
+  ]));
+
+  if (candidateClassTokens.length === 0) {
+    return { adjustment: 0, score: 0, reasons: [] };
+  }
+
+  const bestTokenEntropy = candidateClassTokens
+    .map(classToken => evaluateClassTokenEntropy(classToken, step, candidate))
+    .sort((left, right) => {
+      if (right.adjustment !== left.adjustment) return right.adjustment - left.adjustment;
+      return left.reasons.length - right.reasons.length;
+    })[0];
+
+  return bestTokenEntropy ?? { adjustment: 0, score: 0, reasons: [] };
+}
+
+function computeIdEntropy(
+  step: CodegenStep,
+  candidate: RawCandidate,
+  validation: CandidateValidation,
+  snapshot?: Document,
+): { adjustment: number; score: number; reasons: string[] } {
+  if (!candidateUsesIdSelector(candidate)) {
+    return { adjustment: 0, score: 0, reasons: [] };
+  }
+
+  const element =
+    validation.resolvedElement ??
+    (snapshot ? getCandidateElement(snapshot, candidate.selector) : null);
+  const candidateId = (
+    element?.getAttribute('id') ||
+    (element as HTMLElement | null)?.id ||
+    extractCandidateId(candidate.selector) ||
+    ''
+  ).trim();
+
+  if (!candidateId) {
+    return { adjustment: 0, score: 0, reasons: [] };
+  }
+
+  let penalty = 0;
+  const reasons: string[] = [];
+  const normalizedId = candidateId.trim();
+
+  const addPenalty = (amount: number, reason: string): void => {
+    if (reasons.includes(reason)) return;
+    penalty += amount;
+    reasons.push(reason);
+  };
+
+  if (/^react-/i.test(normalizedId)) addPenalty(0.18, 'react_prefix');
+  if (/^headlessui-/i.test(normalizedId)) addPenalty(0.22, 'headlessui_prefix');
+  if (/^radix-/i.test(normalizedId)) addPenalty(0.22, 'radix_prefix');
+  if (/^:[a-z0-9]+:$/i.test(normalizedId)) addPenalty(0.24, 'react_runtime_id');
+  if (/[0-9a-f]{8}-[0-9a-f]{4}(?:-[0-9a-f]{4}){1,2}/i.test(normalizedId)) addPenalty(0.22, 'uuid_like');
+  if (/^(?:css|sc)-[a-z0-9_-]+$/i.test(normalizedId)) addPenalty(0.2, 'css_hash');
+  if (/\d{5,}/.test(normalizedId)) addPenalty(0.16, 'long_numeric_run');
+  if (isVeryOpaqueMixedId(normalizedId)) addPenalty(0.12, 'opaque_mixed_alnum');
+  if (hasOpaqueHyphenatedSegments(normalizedId)) addPenalty(0.1, 'opaque_hyphen_segments');
+
+  penalty = Math.min(0.3, penalty);
+
+  const attrs = inferStepSignalAttributes(step);
+  const stepTokens = new Set<string>([
+    ...tokenizeSemanticParts(attrs.id),
+    ...tokenizeSemanticParts(attrs.name),
+    ...tokenizeSemanticParts(attrs.placeholder),
+    ...tokenizeSemanticParts(step.fingerprint?.textExcerpt ?? extractTextExcerpt(step)),
+    ...extractHrefTokens(attrs.href),
+    ...tokenizeSemanticParts(step.intent),
+  ]);
+
+  const idTokens = tokenizeSemanticParts(candidateId);
+  let bonus = 0;
+  if (attrs.id && attrs.id.toLowerCase() === candidateId.toLowerCase()) {
+    bonus += 0.05;
+  }
+  if (attrs.name && candidateId.toLowerCase().includes(attrs.name.toLowerCase())) {
+    bonus += 0.03;
+  }
+  const overlapCount = idTokens.filter(token => stepTokens.has(token)).length;
+  if (overlapCount >= 2) {
+    bonus += 0.04;
+  } else if (overlapCount === 1) {
+    bonus += 0.02;
+  }
+
+  bonus = Math.min(0.05, bonus);
+  const adjustment = Math.max(-0.3, Math.min(0.05, bonus - penalty));
+  return {
+    adjustment,
+    score: adjustment,
+    reasons,
+  };
 }
 
 function getSelectorRank(
@@ -288,8 +598,9 @@ export function generateCandidates(step: CodegenStep, snapshot: Document): RawCa
   }
 
   if (attrs.id) {
-    pushCandidate(candidates, seen, `#${cssEscape(attrs.id)}`, 'id', 2);
-    pushCandidate(candidates, seen, `[id="${cssEscape(attrs.id)}"]`, 'id', 2);
+    for (const selector of buildIdSelectors(attrs.id)) {
+      pushCandidate(candidates, seen, selector, 'id', 2);
+    }
   }
 
   if (attrs.name) {
@@ -348,7 +659,11 @@ export function generateCandidates(step: CodegenStep, snapshot: Document): RawCa
     : attrs.parentSelector;
   if (scopedBase && isLikelyCssSelector(scopedBase)) {
     if (attrs.dataTestId) pushCandidate(candidates, seen, `${scopedBase} [data-testid="${cssEscape(attrs.dataTestId)}"]`, 'parent-scope', 2);
-    if (attrs.id) pushCandidate(candidates, seen, `${scopedBase} #${cssEscape(attrs.id)}`, 'parent-scope', 2);
+    if (attrs.id) {
+      for (const selector of buildIdSelectors(attrs.id)) {
+        pushCandidate(candidates, seen, `${scopedBase} ${selector}`, 'parent-scope', 2);
+      }
+    }
     if (attrs.name) pushCandidate(candidates, seen, `${scopedBase} [name="${cssEscape(attrs.name)}"]`, 'parent-scope', 4);
     if (attrs.ariaLabel) pushCandidate(candidates, seen, `${scopedBase} [aria-label="${cssEscape(attrs.ariaLabel)}"]`, 'parent-scope', 4);
     if (tagName) pushCandidate(candidates, seen, `${scopedBase} ${tagName}`, 'parent-scope', 6);
@@ -397,6 +712,392 @@ export function generateCandidates(step: CodegenStep, snapshot: Document): RawCa
   return candidates.slice(0, 20);
 }
 
+function normalizeComparablePath(href?: string | null): string | null {
+  if (typeof href !== 'string') return null;
+  const trimmed = href.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed, 'https://air.local');
+    const pathname = parsed.pathname.replace(/\/+$/, '') || '/';
+    return pathname.toLowerCase();
+  } catch {
+    return trimmed.replace(/\/+$/, '') || '/';
+  }
+}
+
+function normalizeSemanticText(value?: string | null): string {
+  if (typeof value !== 'string') return '';
+  return normalizeTextForMatch(value.replace(/[^\w\s-]+/g, ' '));
+}
+
+function extractOriginalMeaningfulText(step: CodegenStep): string | null {
+  const text = step.fingerprint?.textExcerpt
+    || (isTextSelector(step.selector) ? extractTextExcerpt(step) : null);
+  if (typeof text !== 'string') return null;
+  const normalized = normalizeSemanticText(text);
+  if (!normalized || normalized.length < 2) return null;
+  return normalized;
+}
+
+function normalizeSignalValue(signal: SemanticTextSignal | string): string {
+  return typeof signal === 'string'
+    ? normalizeSemanticText(signal)
+    : normalizeSemanticText(signal.value);
+}
+
+function textSignalsAlign(
+  originalSignals: Array<SemanticTextSignal | string>,
+  candidateSignals: Array<SemanticTextSignal | string>,
+): { matched: boolean; reasons: string[] } {
+  const normalizedOriginals = originalSignals
+    .map(signal => ({
+      source: typeof signal === 'string' ? 'text' : signal.source,
+      value: normalizeSignalValue(signal),
+    }))
+    .filter(signal => signal.value.length > 0);
+  const normalizedCandidates = candidateSignals
+    .map(signal => ({
+      source: typeof signal === 'string' ? 'text' : signal.source,
+      value: normalizeSignalValue(signal),
+    }))
+    .filter(signal => signal.value.length > 0);
+
+  if (normalizedOriginals.length === 0 || normalizedCandidates.length === 0) {
+    return { matched: false, reasons: [] };
+  }
+
+  const reasons = new Set<string>();
+  for (const original of normalizedOriginals) {
+    const originalTokens = original.value.split(/\s+/).filter(Boolean);
+    const compactOriginal = original.value.replace(/\s+/g, '');
+    for (const candidate of normalizedCandidates) {
+      const compactCandidate = candidate.value.replace(/\s+/g, '');
+      if (
+        compactCandidate === compactOriginal ||
+        candidate.value === original.value ||
+        candidate.value.includes(original.value) ||
+        original.value.includes(candidate.value)
+      ) {
+        reasons.add(`text_match:${candidate.source}`);
+        return { matched: true, reasons: Array.from(reasons) };
+      }
+      const candidateTokens = new Set(candidate.value.split(/\s+/).filter(Boolean));
+      if (originalTokens.length > 0 && originalTokens.every(token => candidateTokens.has(token))) {
+        reasons.add(`text_match:${candidate.source}`);
+        return { matched: true, reasons: Array.from(reasons) };
+      }
+    }
+  }
+
+  return { matched: false, reasons: [] };
+}
+
+function collectStepPrimarySemanticSignals(step: CodegenStep): SemanticTextSignal[] {
+  const attrs = inferStepSignalAttributes(step);
+  const signals: SemanticTextSignal[] = [];
+  const push = (value: string | undefined | null, source: string): void => {
+    const normalized = normalizeSemanticText(value);
+    if (!normalized) return;
+    if (signals.some(signal => signal.value === normalized && signal.source === source)) return;
+    signals.push({ value: normalized, source });
+  };
+
+  push(step.fingerprint?.textExcerpt || undefined, 'fingerprint_text');
+  push(attrs.ariaLabel, 'fingerprint_aria_label');
+  push(attrs.placeholder, 'fingerprint_placeholder');
+  push(attrs.title, 'fingerprint_title');
+  push(attrs.alt, 'fingerprint_alt');
+
+  return signals;
+}
+
+function collectStepPositiveSemanticSignals(step: CodegenStep): SemanticTextSignal[] {
+  const attrs = inferStepSignalAttributes(step);
+  const signals = collectStepPrimarySemanticSignals(step);
+  const normalizedValue = normalizeSemanticText(attrs.value);
+  if (normalizedValue) {
+    signals.push({ value: normalizedValue, source: 'fingerprint_value' });
+  }
+  return signals;
+}
+
+function collectCandidatePrimarySemanticSignals(element: Element, snapshot: Document): SemanticTextSignal[] {
+  return getElementSemanticTextSignals(element, snapshot)
+    .filter(signal => signal.source !== 'value' && signal.source !== 'parent_wrapper_text');
+}
+
+function collectCandidatePositiveSemanticSignals(element: Element, snapshot: Document): SemanticTextSignal[] {
+  return getElementSemanticTextSignals(element, snapshot)
+    .filter(signal => signal.source !== 'parent_wrapper_text');
+}
+
+function hasParentSelectorMatch(step: CodegenStep, element: Element, snapshot: Document): boolean {
+  const parentSelector = step.fingerprint?.parentSelector;
+  if (!parentSelector || !isLikelyCssSelector(parentSelector)) return false;
+  try {
+    const scopes = Array.from(snapshot.querySelectorAll(parentSelector)).slice(0, 25);
+    let current: Element | null = element;
+    while (current) {
+      if (scopes.includes(current)) return true;
+      current = current.parentElement;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+function collectContextCompatibilityReasons(
+  step: CodegenStep,
+  element: Element,
+  snapshot: Document,
+): { score: number; reasons: string[] } {
+  const reasons: string[] = [];
+  let score = 0;
+  const stepParentTag = (step.fingerprint?.context?.parentTag || '').toLowerCase();
+  const stepNearestContainerTag = (step.fingerprint?.context?.nearestContainerTag || '').toLowerCase();
+  const elementHints = getElementContextHints(element);
+
+  if (stepParentTag && elementHints.parentTag && stepParentTag === elementHints.parentTag) {
+    score += 0.08;
+    reasons.push(`parent_tag_match:${stepParentTag}`);
+  }
+
+  if (
+    stepNearestContainerTag &&
+    elementHints.nearestContainerTag &&
+    stepNearestContainerTag === elementHints.nearestContainerTag
+  ) {
+    score += 0.1;
+    reasons.push(`nearest_container_match:${stepNearestContainerTag}`);
+  }
+
+  if (hasParentSelectorMatch(step, element, snapshot)) {
+    score += 0.12;
+    reasons.push('parent_selector_match');
+  }
+
+  return { score, reasons };
+}
+
+interface SemanticCompatibilityEvaluation {
+  score: number;
+  reasons: string[];
+  rejectReason: ResolverRejectReason | null;
+}
+
+function collectCompatibilityEvidence(
+  step: CodegenStep,
+  element: Element,
+  snapshot: Document,
+): SemanticCompatibilityEvaluation {
+  const originalAttrs = inferStepSignalAttributes(step);
+  const originalHref = normalizeComparablePath(originalAttrs.href);
+  const candidateHref = normalizeComparablePath(element.getAttribute('href'));
+  if (originalHref && candidateHref && originalHref !== candidateHref) {
+    return {
+      score: 0,
+      reasons: ['href_mismatch'],
+      rejectReason: 'href_mismatch',
+    };
+  }
+
+  const originalFamily = inferStepControlFamily(step);
+  const candidateFamily = inferElementControlFamily(element);
+  if (shouldRejectControlFamily(originalFamily, candidateFamily)) {
+    return {
+      score: 0,
+      reasons: [`control_family_mismatch:${originalFamily}->${candidateFamily}`],
+      rejectReason: 'control_family_mismatch',
+    };
+  }
+
+  const primaryOriginalSignals = collectStepPrimarySemanticSignals(step);
+  const primaryCandidateSignals = collectCandidatePrimarySemanticSignals(element, snapshot);
+  const primaryTextMatch = textSignalsAlign(primaryOriginalSignals, primaryCandidateSignals);
+  if (
+    primaryOriginalSignals.length > 0 &&
+    primaryCandidateSignals.length > 0 &&
+    !primaryTextMatch.matched
+  ) {
+    return {
+      score: 0,
+      reasons: ['text_mismatch'],
+      rejectReason: 'text_mismatch',
+    };
+  }
+
+  let score = 0.25;
+  const reasons: string[] = [];
+
+  if (originalFamily === candidateFamily || (originalFamily === 'button' && candidateFamily === 'icon-button')) {
+    score += 0.2;
+    reasons.push(`control_family_match:${candidateFamily}`);
+  }
+
+  if (originalHref && candidateHref && originalHref === candidateHref) {
+    score += 0.2;
+    reasons.push('href_match');
+  }
+
+  if (primaryTextMatch.matched) {
+    score += 0.3;
+    reasons.push(...primaryTextMatch.reasons);
+  }
+
+  const positiveTextMatch = textSignalsAlign(
+    collectStepPositiveSemanticSignals(step),
+    collectCandidatePositiveSemanticSignals(element, snapshot),
+  );
+  if (positiveTextMatch.matched) {
+    score += 0.08;
+    reasons.push(...positiveTextMatch.reasons.filter(reason => !reasons.includes(reason)));
+  }
+
+  const contextCompatibility = collectContextCompatibilityReasons(step, element, snapshot);
+  score += contextCompatibility.score;
+  reasons.push(...contextCompatibility.reasons);
+
+  return {
+    score: Math.max(0, Math.min(1, score)),
+    reasons,
+    rejectReason: null,
+  };
+}
+
+function compareSemanticCandidates(
+  left: { candidate: CandidateScore; semantic: SemanticCompatibilityEvaluation },
+  right: { candidate: CandidateScore; semantic: SemanticCompatibilityEvaluation },
+): number {
+  if (right.candidate.score !== left.candidate.score) {
+    return right.candidate.score - left.candidate.score;
+  }
+  if (right.semantic.score !== left.semantic.score) {
+    return right.semantic.score - left.semantic.score;
+  }
+  return compareCandidates(left.candidate, right.candidate);
+}
+
+function inferStepControlFamily(step: CodegenStep): ControlFamily {
+  const attrs = inferStepSignalAttributes(step);
+  const selector = (step.selector || step.fingerprint?.selector || '').toLowerCase();
+  const text = normalizeSemanticText(step.fingerprint?.textExcerpt || '');
+  const role = (attrs.role || '').toLowerCase();
+  const tagName = (step.fingerprint?.tagName || attrs.tagName || '').toLowerCase();
+  const type = (attrs.type || '').toLowerCase();
+  const hasPopup = normalizeSemanticText((step.fingerprint?.attributes?.['aria-haspopup']) || '');
+
+  if ((role === 'button' || tagName === 'button') && !text && (attrs.ariaLabel || attrs.title || attrs.alt)) {
+    return 'icon-button';
+  }
+  if (role === 'menuitem') return 'menuitem';
+  if (role === 'link') return 'nav-link';
+  if (role === 'combobox') return 'combobox';
+  if (type === 'password') return 'password-input';
+  if (type === 'submit' || step.action === 'submit') return 'submit-button';
+  if (attrs.href || tagName === 'a' || selector.startsWith('a') || selector.includes('[href=')) return 'nav-link';
+  if (role === 'button' || tagName === 'button') return 'button';
+  if (tagName === 'select') return 'combobox';
+  if (role === 'textbox' || role === 'searchbox' || tagName === 'input' || tagName === 'textarea') {
+    return type === 'password' ? 'password-input' : 'text-input';
+  }
+  if (
+    step.action === 'custom-select' ||
+    text === '-- select --' ||
+    selector.includes('select') ||
+    role === 'listbox' ||
+    hasPopup === 'listbox' ||
+    hasPopup === 'combobox'
+  ) {
+    return 'select-trigger';
+  }
+  return 'generic-container';
+}
+
+function inferElementControlFamily(element: Element | null): ControlFamily {
+  if (!element) return 'generic-container';
+  const tagName = (((element as HTMLElement).tagName) || '').toLowerCase();
+  const role = (element.getAttribute('role') || '').toLowerCase();
+  const type = (element.getAttribute('type') || '').toLowerCase();
+  const placeholder = normalizeSemanticText(element.getAttribute('placeholder') || '');
+  const hasPopup = normalizeSemanticText(element.getAttribute('aria-haspopup') || '');
+  const signals = getElementSemanticTextSignals(element);
+  const hasExplicitIconText = signals.some(signal =>
+    ['aria_label', 'title', 'alt', 'icon_child_svg_title', 'icon_child_alt', 'icon_child_aria_label', 'icon_child_title'].includes(signal.source),
+  );
+
+  if (role === 'menuitem') return 'menuitem';
+  if (role === 'link') return 'nav-link';
+  if (role === 'combobox' || role === 'listbox' || tagName === 'select') return 'combobox';
+  if (type === 'password') return 'password-input';
+  if (type === 'submit') return 'submit-button';
+  if (tagName === 'a' || !!element.getAttribute('href')) return 'nav-link';
+  if ((tagName === 'button' || role === 'button') && hasExplicitIconText && !(element.textContent || '').trim()) {
+    return 'icon-button';
+  }
+  if (tagName === 'button' || role === 'button') return 'button';
+  if (tagName === 'input' || tagName === 'textarea' || role === 'textbox' || role === 'searchbox') {
+    if (placeholder.includes('search') || type === 'search') return 'text-input';
+    return 'text-input';
+  }
+  if (placeholder === '-- select --' || hasPopup === 'listbox' || hasPopup === 'combobox') return 'select-trigger';
+  return 'generic-container';
+}
+
+function shouldRejectControlFamily(
+  originalFamily: ControlFamily,
+  candidateFamily: ControlFamily,
+): boolean {
+  if (originalFamily === candidateFamily) return false;
+  if (originalFamily === 'icon-button') {
+    return !['icon-button', 'button'].includes(candidateFamily);
+  }
+  if (originalFamily === 'select-trigger') {
+    return candidateFamily === 'text-input' || candidateFamily === 'password-input' || candidateFamily === 'nav-link';
+  }
+  if (originalFamily === 'menuitem') {
+    return candidateFamily !== 'menuitem';
+  }
+  if (originalFamily === 'nav-link') {
+    return candidateFamily !== 'nav-link' && candidateFamily !== 'menuitem';
+  }
+  if (originalFamily === 'password-input') {
+    return candidateFamily !== 'password-input';
+  }
+  if (originalFamily === 'text-input') {
+    return !['text-input', 'password-input', 'combobox'].includes(candidateFamily);
+  }
+  if (originalFamily === 'submit-button') {
+    return !['submit-button', 'button'].includes(candidateFamily);
+  }
+  return false;
+}
+
+function evaluateSemanticReject(
+  step: CodegenStep,
+  candidate: CandidateScore,
+  snapshot: Document,
+): SemanticCompatibilityEvaluation {
+  if (candidate.candidate.selector === step.selector) {
+    return {
+      score: 0.5,
+      reasons: ['original-selector-candidate'],
+      rejectReason: null,
+    };
+  }
+
+  const element = candidate.validation.resolvedElement ?? getCandidateElement(snapshot, candidate.candidate.selector);
+  if (!element) {
+    return {
+      score: 0,
+      reasons: ['candidate-element-missing'],
+      rejectReason: null,
+    };
+  }
+
+  return collectCompatibilityEvidence(step, element, snapshot);
+}
+
 export function complexityPenalty(selector: string): number {
   const descendantPenalty = Math.max(0, (selector.match(/\s+/g)?.length ?? 0) * 0.03);
   const childPenalty = Math.max(0, (selector.match(/>/g)?.length ?? 0) * 0.05);
@@ -416,6 +1117,7 @@ export function scoreCandidate(
   candidate: RawCandidate,
   validation: CandidateValidation,
   step: CodegenStep,
+  snapshot?: Document,
 ): number {
   let score = rankScore(candidate.rank);
   if (validation.effectiveMatchCount === 1) score += 0.3;
@@ -435,6 +1137,26 @@ export function scoreCandidate(
   if (validation.reason === 'resolved-multi-match') score -= 0.08;
   if (validation.reason === 'too-broad') score -= 0.12;
   if (validation.ambiguityReason) score -= 0.22;
+
+  const idEntropy = computeIdEntropy(step, candidate, validation, snapshot);
+  score += idEntropy.adjustment;
+  if (candidateUsesIdSelector(candidate)) {
+    score = Math.max(score, 0.52);
+  }
+
+  const classEntropy = computeClassEntropy(step, candidate, validation, snapshot);
+  score += classEntropy.adjustment;
+  if (
+    candidate.source === 'parent-scope' &&
+    candidateUsesClassSelector(candidate) &&
+    step.action === 'input' &&
+    /\.[A-Za-z0-9:_-]*(?:date|calendar)[A-Za-z0-9:_-]*/i.test(candidate.selector)
+  ) {
+    score += 0.03;
+  }
+  if (candidateUsesClassSelector(candidate)) {
+    score = Math.max(score, 0.44);
+  }
 
   return Math.max(0, Math.min(1.5, score));
 }
@@ -470,12 +1192,21 @@ function deriveDeterministicResolution(
     llmAccepted: false,
     llmAlternative: null,
     rejectReason: null,
+    semanticRejectReason: null,
     warningCodes: [],
     resolverVersion: 1,
     temporalClass: snapshotSelection?.temporalClass,
     selectionReason: snapshotSelection?.reason ?? null,
     snapshotSelection,
     evaluatedCandidates,
+    snapshotTargetEvidence: snapshotSelection?.snapshotTargetEvidence,
+    snapshotTargetEvidenceReason: snapshotSelection?.snapshotTargetEvidenceReason ?? null,
+    semanticCompatibilityScore: undefined,
+    semanticCompatibilityReasons: undefined,
+    idEntropyScore: undefined,
+    idPenaltyReason: undefined,
+    classEntropyScore: undefined,
+    classPenaltyReason: undefined,
   };
 
   if (!snapshot) {
@@ -547,12 +1278,46 @@ function deriveDeterministicResolution(
     };
   }
 
+  if (
+    snapshotSelection?.temporalClass !== 'outcome_state' &&
+    snapshotSelection?.snapshotTargetEvidence === false
+  ) {
+    return {
+      step,
+      snapshot,
+      resolvedSelector: step.selector,
+      metadata: {
+        ...baseMetadata,
+        resolvedSelector: step.selector,
+        resolvedBy: 'blocked-snapshot-target-missing',
+        effectiveMatchCount: originalValidation.effectiveMatchCount,
+        matchCount: originalValidation.matchCount ?? originalValidation.visibleMatchCount,
+        confidenceScore: originalValidation.confidenceScore ?? 0,
+        ambiguityReason: originalValidation.ambiguityReason ?? null,
+        rejectReason: 'snapshot_target_missing',
+        semanticRejectReason: 'snapshot_target_missing',
+        semanticCompatibilityScore: 0,
+        semanticCompatibilityReasons: ['snapshot_target_missing'],
+        warningCodes: [...baseMetadata.warningCodes, 'snapshot-target-missing'],
+      },
+      llmEligible: false,
+    };
+  }
+
   const candidateScores: CandidateScore[] = generateCandidates(step, snapshot).map(candidate => {
     const validation = validateCandidate(candidate.selector, snapshot, step);
+    const idEntropy = computeIdEntropy(step, candidate, validation, snapshot);
+    const usesId = candidateUsesIdSelector(candidate);
+    const classEntropy = computeClassEntropy(step, candidate, validation, snapshot);
+    const usesClass = candidateUsesClassSelector(candidate);
     return {
       candidate,
       validation,
-      score: scoreCandidate(candidate, validation, step),
+      score: scoreCandidate(candidate, validation, step, snapshot),
+      idEntropyScore: usesId ? idEntropy.score : undefined,
+      idPenaltyReason: usesId ? idEntropy.reasons : undefined,
+      classEntropyScore: usesClass ? classEntropy.score : undefined,
+      classPenaltyReason: usesClass ? classEntropy.reasons : undefined,
     };
   });
 
@@ -560,14 +1325,33 @@ function deriveDeterministicResolution(
     .filter(candidate => candidate.validation.effectiveMatchCount === 1)
     .sort(compareCandidates);
 
-  const highScoreCandidates = uniqueCandidates
-    .filter(candidate => candidate.score >= config.resolverMinScore);
+  const semanticEvaluations = uniqueCandidates.map(candidate => ({
+    candidate,
+    semantic: evaluateSemanticReject(step, candidate, snapshot),
+  }));
+
+  const rejectedCandidates = semanticEvaluations
+    .filter(evaluation => evaluation.semantic.rejectReason !== null)
+    .map(evaluation => ({
+      selector: evaluation.candidate.candidate.selector,
+      reason: evaluation.semantic.rejectReason as ResolverRejectReason,
+    }));
+
+  const semanticallySafeCandidates = semanticEvaluations
+    .filter(evaluation => evaluation.semantic.rejectReason === null)
+    .sort(compareSemanticCandidates);
+
+  const highScoreCandidates = semanticallySafeCandidates
+    .filter(evaluation => evaluation.candidate.candidate.selector !== step.selector)
+    .filter(evaluation => evaluation.candidate.score >= config.resolverMinScore);
 
   const winner = highScoreCandidates[0];
 
-  const lowScoreFallbackCandidates = uniqueCandidates.filter(candidate =>
-    candidate.candidate.selector !== step.selector &&
-    !shouldBlockGenericShellOverride(step.selector, candidate.candidate.selector),
+  const lowScoreFallbackCandidates = semanticallySafeCandidates
+    .map(evaluation => evaluation.candidate)
+    .filter(candidate =>
+      candidate.candidate.selector !== step.selector &&
+      !shouldBlockGenericShellOverride(step.selector, candidate.candidate.selector),
   );
 
   const lowScoreFallback = lowScoreFallbackCandidates.find(candidate =>
@@ -576,7 +1360,7 @@ function deriveDeterministicResolution(
 
   const hadRejectedLowScoreFallback = lowScoreFallbackCandidates.length > 0 && !lowScoreFallback;
 
-  if (winner && shouldBlockGenericShellOverride(step.selector, winner.candidate.selector)) {
+  if (winner && shouldBlockGenericShellOverride(step.selector, winner.candidate.candidate.selector)) {
     return {
       step,
       snapshot,
@@ -596,9 +1380,30 @@ function deriveDeterministicResolution(
   }
 
   if (!winner) {
+    const bestAvailableCandidate = lowScoreFallbackCandidates[0] ?? uniqueCandidates[0];
+    if (rejectedCandidates.length > 0) {
+      const blockedEvaluation = semanticEvaluations.find(evaluation => evaluation.semantic.rejectReason !== null);
+      baseMetadata.warningCodes.push('deterministic-semantic-reject');
+      baseMetadata.rejectReason = rejectedCandidates[0]?.reason ?? 'control_family_mismatch';
+      baseMetadata.semanticRejectReason = baseMetadata.rejectReason;
+      baseMetadata.rejectedCandidates = rejectedCandidates;
+      baseMetadata.semanticCompatibilityScore = blockedEvaluation?.semantic.score;
+      baseMetadata.semanticCompatibilityReasons = blockedEvaluation?.semantic.reasons;
+      baseMetadata.idEntropyScore = blockedEvaluation?.candidate.idEntropyScore;
+      baseMetadata.idPenaltyReason = blockedEvaluation?.candidate.idPenaltyReason;
+      baseMetadata.classEntropyScore = blockedEvaluation?.candidate.classEntropyScore;
+      baseMetadata.classPenaltyReason = blockedEvaluation?.candidate.classPenaltyReason;
+      baseMetadata.resolvedBy = 'blocked-semantic-mismatch';
+    }
+    if (rejectedCandidates.length === 0 && bestAvailableCandidate) {
+      baseMetadata.idEntropyScore = bestAvailableCandidate.idEntropyScore;
+      baseMetadata.idPenaltyReason = bestAvailableCandidate.idPenaltyReason;
+      baseMetadata.classEntropyScore = bestAvailableCandidate.classEntropyScore;
+      baseMetadata.classPenaltyReason = bestAvailableCandidate.classPenaltyReason;
+    }
     if (uniqueCandidates.length === 0) {
       baseMetadata.warningCodes.push('no-unique-candidate');
-    } else {
+    } else if (rejectedCandidates.length === 0) {
       baseMetadata.warningCodes.push('deterministic-below-threshold');
       if (lowScoreFallback) {
         baseMetadata.warningCodes.push('deterministic-low-score-available');
@@ -619,36 +1424,45 @@ function deriveDeterministicResolution(
         matchCount: originalValidation.matchCount ?? originalValidation.visibleMatchCount,
         confidenceScore: originalValidation.confidenceScore ?? 0,
         ambiguityReason: originalValidation.ambiguityReason ?? null,
+        rejectedCandidates: baseMetadata.rejectedCandidates,
+        semanticCompatibilityScore: baseMetadata.semanticCompatibilityScore,
+        semanticCompatibilityReasons: baseMetadata.semanticCompatibilityReasons,
+        semanticRejectReason: baseMetadata.semanticRejectReason,
+        idEntropyScore: baseMetadata.idEntropyScore,
+        idPenaltyReason: baseMetadata.idPenaltyReason,
+        classEntropyScore: baseMetadata.classEntropyScore,
+        classPenaltyReason: baseMetadata.classPenaltyReason,
       },
       llmEligible: true,
       lowScoreFallback,
     };
   }
 
-  const resolvedBy = winner.candidate.selector === step.selector
-    ? 'kept-original'
-    : 'deterministic-override';
-
   return {
     step,
     snapshot,
-    resolvedSelector: winner.candidate.selector,
+    resolvedSelector: winner.candidate.candidate.selector,
     metadata: {
       ...baseMetadata,
-      resolvedSelector: winner.candidate.selector,
-      resolvedBy,
-      bestScore: winner.score,
-      effectiveMatchCount: winner.validation.effectiveMatchCount,
-      matchCount: winner.validation.matchCount ?? winner.validation.visibleMatchCount,
-      confidenceScore: winner.validation.confidenceScore ?? winner.score,
-      ambiguityReason: winner.validation.ambiguityReason ?? null,
-      warningCodes: winner.candidate.selector === step.selector
-        ? baseMetadata.warningCodes
-        : [
-          ...baseMetadata.warningCodes,
-          'deterministic-override',
-          ...(winner.validation.ambiguityReason ? ['deterministic-dom-order-tiebreaker'] : []),
-        ],
+      resolvedSelector: winner.candidate.candidate.selector,
+      resolvedBy: 'deterministic-override',
+      bestScore: winner.candidate.score,
+      effectiveMatchCount: winner.candidate.validation.effectiveMatchCount,
+      matchCount: winner.candidate.validation.matchCount ?? winner.candidate.validation.visibleMatchCount,
+      confidenceScore: winner.candidate.validation.confidenceScore ?? winner.candidate.score,
+      ambiguityReason: winner.candidate.validation.ambiguityReason ?? null,
+      semanticCompatibilityScore: winner.semantic.score,
+      semanticCompatibilityReasons: winner.semantic.reasons,
+      idEntropyScore: winner.candidate.idEntropyScore,
+      idPenaltyReason: winner.candidate.idPenaltyReason,
+      classEntropyScore: winner.candidate.classEntropyScore,
+      classPenaltyReason: winner.candidate.classPenaltyReason,
+      rejectedCandidates: rejectedCandidates.length > 0 ? rejectedCandidates : undefined,
+      warningCodes: [
+        ...baseMetadata.warningCodes,
+        'deterministic-override',
+        ...(winner.candidate.validation.ambiguityReason ? ['deterministic-dom-order-tiebreaker'] : []),
+      ],
     },
     llmEligible: false,
   };
@@ -721,6 +1535,10 @@ function applyLowScoreFallback(draft: StepResolutionDraft): void {
     matchCount: draft.lowScoreFallback.validation.matchCount ?? draft.lowScoreFallback.validation.visibleMatchCount,
     confidenceScore: draft.lowScoreFallback.validation.confidenceScore ?? draft.lowScoreFallback.score,
     ambiguityReason: draft.lowScoreFallback.validation.ambiguityReason ?? null,
+    idEntropyScore: draft.lowScoreFallback.idEntropyScore,
+    idPenaltyReason: draft.lowScoreFallback.idPenaltyReason,
+    classEntropyScore: draft.lowScoreFallback.classEntropyScore,
+    classPenaltyReason: draft.lowScoreFallback.classPenaltyReason,
     llmAccepted: false,
   };
   pushWarningCode(draft.metadata, 'deterministic-low-score-fallback');

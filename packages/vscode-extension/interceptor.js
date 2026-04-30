@@ -2862,8 +2862,67 @@ class AIRInterceptor {
     return null;
   }
 
+  _normalizeCompositeAnchorsForTransport(compositeAnchors) {
+    if (!Array.isArray(compositeAnchors)) {
+      return undefined;
+    }
+
+    return compositeAnchors
+      .filter((anchor) => this._isPlainObject(anchor))
+      .map((anchor) => {
+        const normalizedAnchor = { ...anchor };
+        if (Array.isArray(anchor.tokens)) {
+          normalizedAnchor.tokens = anchor.tokens.filter((token) => typeof token === "string");
+        }
+        return normalizedAnchor;
+      })
+      .filter(
+        (anchor) =>
+          typeof anchor.kind === "string" &&
+          typeof anchor.descriptor === "string" &&
+          typeof anchor.confidence === "number" &&
+          Array.isArray(anchor.tokens)
+      );
+  }
+
+  _getTrackedSnapshotSubfields(snapshotValue) {
+    if (!this._isPlainObject(snapshotValue)) {
+      return [];
+    }
+
+    const tracked = [];
+    if (Array.isArray(snapshotValue.compositeAnchors) && snapshotValue.compositeAnchors.length > 0) {
+      tracked.push("compositeAnchors");
+    }
+    if (this._isPlainObject(snapshotValue.metrics) && Object.keys(snapshotValue.metrics).length > 0) {
+      tracked.push("metrics");
+    }
+    return tracked;
+  }
+
+  _logSnapshotSubfieldDrop(
+    fieldName,
+    eventContext,
+    reason,
+    subfields,
+    extra = {}
+  ) {
+    if (!eventContext || !Array.isArray(subfields) || subfields.length === 0) {
+      return;
+    }
+
+    this.log("TRANSPORT_SNAPSHOT_SUBFIELD_DROPPED", {
+      ...eventContext,
+      fieldName,
+      reason,
+      droppedSubfields: subfields,
+      ...extra,
+    });
+  }
+
   _buildSchemaCompatibleSnapshot(snapshotObject, sanitizedHtml) {
     const normalizedSnapshot = {
+      ...snapshotObject,
       html: sanitizedHtml,
       url:
         typeof snapshotObject.url === "string"
@@ -2896,6 +2955,17 @@ class AIRInterceptor {
       normalizedSnapshot.anchors = snapshotObject.anchors.filter(
         (anchor) => typeof anchor === "string"
       );
+    } else {
+      delete normalizedSnapshot.anchors;
+    }
+
+    const compositeAnchors = this._normalizeCompositeAnchorsForTransport(
+      snapshotObject.compositeAnchors
+    );
+    if (Array.isArray(compositeAnchors) && compositeAnchors.length > 0) {
+      normalizedSnapshot.compositeAnchors = compositeAnchors;
+    } else {
+      delete normalizedSnapshot.compositeAnchors;
     }
 
     if (
@@ -2903,10 +2973,14 @@ class AIRInterceptor {
       typeof snapshotObject.controlSignature === "string"
     ) {
       normalizedSnapshot.controlSignature = snapshotObject.controlSignature;
+    } else {
+      delete normalizedSnapshot.controlSignature;
     }
 
     if (typeof snapshotObject.isStable === "boolean") {
       normalizedSnapshot.isStable = snapshotObject.isStable;
+    } else {
+      delete normalizedSnapshot.isStable;
     }
 
     if (!normalizedSnapshot.metrics) {
@@ -2951,6 +3025,12 @@ class AIRInterceptor {
         };
         if (!suppressLogs) {
           this._logTransportFieldMeta(fieldName, eventContext, meta);
+          this._logSnapshotSubfieldDrop(
+            fieldName,
+            eventContext,
+            "unsupported_snapshot_type",
+            this._getTrackedSnapshotSubfields(snapshotValue)
+          );
         }
         return { value: null, meta };
       }
@@ -2974,8 +3054,18 @@ class AIRInterceptor {
         finalBytes,
       };
 
+      const droppedSubfields = this._getTrackedSnapshotSubfields(snapshotObject).filter(
+        (subfield) => !(subfield in normalizedSnapshot)
+      );
+
       if (!suppressLogs) {
         this._logTransportFieldMeta(fieldName, eventContext, meta);
+        this._logSnapshotSubfieldDrop(
+          fieldName,
+          eventContext,
+          "normalization_trimmed_subfield",
+          droppedSubfields
+        );
       }
 
       return { value: normalizedSnapshot, meta };
@@ -3020,12 +3110,19 @@ class AIRInterceptor {
       };
       if (!suppressLogs) {
         this._logTransportFieldMeta(fieldName, eventContext, meta);
+        this._logSnapshotSubfieldDrop(
+          fieldName,
+          eventContext,
+          "sanitization_failed_field_removed",
+          this._getTrackedSnapshotSubfields(snapshotValue)
+        );
       }
       return { value: null, meta };
     }
   }
 
   dropSnapshotFieldForTransport(eventCopy, fieldName, reason, eventContext = null) {
+    const droppedSubfields = this._getTrackedSnapshotSubfields(eventCopy[fieldName]);
     eventCopy[fieldName] = null;
     const meta = {
       transportTruncated: true,
@@ -3037,6 +3134,7 @@ class AIRInterceptor {
       this.log("TRANSPORT_SNAPSHOT_FIELD_DROPPED", {
         ...eventContext,
         fieldName,
+        droppedSubfields,
         ...meta,
       });
     }
@@ -5591,18 +5689,49 @@ class AIRInterceptor {
   }
 
   extractAttributes(element) {
+    const dataTestId = element.getAttribute("data-testid") || null;
+    const dataCy = element.getAttribute("data-cy") || null;
+    const dataQa = element.getAttribute("data-qa") || null;
+    const ariaLabel = element.getAttribute("aria-label") || null;
+    const classTokens = [];
+    const rawClassTokens =
+      typeof element.className === "string"
+        ? element.className.split(/\s+/)
+        : Array.isArray(element.classList)
+          ? element.classList
+          : Array.from(element.classList || []);
+    let totalClassChars = 0;
+    for (const token of rawClassTokens) {
+      if (typeof token !== "string") continue;
+      const normalized = token.trim();
+      if (!normalized || classTokens.includes(normalized)) continue;
+      const bounded = normalized.slice(0, 40);
+      const nextLength = totalClassChars + bounded.length + (classTokens.length > 0 ? 1 : 0);
+      if (classTokens.length >= 8 || nextLength > 160) break;
+      classTokens.push(bounded);
+      totalClassChars = nextLength;
+    }
+    const boundedClassName = classTokens.length > 0 ? classTokens.join(" ") : null;
     const attrs = {
-      dataTestId: element.getAttribute("data-testid") || null,
+      dataTestId,
+      "data-testid": dataTestId,
+      dataCy,
+      "data-cy": dataCy,
+      dataQa,
+      "data-qa": dataQa,
       id: element.id || null,
       name: element.name || null,
       role: element.getAttribute("role") || null,
-      ariaLabel: element.getAttribute("aria-label") || null,
+      ariaLabel,
+      "aria-label": ariaLabel,
       type: element.type || null,
       placeholder: element.placeholder || null,
       value: element.value || null,
       href: element.href || null,
       title: element.title || null,
       alt: element.alt || null,
+      class: boundedClassName,
+      classList: boundedClassName,
     };
 
     // Filter out null/empty values and sort keys for consistency
