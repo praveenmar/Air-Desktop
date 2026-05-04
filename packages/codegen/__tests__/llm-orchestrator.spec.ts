@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { JSDOM } from 'jsdom';
+import { describe, expect, it, vi } from 'vitest';
 import { LlmOrchestrator } from '../src/llm-orchestrator';
 import { CodegenSession, CodegenStep } from '../src/types';
 
@@ -81,7 +85,8 @@ describe('LlmOrchestrator - emission safety', () => {
       step.selector
     );
 
-    expect(emitted.fallbackReason).toBeNull();
+    expect(emitted.fallbackReason).toBe('selector-spec-missing-fallback');
+    expect(emitted.methodCode).toContain('// WARNING: selector-spec-missing-fallback');
     expect(emitted.methodCode).toContain('async fillUsername(username: string = "input_username_value")');
     expect(emitted.methodCode).toContain('await target.fill(username);');
   });
@@ -101,7 +106,205 @@ describe('LlmOrchestrator - emission safety', () => {
     );
 
     expect(emitted.methodCode).not.toContain('.first()');
-    expect(emitted.methodCode).toContain(`const target = this.page.locator('button[type=\"submit\"]');`);
+    expect(emitted.methodCode).toContain(`const target = this.page.locator("button[type=\\"submit\\"]");`);
+  });
+
+  it('preserves exact proven css selector instead of upgrading to getByRole without proof', () => {
+    const step = createStep({
+      action: 'click',
+      intent: 'click_submit',
+      selector: 'button[type="submit"]',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'clickSubmit',
+      `getByRole('button', { name: 'Submit' }).click()`,
+      step.selector,
+      {
+        selector: 'button[type="submit"]',
+        engine: 'css',
+        source: 'resolver',
+        proofLevel: 'semantic_validated',
+      },
+    );
+
+    expect(emitted.fallbackReason).toBe('selector-spec-exact-render');
+    expect(emitted.methodCode).toContain(`const target = this.page.locator("button[type=\\"submit\\"]");`);
+    expect(emitted.methodCode).not.toContain('getByRole');
+  });
+
+  it('uses resolvedSelectorSpec before raw resolvedSelector when they differ', () => {
+    const step = createStep({
+      action: 'click',
+      intent: 'click_submit',
+      selector: 'button',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'clickSubmit',
+      `locator('button.secondary').click()`,
+      'button.secondary',
+      {
+        selector: 'button.primary',
+        engine: 'css',
+        source: 'resolver',
+        proofLevel: 'semantic_validated',
+      },
+    );
+
+    expect(emitted.methodCode).toContain(`const target = this.page.locator("button.primary");`);
+    expect(emitted.methodCode).not.toContain('button.secondary');
+  });
+
+  it('renders snapshot_validated text selector exactly instead of prettifying to getByText', () => {
+    const step = createStep({
+      action: 'click',
+      intent: 'click_submit',
+      selector: 'text=Submit',
+      selectorPriority: 'text',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'clickSubmit',
+      `getByText('Submit').click()`,
+      'text=Submit',
+      {
+        selector: 'text=Submit',
+        engine: 'text',
+        source: 'resolver',
+        proofLevel: 'snapshot_validated',
+      },
+    );
+
+    expect(emitted.methodCode).toContain(`const target = this.page.locator("text=Submit");`);
+    expect(emitted.methodCode).not.toContain('getByText');
+  });
+
+  it('renders recorded-only selector with inline recorded warning', () => {
+    const step = createStep({
+      action: 'click',
+      intent: 'click_submit',
+      selector: 'button[type="submit"]',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'clickSubmit',
+      `locator('button[type="submit"]').click()`,
+      step.selector,
+      {
+        selector: 'button[type="submit"]',
+        engine: 'css',
+        source: 'interceptor',
+        proofLevel: 'recorded',
+      },
+    );
+
+    expect(emitted.methodCode).toContain('// WARNING: recorded-not-revalidated');
+    expect(emitted.emittedLocatorWarnings).toContain('recorded-not-revalidated');
+    expect(emitted.methodCode).toContain(`const target = this.page.locator("button[type=\\"submit\\"]");`);
+  });
+
+  it('does not generate confident action for blocked selectors', () => {
+    const step = createStep({
+      action: 'click',
+      intent: 'click_submit',
+      selector: 'button',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'clickSubmit',
+      `locator('button').click()`,
+      'button',
+      {
+        selector: 'button',
+        engine: 'css',
+        source: 'resolver',
+        proofLevel: 'blocked',
+        rejectReason: 'snapshot_target_missing',
+      },
+    );
+
+    expect(emitted.methodCode).toContain('// TODO[AIR]: Selector is blocked');
+    expect(emitted.methodCode).toContain('throw new Error(');
+    expect(emitted.methodCode).not.toContain('await target.click()');
+    expect(emitted.emittedLocator).toBeNull();
+  });
+
+  it('does not generate confident action for unvalidated selectors', () => {
+    const step = createStep({
+      action: 'click',
+      intent: 'click_submit',
+      selector: 'button',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'clickSubmit',
+      `locator('button').click()`,
+      'button',
+      {
+        selector: 'button',
+        engine: 'css',
+        source: 'resolver',
+        proofLevel: 'unvalidated',
+      },
+    );
+
+    expect(emitted.methodCode).toContain('// TODO[AIR]: Selector is unvalidated');
+    expect(emitted.methodCode).toContain('throw new Error(');
+    expect(emitted.methodCode).not.toContain('await target.click()');
+    expect(emitted.emittedLocator).toBeNull();
+  });
+
+  it('uses legacy selector fallback with explicit warning when selector spec is missing', () => {
+    const step = createStep({
+      action: 'click',
+      intent: 'click_submit',
+      selector: 'button[type="submit"]',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'clickSubmit',
+      `getByRole('button', { name: 'Submit' }).click()`,
+      'button[type="submit"]',
+      undefined,
+    );
+
+    expect(emitted.fallbackReason).toBe('selector-spec-missing-fallback');
+    expect(emitted.methodCode).toContain('// WARNING: selector-spec-missing-fallback');
+    expect(emitted.methodCode).toContain(`const target = this.page.locator("button[type=\\"submit\\"]");`);
+    expect(emitted.usedSelectorSpec).toBe(false);
+  });
+
+  it('does not emit getByLabel from css attrs unless explicitly proven', () => {
+    const step = createStep({
+      action: 'input',
+      intent: 'input_username',
+      selector: 'input[aria-label="Username"]',
+      selectorPriority: 'attribute',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'fillUsername',
+      `getByLabel('Username').fill('Admin')`,
+      'input[aria-label="Username"]',
+      {
+        selector: 'input[aria-label="Username"]',
+        engine: 'css',
+        source: 'resolver',
+        proofLevel: 'semantic_validated',
+      },
+    );
+
+    expect(emitted.methodCode).toContain(`const target = this.page.locator("input[aria-label=\\"Username\\"]");`);
+    expect(emitted.methodCode).not.toContain('getByLabel');
   });
 
   it('emits popup-aware click code when step likely opens a new tab', () => {
@@ -120,6 +323,7 @@ describe('LlmOrchestrator - emission safety', () => {
       'clickOpenProduct',
       `locator('.product-link').click()`,
       step.selector,
+      undefined,
       undefined,
       true,
     );
@@ -299,6 +503,487 @@ describe('LlmOrchestrator - flow context prompt', () => {
     expect(prompt).toContain('FLOW CONTEXT:');
     expect(prompt).toContain('repeatedSelectorHints');
     expect(prompt).toContain('Use FLOW CONTEXT to keep method intent aligned with the user journey.');
+  });
+});
+
+describe('LlmOrchestrator - selector fallback parsing', () => {
+  it('accepts legacy single selector payload', async () => {
+    const spy = vi.spyOn(LlmOrchestrator as any, 'callGeminiApi').mockResolvedValueOnce(JSON.stringify([
+      { stepNumber: 1, selector: '  button[type="submit"]  ' },
+    ]));
+
+    const suggestions = await (LlmOrchestrator as any).requestSelectorFallback({
+      mode: 'initial',
+      steps: [],
+      config: {
+        enableLLMFallback: true,
+        resolverMinScore: 0.7,
+        intentMinScore: 0.6,
+        maxSnapshotBytesForValidation: 2_000_000,
+        maxSnapshotExcerptChars: 2000,
+        llmTimeoutMs: 20_000,
+        llmMaxCandidatesPerStep: 3,
+        llmMaxRetriesPerStep: 3,
+      },
+    });
+
+    expect(suggestions).toEqual([
+      {
+        stepNumber: 1,
+        candidates: ['button[type="submit"]'],
+        responseFormat: 'legacy-selector',
+        truncated: false,
+      },
+    ]);
+    spy.mockRestore();
+  });
+
+  it('accepts legacy selectors[] payload and clamps to candidate cap', async () => {
+    const spy = vi.spyOn(LlmOrchestrator as any, 'callGeminiApi').mockResolvedValueOnce(JSON.stringify([
+      {
+        stepNumber: 1,
+        selectors: [
+          'button[type="submit"]',
+          'css=[aria-label="submit"]',
+          'locator(button.primary)',
+          '#submit',
+        ],
+      },
+    ]));
+
+    const suggestions = await (LlmOrchestrator as any).requestSelectorFallback({
+      mode: 'initial',
+      steps: [],
+      config: {
+        enableLLMFallback: true,
+        resolverMinScore: 0.7,
+        intentMinScore: 0.6,
+        maxSnapshotBytesForValidation: 2_000_000,
+        maxSnapshotExcerptChars: 2000,
+        llmTimeoutMs: 20_000,
+        llmMaxCandidatesPerStep: 3,
+        llmMaxRetriesPerStep: 3,
+      },
+    });
+
+    expect(suggestions).toEqual([
+      {
+        stepNumber: 1,
+        candidates: [
+          'button[type="submit"]',
+          '[aria-label="submit"]',
+          'button.primary',
+        ],
+        responseFormat: 'legacy-selectors',
+        truncated: true,
+      },
+    ]);
+    spy.mockRestore();
+  });
+
+  it('accepts candidates-v2 payload, merges duplicate steps, dedupes, and ignores invalid selectors', async () => {
+    const spy = vi.spyOn(LlmOrchestrator as any, 'callGeminiApi').mockResolvedValueOnce(JSON.stringify([
+      {
+        stepNumber: 1,
+        candidates: [
+          { selector: '```css\nbutton[type="submit"]\n```', reason: 'best' },
+          { selector: 'xpath=//button[@type="submit"]', reason: 'unsupported' },
+          { selector: '`[aria-label="submit"]`' },
+        ],
+      },
+      {
+        stepNumber: 1,
+        candidates: [
+          { selector: 'button[type="submit"]' },
+          { selector: 'Use #submit because it is stable.' },
+          { selector: '#submit' },
+        ],
+      },
+      {
+        stepNumber: 0,
+        candidates: [{ selector: '#ignored' }],
+      },
+    ]));
+
+    const suggestions = await (LlmOrchestrator as any).requestSelectorFallback({
+      mode: 'initial',
+      steps: [],
+      config: {
+        enableLLMFallback: true,
+        resolverMinScore: 0.7,
+        intentMinScore: 0.6,
+        maxSnapshotBytesForValidation: 2_000_000,
+        maxSnapshotExcerptChars: 2000,
+        llmTimeoutMs: 20_000,
+        llmMaxCandidatesPerStep: 3,
+        llmMaxRetriesPerStep: 3,
+      },
+    });
+
+    expect(suggestions).toEqual([
+      {
+        stepNumber: 1,
+        candidates: [
+          'button[type="submit"]',
+          '[aria-label="submit"]',
+          '#submit',
+        ],
+        responseFormat: 'candidates-v2',
+        truncated: false,
+      },
+    ]);
+    spy.mockRestore();
+  });
+
+  it('returns [] safely for malformed JSON', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spy = vi.spyOn(LlmOrchestrator as any, 'callGeminiApi').mockResolvedValueOnce('not-json');
+
+    const suggestions = await (LlmOrchestrator as any).requestSelectorFallback({
+      mode: 'initial',
+      steps: [],
+      config: {
+        enableLLMFallback: true,
+        resolverMinScore: 0.7,
+        intentMinScore: 0.6,
+        maxSnapshotBytesForValidation: 2_000_000,
+        maxSnapshotExcerptChars: 2000,
+        llmTimeoutMs: 20_000,
+        llmMaxCandidatesPerStep: 3,
+        llmMaxRetriesPerStep: 3,
+      },
+    });
+
+    expect(suggestions).toEqual([]);
+    expect(warnSpy).toHaveBeenCalled();
+    spy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  it('normalizes corrective retry selectors and keeps the first valid selector per step', async () => {
+    const spy = vi.spyOn(LlmOrchestrator as any, 'callGeminiApi').mockResolvedValueOnce(JSON.stringify([
+      { stepNumber: 1, selector: '```css\nlocator("#submit")\n```' },
+      { stepNumber: 1, selector: '#ignored' },
+      { stepNumber: 2, selector: 'xpath=//button[@type="submit"]' },
+      { stepNumber: 0, selector: '#ignored-too' },
+    ]));
+
+    const suggestions = await (LlmOrchestrator as any).requestSelectorCorrectiveRetry({
+      mode: 'retry',
+      steps: [],
+      config: {
+        enableLLMFallback: true,
+        resolverMinScore: 0.7,
+        intentMinScore: 0.6,
+        maxSnapshotBytesForValidation: 2_000_000,
+        maxSnapshotExcerptChars: 2000,
+        llmTimeoutMs: 20_000,
+        llmRetryTimeoutMs: 10_000,
+        llmMaxCandidatesPerStep: 3,
+        llmMaxRetriesPerStep: 3,
+      },
+    });
+
+    expect(suggestions).toEqual([
+      {
+        stepNumber: 1,
+        selector: '#submit',
+      },
+    ]);
+    spy.mockRestore();
+  });
+
+  it('builds a compact corrective retry prompt with fingerprint summary and retry rules', () => {
+    const prompt = (LlmOrchestrator as any).buildSelectorCorrectiveRetryPrompt({
+      mode: 'retry',
+      steps: [
+        {
+          stepNumber: 1,
+          action: 'input',
+          intent: 'input_username',
+          originalSelector: '.login-panel',
+          fingerprint: {
+            textExcerpt: 'Username',
+            href: '/admin',
+            dataTestId: 'username-input',
+            dataCy: 'username-field',
+            dataQa: 'username-field',
+            role: 'textbox',
+            name: 'username',
+            placeholder: 'Username',
+          },
+          snapshotExcerpt: '<form><input name="username" /></form>',
+          failedCandidates: [
+            { selector: '.login-panel', rejectReason: 'llm-intent-mismatch' },
+          ],
+        },
+      ],
+      config: {
+        enableLLMFallback: true,
+        resolverMinScore: 0.7,
+        intentMinScore: 0.6,
+        maxSnapshotBytesForValidation: 2_000_000,
+        maxSnapshotExcerptChars: 2000,
+        llmTimeoutMs: 20_000,
+        llmRetryTimeoutMs: 10_000,
+        llmMaxCandidatesPerStep: 3,
+        llmMaxRetriesPerStep: 3,
+      },
+    });
+
+    expect(prompt).toContain('"textExcerpt": "Username"');
+    expect(prompt).toContain('"dataTestId": "username-input"');
+    expect(prompt).toContain('"dataCy": "username-field"');
+    expect(prompt).toContain('"dataQa": "username-field"');
+    expect(prompt).toContain('Do NOT use :nth-child or :nth-of-type.');
+    expect(prompt).toContain('Do NOT use body/html-root descendant paths.');
+  });
+});
+
+describe('LlmOrchestrator - sidecar resolver metadata', () => {
+  it('writes top-k LLM metadata into the sidecar resolver block', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'air-llm-sidecar-'));
+    const outputDir = path.join(tempRoot, 'out');
+    const projectRoot = path.join(tempRoot, 'project');
+    fs.mkdirSync(outputDir, { recursive: true });
+    fs.mkdirSync(projectRoot, { recursive: true });
+
+    const session = createSession([
+      createStep({
+        step: 1,
+        action: 'click',
+        intent: 'click_submit',
+        selector: 'button',
+        selectorPriority: 'unknown',
+        selectorRank: 10,
+        sourceNodeId: 'node-1',
+        normalizedUrl: 'https://example.test/login',
+      }),
+    ], {
+      url: 'https://example.test/login',
+      stepCount: 1,
+    });
+
+    const snapshot = new JSDOM(`<!doctype html><html><body>
+      <button aria-label="submit">Submit</button>
+      <button aria-label="cancel">Cancel</button>
+    </body></html>`).window.document;
+
+    const callSpy = vi.spyOn(LlmOrchestrator as any, 'callGeminiApi')
+      .mockResolvedValueOnce(JSON.stringify([
+        {
+          stepNumber: 1,
+          candidates: [
+            { selector: 'button[aria-label="cancel"]' },
+            { selector: 'button[aria-label="submit"]' },
+          ],
+        },
+      ]))
+      .mockResolvedValueOnce(JSON.stringify({
+        className: 'LoginPage',
+        methods: [
+          {
+            stepNumber: 1,
+            intent: 'click_submit',
+            methodName: 'clickSubmit',
+            playwrightAction: `locator('button[aria-label="submit"]').click()`,
+          },
+        ],
+      }));
+
+    await LlmOrchestrator.generatePageObjects(
+      session,
+      outputDir,
+      projectRoot,
+      {
+        resolverConfig: {
+          enableLLMFallback: true,
+          resolverMinScore: 1.3,
+          llmMaxCandidatesPerStep: 3,
+        },
+        snapshotCache: {
+          get(nodeId: string) {
+            return nodeId === 'node-1' ? snapshot : null;
+          },
+          getSource() {
+            return 'source-node-snapshot';
+          },
+        },
+      },
+    );
+
+    const sidecar = JSON.parse(
+      fs.readFileSync(path.join(outputDir, 'LoginPage.air.json'), 'utf-8'),
+    );
+
+    expect(sidecar.methods.clickSubmit.resolver).toEqual(expect.objectContaining({
+      llmAttempted: true,
+      llmAccepted: true,
+      llmAlternative: 'button[aria-label="submit"]',
+      llmCandidatesReturned: [
+        'button[aria-label="cancel"]',
+        'button[aria-label="submit"]',
+      ],
+      llmCandidatesTried: [
+        'button[aria-label="cancel"]',
+        'button[aria-label="submit"]',
+      ],
+      llmAcceptedRank: 2,
+      llmRejectedCandidates: [
+        {
+          selector: 'button[aria-label="cancel"]',
+          rejectReason: 'llm-intent-mismatch',
+        },
+      ],
+      llmResponseFormat: 'candidates-v2',
+      resolvedBy: 'llm-accepted',
+    }));
+    expect(sidecar.methods.clickSubmit.originalSelector).toBe('button');
+    expect(sidecar.methods.clickSubmit.selectorUsed).toBe('button[aria-label="submit"]');
+    expect(sidecar.methods.clickSubmit.originalSelectorSpec).toEqual(expect.objectContaining({
+      selector: 'button',
+      engine: 'css',
+      source: 'interceptor',
+      proofLevel: 'recorded',
+    }));
+    expect(sidecar.methods.clickSubmit.resolvedSelectorSpec).toEqual(expect.objectContaining({
+      selector: 'button[aria-label="submit"]',
+      engine: 'css',
+      source: 'llm',
+      proofLevel: 'semantic_validated',
+    }));
+    expect(sidecar.methods.clickSubmit).toEqual(expect.objectContaining({
+      emittedLocator: `locator("button[aria-label=\\"submit\\"]")`,
+      emittedLocatorEngine: 'css',
+      emittedLocatorProofLevel: 'semantic_validated',
+      emittedLocatorSource: 'llm',
+      emittedLocatorWarnings: [],
+      usedSelectorSpec: true,
+    }));
+
+    callSpy.mockRestore();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('writes corrective retry metadata into the sidecar resolver block', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'air-llm-retry-sidecar-'));
+    const outputDir = path.join(tempRoot, 'out');
+    const projectRoot = path.join(tempRoot, 'project');
+    fs.mkdirSync(outputDir, { recursive: true });
+    fs.mkdirSync(projectRoot, { recursive: true });
+
+    const session = createSession([
+      createStep({
+        step: 1,
+        action: 'input',
+        intent: 'input_username',
+        selector: '.login-panel',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        sourceNodeId: 'node-1',
+        normalizedUrl: 'https://example.test/login',
+        fingerprint: {
+          selector: '.login-panel',
+          selectorPriority: 'class',
+          selectorRank: 7,
+          tagName: 'input',
+          textExcerpt: 'Username',
+          attributes: {
+            name: 'username',
+            placeholder: 'Username',
+            'data-testid': 'username-input',
+          },
+        },
+      }),
+    ], {
+      url: 'https://example.test/login',
+      stepCount: 1,
+    });
+
+    const snapshot = new JSDOM(`<!doctype html><html><body>
+      <div class="login-panel">Login</div>
+      <input name="username" placeholder="Username" />
+    </body></html>`).window.document;
+
+    const callSpy = vi.spyOn(LlmOrchestrator as any, 'callGeminiApi')
+      .mockResolvedValueOnce(JSON.stringify([
+        {
+          stepNumber: 1,
+          candidates: [
+            { selector: 'button[' },
+            { selector: '.login-panel' },
+          ],
+        },
+      ]))
+      .mockResolvedValueOnce(JSON.stringify([
+        {
+          stepNumber: 1,
+          selector: 'locator(\'input[name="username"]\')',
+        },
+      ]))
+      .mockResolvedValueOnce(JSON.stringify({
+        className: 'LoginPage',
+        methods: [
+          {
+            stepNumber: 1,
+            intent: 'input_username',
+            methodName: 'fillUsername',
+            playwrightAction: `locator('input[name="username"]').fill(value)`,
+          },
+        ],
+      }));
+
+    await LlmOrchestrator.generatePageObjects(
+      session,
+      outputDir,
+      projectRoot,
+      {
+        resolverConfig: {
+          enableLLMFallback: true,
+          resolverMinScore: 1.3,
+          llmRetryTimeoutMs: 10_000,
+        },
+        snapshotCache: {
+          get(nodeId: string) {
+            return nodeId === 'node-1' ? snapshot : null;
+          },
+          getSource() {
+            return 'source-node-snapshot';
+          },
+        },
+      },
+    );
+
+    const sidecar = JSON.parse(
+      fs.readFileSync(path.join(outputDir, 'LoginPage.air.json'), 'utf-8'),
+    );
+
+    expect(sidecar.methods.fillUsername.resolver).toEqual(expect.objectContaining({
+      llmRetryTriggered: true,
+      llmRetrySelector: 'input[name="username"]',
+      llmRetryRejectReason: null,
+      llmRetryAccepted: true,
+      llmRetryTimeoutMs: 10000,
+      llmRetryStatus: 'accepted',
+      resolvedBy: 'llm-accepted',
+    }));
+    expect(sidecar.methods.fillUsername.resolvedSelectorSpec).toEqual(expect.objectContaining({
+      selector: 'input[name="username"]',
+      engine: 'css',
+      source: 'llm',
+      proofLevel: 'semantic_validated',
+    }));
+    expect(sidecar.methods.fillUsername).toEqual(expect.objectContaining({
+      emittedLocator: `locator("input[name=\\"username\\"]")`,
+      emittedLocatorEngine: 'css',
+      emittedLocatorProofLevel: 'semantic_validated',
+      emittedLocatorSource: 'llm',
+      emittedLocatorWarnings: [],
+      usedSelectorSpec: true,
+    }));
+
+    callSpy.mockRestore();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 });
 

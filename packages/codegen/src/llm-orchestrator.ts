@@ -6,11 +6,20 @@ import { computeActionChecksum } from './checksum.utils';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { FlowReviewService } from './flow-review.service';
 import {
+  canRenderSelectorSpecConfidently,
+  getSelectorSpecRenderingWarnings,
+  renderLocatorExpressionFromSelectorSpec,
+} from './selector-spec';
+import {
+  normalizeLlmRetrySuggestions,
+  normalizeLlmSuggestions,
   resolveSelectorsForSession,
 } from './selector-resolver';
 import type {
+  LlmCorrectiveRetryRequest,
   LlmFallbackRequest,
   LlmFallbackSuggestion,
+  SelectorFallbackRequest,
   ResolverConfig,
   SnapshotCache,
 } from './selector-resolver';
@@ -36,6 +45,12 @@ interface EmittedMethod {
   fullAction: string;
   fallbackReason: string | null;
   selectorUsed: string;
+  emittedLocator: string | null;
+  emittedLocatorEngine: AirMethodMeta['emittedLocatorEngine'];
+  emittedLocatorProofLevel: AirMethodMeta['emittedLocatorProofLevel'];
+  emittedLocatorSource: AirMethodMeta['emittedLocatorSource'];
+  emittedLocatorWarnings: string[];
+  usedSelectorSpec: boolean;
 }
 
 interface AssertionHelperSeed {
@@ -107,7 +122,11 @@ export class LlmOrchestrator {
       snapshotCache,
       resolverConfig,
       resolverConfig.enableLLMFallback
-        ? (request: LlmFallbackRequest) => this.requestSelectorFallback(request)
+        ? (request: SelectorFallbackRequest) => (
+          request.mode === 'retry'
+            ? this.requestSelectorCorrectiveRetry(request)
+            : this.requestSelectorFallback(request)
+        )
         : undefined,
     );
     console.log('[AIR] Resolver summary', {
@@ -144,7 +163,9 @@ export class LlmOrchestrator {
       return {
         ...step,
         selector: resolution?.resolvedSelector ?? step.selector,
+        selectorSpec: resolution?.selectorSpec ?? step.selectorSpec,
         resolvedSelector: resolution?.resolvedSelector ?? step.selector,
+        resolvedSelectorSpec: resolution?.resolvedSelectorSpec,
         resolverMetadata: resolution?.resolverMetadata,
       };
     });
@@ -202,6 +223,7 @@ export class LlmOrchestrator {
         methodName,
         actionStr,
         resolution?.resolvedSelector,
+        resolution?.resolvedSelectorSpec,
         resolution?.resolverMetadata,
         popupTransitionSteps.has(originalStep.step),
       );
@@ -225,16 +247,34 @@ export class LlmOrchestrator {
         });
       }
 
+      const resolverForSidecar = resolution?.resolverMetadata
+        ? {
+            ...resolution.resolverMetadata,
+            warningCodes: Array.from(new Set([
+              ...(resolution.resolverMetadata.warningCodes ?? []),
+              ...(!resolution?.resolvedSelectorSpec ? ['selector-spec-missing-fallback'] : []),
+            ])),
+          }
+        : undefined;
+
       sidecarMethods[methodName] = {
         step: originalStep.step,
         intent: originalStep.intent,
         originalSelector: originalStep.selector,
+        originalSelectorSpec: resolution?.selectorSpec ?? originalStep.selectorSpec,
         checksum: computeActionChecksum(emittedMethod.fullAction),
-        resolver: resolution?.resolverMetadata,
+        resolver: resolverForSidecar,
         selectorUsed: emittedMethod.selectorUsed,
+        resolvedSelectorSpec: resolution?.resolvedSelectorSpec,
         selectorType: originalStep.selectorPriority,
         actionType: originalStep.action,
         locatorFlavor: this.detectLocatorFlavor(emittedMethod.selectorUsed, originalStep.selectorPriority),
+        emittedLocator: emittedMethod.emittedLocator ?? undefined,
+        emittedLocatorEngine: emittedMethod.emittedLocatorEngine,
+        emittedLocatorProofLevel: emittedMethod.emittedLocatorProofLevel,
+        emittedLocatorSource: emittedMethod.emittedLocatorSource,
+        emittedLocatorWarnings: emittedMethod.emittedLocatorWarnings,
+        usedSelectorSpec: emittedMethod.usedSelectorSpec,
       };
     }
 
@@ -736,15 +776,34 @@ ${methodsContent.join('\n\n')}
     methodName: string,
     llmAction: string,
     resolvedSelector?: string,
+    resolvedSelectorSpec?: CodegenStep['resolvedSelectorSpec'],
     resolverMetadata?: AirMethodMeta['resolver'],
     popupAware = false
   ): EmittedMethod {
     const trimmedAction = llmAction.trim();
-    const selectorUsed = (resolvedSelector || step.selector || '').trim();
+    const selectorUsed = (resolvedSelectorSpec?.selector || resolvedSelector || step.selector || '').trim();
     const selectorType = step.selectorPriority || 'unknown';
     const resolvedBy = resolverMetadata?.resolvedBy || 'unresolved';
     const score = Number((resolverMetadata?.bestScore ?? 0).toFixed(2));
     const warnings = resolverMetadata?.warningCodes?.length ? resolverMetadata.warningCodes.join('|') : 'none';
+    const usedSelectorSpec = !!resolvedSelectorSpec;
+    const exactLocatorExpr = renderLocatorExpressionFromSelectorSpec(resolvedSelectorSpec);
+    const selectorSpecWarnings = getSelectorSpecRenderingWarnings(resolvedSelectorSpec);
+    const missingSpecWarnings = usedSelectorSpec ? [] : ['selector-spec-missing-fallback'];
+    const renderingWarnings = Array.from(new Set([
+      ...selectorSpecWarnings,
+      ...missingSpecWarnings,
+    ]));
+    const renderConfidently = resolvedSelectorSpec
+      ? canRenderSelectorSpecConfidently(resolvedSelectorSpec)
+      : !!selectorUsed;
+    const emittedLocatorEngine = resolvedSelectorSpec?.engine ?? 'unknown';
+    const emittedLocatorProofLevel = resolvedSelectorSpec?.proofLevel ?? 'unknown';
+    const emittedLocatorSource = resolvedSelectorSpec?.source ?? (usedSelectorSpec ? 'unknown' : 'legacy-fallback');
+    const legacyLocatorExpr = !usedSelectorSpec && selectorUsed
+      ? `locator(${JSON.stringify(selectorUsed)})`
+      : null;
+    const preferredLocatorExpr = exactLocatorExpr ?? legacyLocatorExpr;
 
     const parsed = this.parseLocatorAction(trimmedAction);
     let fallbackReason: string | null = null;
@@ -763,11 +822,38 @@ ${methodsContent.join('\n\n')}
       }
     }
 
+    if (
+      effective &&
+      resolvedSelectorSpec &&
+      renderConfidently &&
+      exactLocatorExpr &&
+      effective.locatorExpr !== exactLocatorExpr
+    ) {
+      effective = {
+        ...effective,
+        locatorExpr: exactLocatorExpr,
+      };
+      fallbackReason = fallbackReason ?? 'selector-spec-exact-render';
+    }
+
+    if (
+      effective &&
+      !usedSelectorSpec &&
+      legacyLocatorExpr &&
+      effective.locatorExpr !== legacyLocatorExpr
+    ) {
+      effective = {
+        ...effective,
+        locatorExpr: legacyLocatorExpr,
+      };
+      fallbackReason = fallbackReason ?? 'selector-spec-missing-fallback';
+    }
+
     let lines: string[] = [];
     let fullAction = `this.page.${trimmedAction}`;
     let methodParams = '';
 
-    if (effective) {
+    if (effective && renderConfidently) {
       const scopedLocator = this.withCardinalityScope(effective.locatorExpr);
       let invocationArgs = effective.args;
       if (
@@ -805,6 +891,15 @@ ${methodsContent.join('\n\n')}
         }
         lines.push(`await target.${invocation};`);
       }
+    } else if (resolvedSelectorSpec && !renderConfidently) {
+      fallbackReason = fallbackReason ?? `selector-spec-${resolvedSelectorSpec.proofLevel}`;
+      const blockedMessage = `AIR unresolved step ${step.step}: selector proof level "${resolvedSelectorSpec.proofLevel}" is not safe for confident codegen.`;
+      fullAction = `throw new Error(${JSON.stringify(blockedMessage)})`;
+      lines = [
+        `// TODO[AIR]: Selector is ${resolvedSelectorSpec.proofLevel} and was not emitted as a confident action.`,
+        `// Intended selector: ${this.cleanForComment(selectorUsed)} | engine=${resolvedSelectorSpec.engine} | source=${resolvedSelectorSpec.source}`,
+        `throw new Error(${JSON.stringify(blockedMessage)});`,
+      ];
     } else if (!trimmedAction) {
       fallbackReason = 'empty-llm-action';
       fullAction = 'this.page.waitForTimeout(0)';
@@ -813,10 +908,16 @@ ${methodsContent.join('\n\n')}
       lines = [`await this.page.${trimmedAction};`];
     }
 
+    const inlineWarningLines = renderingWarnings.map(code => `  // WARNING: ${code}`);
+    if (resolvedSelectorSpec && !renderConfidently && resolvedSelectorSpec.rejectReason) {
+      inlineWarningLines.push(`  // WARNING: reject-reason=${this.cleanForComment(resolvedSelectorSpec.rejectReason)}`);
+    }
+
     const methodLines = [
       `  // AIR step ${step.step} | action=${step.action} | selectorType=${selectorType} | resolvedBy=${resolvedBy} | score=${score}`,
       `  // selector: ${this.cleanForComment(selectorUsed)} | warnings: ${this.cleanForComment(warnings)}`,
       `  async ${methodName}(${methodParams}) {`,
+      ...inlineWarningLines,
       ...lines.map(line => `    ${line}`),
       `  }`,
     ];
@@ -826,6 +927,12 @@ ${methodsContent.join('\n\n')}
       fullAction,
       fallbackReason,
       selectorUsed,
+      emittedLocator: renderConfidently ? preferredLocatorExpr : null,
+      emittedLocatorEngine,
+      emittedLocatorProofLevel,
+      emittedLocatorSource,
+      emittedLocatorWarnings: renderingWarnings,
+      usedSelectorSpec,
     };
   }
 
@@ -1014,26 +1121,59 @@ ${JSON.stringify(flowContext, null, 2)}
   }
 
   private static buildSelectorFallbackPrompt(request: LlmFallbackRequest): string {
-    const selectorsPerStep = Math.max(1, (request.config.llmMaxRetriesPerStep ?? 2) + 1);
+    const selectorsPerStep = Math.max(1, request.config.llmMaxCandidatesPerStep ?? 3);
     return `
 You are a selector recovery assistant for Playwright code generation.
 
 Return ONLY a JSON array (no markdown) with objects shaped exactly as:
-[{ "stepNumber": 1, "selectors": ["button[type=\\"submit\\"]", "[aria-label=\\"submit\\"]", "#submit"] }]
+[{ "stepNumber": 1, "candidates": [{ "selector": "button[type=\\"submit\\"]" }, { "selector": "[aria-label=\\"submit\\"]" }, { "selector": "#submit" }] }]
 
 Rules:
 1. Include only steps that you are confident about.
-2. selectors must be CSS only (no XPath, no text= syntax).
-3. Prefer stable attributes (data-testid, id, aria-label, name, role).
-4. Return up to ${selectorsPerStep} selectors per step ordered from best to worst.
-5. Deduplicate selectors for each step.
-6. Keep selectors concise.
-7. Avoid positional selectors (:nth-child, :nth-of-type) unless no better option exists.
-8. Use snapshotExcerpt as the ground truth for uniqueness.
-9. Use action + intent to match control type (input/select vs button/link).
-10. If excerptMode is "document-fallback", be conservative and prefer originalSelector-derived stable attributes.
+2. Return concise, high-probability CSS selectors only.
+3. Do not return markdown.
+4. Do not return prose.
+5. Do not return Playwright engine prefixes like css= or xpath=.
+6. Prefer stable attributes/test IDs/ARIA-compatible CSS attributes first.
+7. Return up to ${selectorsPerStep} candidates per step ordered from best to worst.
+8. Deduplicate selectors for each step.
+9. Avoid positional selectors (:nth-child, :nth-of-type) unless no better option exists.
+10. Do not return overly deep descendant paths.
+11. Use snapshotExcerpt as the ground truth for uniqueness.
+12. Use action + intent to match control type (input/select vs button/link).
+13. If excerptMode is "document-fallback", be conservative and prefer originalSelector-derived stable attributes.
 
 UNRESOLVED STEPS:
+${JSON.stringify(request.steps, null, 2)}
+`;
+  }
+
+  private static buildSelectorCorrectiveRetryPrompt(request: LlmCorrectiveRetryRequest): string {
+    return `
+You are a selector correction assistant for Playwright code generation.
+
+Return ONLY a JSON array (no markdown) with objects shaped exactly as:
+[{ "stepNumber": 1, "selector": "input[name=\\"username\\"]" }]
+
+Rules:
+1. Return at most one CSS selector per step.
+2. Include only steps that you are confident about.
+3. Do not repeat rejected selectors.
+4. Do not return markdown.
+5. Do not return prose.
+6. Do not return xpath=.
+7. Do not return Playwright engine prefixes such as css=, locator=, or xpath=.
+8. Prefer stable attributes first: data-testid, data-cy, data-qa, name, placeholder, aria-label, href, role-compatible CSS selectors.
+9. If fixing a non-unique selector, do NOT use deep structural chains.
+10. Do NOT use :nth-child or :nth-of-type.
+11. Do NOT use body/html-root descendant paths.
+12. Use fingerprint evidence like textExcerpt, href, aria-label, placeholder, role, and test IDs to correct semantic mismatches.
+13. If fixing text_mismatch, align to expected textExcerpt/label evidence.
+14. If fixing href_mismatch, align to expected href/path evidence.
+15. If fixing control_family_mismatch, keep the same control family as the original target.
+16. Do not become more positional or deep because of validator feedback.
+
+RETRY TARGETS:
 ${JSON.stringify(request.steps, null, 2)}
 `;
   }
@@ -1045,42 +1185,25 @@ ${JSON.stringify(request.steps, null, 2)}
       const parsed = JSON.parse(responseJson);
       if (!Array.isArray(parsed)) return [];
 
-      const dedupeSelectors = (values: string[]): string[] => {
-        const seen = new Set<string>();
-        const unique: string[] = [];
-        for (const value of values) {
-          const normalized = value.trim().replace(/\s+/g, ' ');
-          if (!normalized || seen.has(normalized)) continue;
-          seen.add(normalized);
-          unique.push(normalized);
-        }
-        return unique;
-      };
-
-      return parsed
-        .filter(item => item && typeof item === 'object')
-        .map(item => {
-          const selectorsRaw: string[] = [];
-          if (Array.isArray((item as any).selectors)) {
-            for (const selector of (item as any).selectors) {
-              if (typeof selector === 'string') {
-                selectorsRaw.push(selector);
-              }
-            }
-          }
-          if (typeof (item as any).selector === 'string') {
-            selectorsRaw.push((item as any).selector);
-          }
-          const selectors = dedupeSelectors(selectorsRaw);
-          return {
-            stepNumber: Number((item as any).stepNumber),
-            selector: selectors[0] ?? '',
-            selectors,
-          };
-        })
-        .filter(item => Number.isFinite(item.stepNumber) && item.stepNumber > 0 && item.selectors.length > 0);
+      return normalizeLlmSuggestions(parsed, request.config.llmMaxCandidatesPerStep);
     } catch (error) {
       console.warn('[AIR] Selector fallback parsing failed:', error);
+      return [];
+    }
+  }
+
+  private static async requestSelectorCorrectiveRetry(
+    request: LlmCorrectiveRetryRequest,
+  ): Promise<ReturnType<typeof normalizeLlmRetrySuggestions>> {
+    try {
+      const prompt = this.buildSelectorCorrectiveRetryPrompt(request);
+      const responseJson = await this.callGeminiApi(prompt);
+      const parsed = JSON.parse(responseJson);
+      if (!Array.isArray(parsed)) return [];
+
+      return normalizeLlmRetrySuggestions(parsed);
+    } catch (error) {
+      console.warn('[AIR] Selector corrective retry parsing failed:', error);
       return [];
     }
   }

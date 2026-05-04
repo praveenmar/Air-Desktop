@@ -1,6 +1,7 @@
 import type {
   CodegenSession,
   CodegenStep,
+  LlmResponseFormat,
   ResolverMetadata,
   SelectorPriority,
   ResolverSnapshotSource,
@@ -10,14 +11,21 @@ import {
   type CandidateScore,
   type CandidateValidation,
   type ControlFamily,
+  type LlmCorrectiveRetryRequest,
+  type LlmCorrectiveRetryStep,
   type LlmFallbackRequest,
   type LlmFallbackStep,
+  type LlmRetryFailedCandidate,
+  type LlmRetryFingerprintSummary,
+  type NormalizedLlmRetrySuggestion,
+  type NormalizedLlmSuggestion,
   type LlmFallbackSuggestion,
   type RawCandidate,
   type ResolveContext,
   type ResolvedResolverConfig,
   type ResolverRejectReason,
   type ResolverConfig,
+  type SelectorFallbackRequest,
   type SelectorFallbackProvider,
   type SelectorResolution,
   type SelectorResolverResult,
@@ -61,15 +69,21 @@ import {
   validateTextCandidate,
 } from './resolver/visibility';
 import { serializeSnapshotExcerpt } from './resolver/excerpt-builder';
+import { buildSelectorSpec } from './selector-spec';
 
 export type {
   CandidateValidation,
   LlmFallbackRequest,
   LlmFallbackStep,
+  LlmCorrectiveRetryRequest,
+  LlmCorrectiveRetryStep,
+  NormalizedLlmRetrySuggestion,
+  NormalizedLlmSuggestion,
   LlmFallbackSuggestion,
   RawCandidate,
   ResolvedResolverConfig,
   ResolverConfig,
+  SelectorFallbackRequest,
   SelectorFallbackProvider,
   SelectorResolution,
   SelectorResolverResult,
@@ -108,10 +122,19 @@ const DEFAULT_CONFIG: ResolvedResolverConfig = {
   maxSnapshotBytesForValidation: 2_000_000,
   maxSnapshotExcerptChars: 2000,
   llmTimeoutMs: 20_000,
-  llmMaxRetriesPerStep: 2,
+  llmRetryTimeoutMs: 10_000,
+  llmMaxCandidatesPerStep: 3,
+  llmMaxRetriesPerStep: 3,
 };
 
 function resolveConfig(config?: ResolverConfig): ResolvedResolverConfig {
+  const llmMaxCandidatesPerStep = Math.max(
+    1,
+    config?.llmMaxCandidatesPerStep ??
+      config?.llmMaxRetriesPerStep ??
+      DEFAULT_CONFIG.llmMaxCandidatesPerStep,
+  );
+
   return {
     enableLLMFallback: config?.enableLLMFallback ?? DEFAULT_CONFIG.enableLLMFallback,
     resolverMinScore: config?.resolverMinScore ?? DEFAULT_CONFIG.resolverMinScore,
@@ -119,8 +142,10 @@ function resolveConfig(config?: ResolverConfig): ResolvedResolverConfig {
     maxSnapshotBytesForValidation: config?.maxSnapshotBytesForValidation ?? DEFAULT_CONFIG.maxSnapshotBytesForValidation,
     maxSnapshotExcerptChars: config?.maxSnapshotExcerptChars ?? DEFAULT_CONFIG.maxSnapshotExcerptChars,
     llmTimeoutMs: config?.llmTimeoutMs ?? DEFAULT_CONFIG.llmTimeoutMs,
+    llmRetryTimeoutMs: config?.llmRetryTimeoutMs ?? DEFAULT_CONFIG.llmRetryTimeoutMs,
     maxLLMFallbackPerSession: config?.maxLLMFallbackPerSession,
-    llmMaxRetriesPerStep: config?.llmMaxRetriesPerStep ?? DEFAULT_CONFIG.llmMaxRetriesPerStep,
+    llmMaxCandidatesPerStep,
+    llmMaxRetriesPerStep: llmMaxCandidatesPerStep,
   };
 }
 
@@ -1172,6 +1197,39 @@ function compareCandidates(left: CandidateScore, right: CandidateScore): number 
   return left.candidate.rank - right.candidate.rank;
 }
 
+function getOriginalSelectorSpec(step: CodegenStep) {
+  if (step.selectorSpec) return step.selectorSpec;
+  return buildSelectorSpec({
+    selector: step.selector,
+    selectorPriority: step.selectorPriority,
+    source: 'interceptor',
+    proofLevel: 'recorded',
+    rank: step.selectorRank,
+  });
+}
+
+function buildResolvedSelectorSpec(params: {
+  step: CodegenStep;
+  selector: string;
+  source: 'interceptor' | 'resolver' | 'llm';
+  proofLevel: 'recorded' | 'snapshot_validated' | 'semantic_validated' | 'blocked' | 'unvalidated';
+  rank?: number;
+  confidence?: number;
+  rejectReason?: string | null;
+  warningCodes?: string[];
+}) {
+  return buildSelectorSpec({
+    selector: params.selector,
+    selectorPriority: params.source === 'interceptor' ? params.step.selectorPriority : undefined,
+    source: params.source,
+    proofLevel: params.proofLevel,
+    rank: params.rank,
+    confidence: params.confidence,
+    rejectReason: params.rejectReason,
+    warningCodes: params.warningCodes,
+  });
+}
+
 function deriveDeterministicResolution(
   step: CodegenStep,
   snapshot: Document | null,
@@ -1181,6 +1239,7 @@ function deriveDeterministicResolution(
   snapshotSelection?: ResolverMetadata['snapshotSelection'],
   evaluatedCandidates?: ResolverMetadata['evaluatedCandidates'],
 ): StepResolutionDraft {
+  const originalSelectorSpec = getOriginalSelectorSpec(step);
   const baseMetadata: ResolverMetadata = {
     resolvedSelector: step.selector,
     resolvedBy: 'unresolved',
@@ -1191,6 +1250,17 @@ function deriveDeterministicResolution(
     llmAttempted: false,
     llmAccepted: false,
     llmAlternative: null,
+    llmCandidatesReturned: undefined,
+    llmCandidatesTried: undefined,
+    llmAcceptedRank: null,
+    llmRejectedCandidates: undefined,
+    llmResponseFormat: undefined,
+    llmRetryTriggered: false,
+    llmRetrySelector: null,
+    llmRetryRejectReason: null,
+    llmRetryAccepted: false,
+    llmRetryTimeoutMs: undefined,
+    llmRetryStatus: 'not-eligible',
     rejectReason: null,
     semanticRejectReason: null,
     warningCodes: [],
@@ -1217,6 +1287,16 @@ function deriveDeterministicResolution(
     return {
       step,
       snapshot: null,
+      selectorSpec: originalSelectorSpec,
+      resolvedSelectorSpec: buildResolvedSelectorSpec({
+        step,
+        selector: step.selector,
+        source: 'resolver',
+        proofLevel: 'unvalidated',
+        rank: step.selectorRank,
+        confidence: 0,
+        warningCodes: baseMetadata.warningCodes,
+      }),
       resolvedSelector: step.selector,
       metadata: baseMetadata,
       llmEligible: false,
@@ -1228,6 +1308,16 @@ function deriveDeterministicResolution(
     return {
       step,
       snapshot,
+      selectorSpec: originalSelectorSpec,
+      resolvedSelectorSpec: buildResolvedSelectorSpec({
+        step,
+        selector: step.selector,
+        source: 'resolver',
+        proofLevel: 'unvalidated',
+        rank: step.selectorRank,
+        confidence: 0,
+        warningCodes: baseMetadata.warningCodes,
+      }),
       resolvedSelector: step.selector,
       metadata: baseMetadata,
       llmEligible: false,
@@ -1241,6 +1331,16 @@ function deriveDeterministicResolution(
     return {
       step,
       snapshot,
+      selectorSpec: originalSelectorSpec,
+      resolvedSelectorSpec: buildResolvedSelectorSpec({
+        step,
+        selector: step.selector,
+        source: 'interceptor',
+        proofLevel: 'recorded',
+        rank,
+        confidence: originalValidation.confidenceScore ?? score,
+        warningCodes: [...baseMetadata.warningCodes, 'trusted-original-snapshot-miss'],
+      }),
       resolvedSelector: step.selector,
       metadata: {
         ...baseMetadata,
@@ -1263,6 +1363,15 @@ function deriveDeterministicResolution(
     return {
       step,
       snapshot,
+      selectorSpec: originalSelectorSpec,
+      resolvedSelectorSpec: buildResolvedSelectorSpec({
+        step,
+        selector: step.selector,
+        source: 'interceptor',
+        proofLevel: 'snapshot_validated',
+        rank,
+        confidence: originalValidation.confidenceScore ?? score,
+      }),
       resolvedSelector: step.selector,
       metadata: {
         ...baseMetadata,
@@ -1285,6 +1394,17 @@ function deriveDeterministicResolution(
     return {
       step,
       snapshot,
+      selectorSpec: originalSelectorSpec,
+      resolvedSelectorSpec: buildResolvedSelectorSpec({
+        step,
+        selector: step.selector,
+        source: 'resolver',
+        proofLevel: 'blocked',
+        rank: step.selectorRank,
+        confidence: originalValidation.confidenceScore ?? 0,
+        rejectReason: 'snapshot_target_missing',
+        warningCodes: [...baseMetadata.warningCodes, 'snapshot-target-missing'],
+      }),
       resolvedSelector: step.selector,
       metadata: {
         ...baseMetadata,
@@ -1364,6 +1484,7 @@ function deriveDeterministicResolution(
     return {
       step,
       snapshot,
+      selectorSpec: originalSelectorSpec,
       resolvedSelector: step.selector,
       metadata: {
         ...baseMetadata,
@@ -1375,6 +1496,15 @@ function deriveDeterministicResolution(
         warningCodes: [...baseMetadata.warningCodes, 'blocked-generic-shell-override'],
       },
       llmEligible: true,
+      resolvedSelectorSpec: buildResolvedSelectorSpec({
+        step,
+        selector: step.selector,
+        source: 'resolver',
+        proofLevel: 'unvalidated',
+        rank: step.selectorRank,
+        confidence: originalValidation.confidenceScore ?? 0,
+        warningCodes: [...baseMetadata.warningCodes, 'blocked-generic-shell-override'],
+      }),
       lowScoreFallback,
     };
   }
@@ -1417,6 +1547,17 @@ function deriveDeterministicResolution(
     return {
       step,
       snapshot,
+      selectorSpec: originalSelectorSpec,
+      resolvedSelectorSpec: buildResolvedSelectorSpec({
+        step,
+        selector: step.selector,
+        source: 'resolver',
+        proofLevel: baseMetadata.resolvedBy === 'blocked-semantic-mismatch' ? 'blocked' : 'unvalidated',
+        rank: step.selectorRank,
+        confidence: originalValidation.confidenceScore ?? 0,
+        rejectReason: baseMetadata.rejectReason,
+        warningCodes: baseMetadata.warningCodes,
+      }),
       resolvedSelector: step.selector,
       metadata: {
         ...baseMetadata,
@@ -1441,6 +1582,20 @@ function deriveDeterministicResolution(
   return {
     step,
     snapshot,
+    selectorSpec: originalSelectorSpec,
+    resolvedSelectorSpec: buildResolvedSelectorSpec({
+      step,
+      selector: winner.candidate.candidate.selector,
+      source: 'resolver',
+      proofLevel: 'semantic_validated',
+      rank: winner.candidate.candidate.rank,
+      confidence: winner.candidate.validation.confidenceScore ?? winner.candidate.score,
+      warningCodes: [
+        ...baseMetadata.warningCodes,
+        'deterministic-override',
+        ...(winner.candidate.validation.ambiguityReason ? ['deterministic-dom-order-tiebreaker'] : []),
+      ],
+    }),
     resolvedSelector: winner.candidate.candidate.selector,
     metadata: {
       ...baseMetadata,
@@ -1475,10 +1630,10 @@ function buildLlmCap(totalSteps: number, config: ResolvedResolverConfig): number
   return Math.max(2, Math.min(5, Math.ceil(totalSteps * 0.3)));
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label = 'Selector fallback'): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
-      reject(new Error(`Selector fallback timed out after ${timeoutMs}ms`));
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
 
     promise.then(
@@ -1494,27 +1649,332 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   });
 }
 
-function normalizeSuggestedSelector(selector?: string | null): string | null {
-  if (typeof selector !== 'string') return null;
-  const normalized = selector.trim();
-  return normalized.length > 0 ? normalized : null;
+function unwrapSingleCodeFence(selector: string): string {
+  const trimmed = selector.trim();
+  const fenceMatch = trimmed.match(/^```[a-z0-9_-]*\s*([\s\S]*?)\s*```$/i);
+  return fenceMatch?.[1]?.trim() ?? trimmed;
 }
 
-function dedupeSelectors(selectors: Array<string | null | undefined>): string[] {
-  const seen = new Set<string>();
-  const unique: string[] = [];
-  for (const selector of selectors) {
-    const normalized = normalizeSuggestedSelector(selector);
-    if (!normalized || seen.has(normalized)) continue;
-    seen.add(normalized);
-    unique.push(normalized);
+function unwrapQuotedSelector(selector: string): string {
+  const trimmed = selector.trim();
+  if (
+    (trimmed.startsWith('`') && trimmed.endsWith('`')) ||
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith('\'') && trimmed.endsWith('\''))
+  ) {
+    return trimmed.slice(1, -1).trim();
   }
-  return unique;
+  return trimmed;
 }
 
-function selectorsFromSuggestion(suggestion: LlmFallbackSuggestion): string[] {
-  const selectors = [suggestion.selector, ...(Array.isArray(suggestion.selectors) ? suggestion.selectors : [])];
-  return dedupeSelectors(selectors);
+function unwrapLocatorPrefix(selector: string): string {
+  let normalized = selector.trim();
+  normalized = normalized.replace(/^css\s*=\s*/i, '');
+  normalized = normalized.replace(/^locator\s*=\s*/i, '');
+  return normalized.trim();
+}
+
+function unwrapLocatorCall(selector: string): string {
+  const trimmed = selector.trim();
+  const callMatch = trimmed.match(/^locator\(\s*(['"`])([\s\S]*?)\1\s*\)$/i);
+  if (callMatch?.[2]) {
+    return callMatch[2].trim();
+  }
+  const bareMatch = trimmed.match(/^locator\(\s*([^()]+?)\s*\)$/i);
+  return bareMatch?.[1]?.trim() ?? trimmed;
+}
+
+function looksLikeProse(selector: string): boolean {
+  if (!selector) return true;
+  if (/^(?:use|try|selector|best|candidate|the|this|choose|prefer)\b/i.test(selector)) {
+    return true;
+  }
+  if (/[.!?]$/.test(selector) && !/[)\]"']$/.test(selector)) {
+    return true;
+  }
+  return false;
+}
+
+export function normalizeLlmSelector(selector?: string | null): string | null {
+  if (typeof selector !== 'string') return null;
+
+  let normalized = selector.trim();
+  if (!normalized) return null;
+
+  normalized = unwrapSingleCodeFence(normalized);
+  normalized = unwrapQuotedSelector(normalized);
+  normalized = unwrapLocatorPrefix(normalized);
+  normalized = unwrapLocatorCall(normalized);
+  normalized = normalized.trim().replace(/\s+/g, ' ');
+
+  if (!normalized) return null;
+  if (/^xpath\s*=/i.test(normalized)) return null;
+  if (looksLikeProse(normalized)) return null;
+  if (!isLikelyCssSelector(normalized)) return null;
+
+  return normalized;
+}
+
+function normalizeLlmResponseFormat(item: Record<string, unknown>): LlmResponseFormat {
+  if (Array.isArray(item.candidates)) return 'candidates-v2';
+  if (Array.isArray(item.selectors)) return 'legacy-selectors';
+  return 'legacy-selector';
+}
+
+function collectRawSuggestionCandidates(item: Record<string, unknown>): Array<string | null> {
+  const selectors: Array<string | null> = [];
+  if (Array.isArray(item.candidates)) {
+    for (const candidate of item.candidates) {
+      if (typeof candidate === 'string') {
+        selectors.push(candidate);
+      } else if (candidate && typeof candidate === 'object' && typeof (candidate as { selector?: unknown }).selector === 'string') {
+        selectors.push((candidate as { selector: string }).selector);
+      }
+    }
+  }
+  if (Array.isArray(item.selectors)) {
+    for (const selector of item.selectors) {
+      selectors.push(typeof selector === 'string' ? selector : null);
+    }
+  }
+  if (typeof item.selector === 'string') {
+    selectors.push(item.selector);
+  }
+  return selectors;
+}
+
+export function normalizeLlmSuggestions(
+  suggestions: unknown[],
+  maxCandidatesPerStep: number,
+): NormalizedLlmSuggestion[] {
+  const cappedMax = Math.max(1, maxCandidatesPerStep);
+  const merged = new Map<number, NormalizedLlmSuggestion>();
+
+  for (const item of suggestions) {
+    if (!item || typeof item !== 'object') continue;
+    const stepNumber = Number((item as { stepNumber?: unknown }).stepNumber);
+    if (!Number.isFinite(stepNumber) || stepNumber <= 0) continue;
+
+    const responseFormat = normalizeLlmResponseFormat(item as Record<string, unknown>);
+    const normalizedCandidates: string[] = [];
+    const seen = new Set<string>();
+    for (const rawSelector of collectRawSuggestionCandidates(item as Record<string, unknown>)) {
+      const normalized = normalizeLlmSelector(rawSelector);
+      if (!normalized || seen.has(normalized)) continue;
+      seen.add(normalized);
+      normalizedCandidates.push(normalized);
+    }
+    if (normalizedCandidates.length === 0) continue;
+
+    const existing = merged.get(stepNumber);
+    if (!existing) {
+      merged.set(stepNumber, {
+        stepNumber,
+        candidates: normalizedCandidates.slice(0, cappedMax),
+        responseFormat,
+        truncated: normalizedCandidates.length > cappedMax,
+      });
+      continue;
+    }
+
+    const combined = [...existing.candidates];
+    const combinedSeen = new Set(existing.candidates);
+    for (const candidate of normalizedCandidates) {
+      if (combinedSeen.has(candidate)) continue;
+      combinedSeen.add(candidate);
+      combined.push(candidate);
+      if (combined.length >= cappedMax) break;
+    }
+
+    existing.candidates = combined.slice(0, cappedMax);
+    existing.truncated = existing.truncated === true || normalizedCandidates.length > cappedMax || combined.length > cappedMax;
+    if (existing.responseFormat !== 'candidates-v2') {
+      existing.responseFormat =
+        responseFormat === 'candidates-v2'
+          ? 'candidates-v2'
+          : existing.responseFormat === 'legacy-selectors' || responseFormat === 'legacy-selectors'
+            ? 'legacy-selectors'
+            : 'legacy-selector';
+    }
+  }
+
+  return Array.from(merged.values()).sort((left, right) => left.stepNumber - right.stepNumber);
+}
+
+export function normalizeLlmRetrySuggestions(
+  suggestions: unknown[],
+): NormalizedLlmRetrySuggestion[] {
+  const normalized: NormalizedLlmRetrySuggestion[] = [];
+  const seenSteps = new Set<number>();
+
+  for (const item of suggestions) {
+    if (!item || typeof item !== 'object') continue;
+    const stepNumber = Number((item as { stepNumber?: unknown }).stepNumber);
+    if (!Number.isFinite(stepNumber) || stepNumber <= 0 || seenSteps.has(stepNumber)) continue;
+
+    const selector = normalizeLlmSelector((item as { selector?: unknown }).selector as string | undefined);
+    if (!selector) continue;
+
+    seenSteps.add(stepNumber);
+    normalized.push({ stepNumber, selector });
+  }
+
+  return normalized.sort((left, right) => left.stepNumber - right.stepNumber);
+}
+
+function isSafeRetryParentSelector(selector?: string | null): boolean {
+  if (typeof selector !== 'string') return false;
+  const trimmed = selector.trim();
+  if (!trimmed || trimmed.length > 80) return false;
+  if (/^(?:html|body)\b/i.test(trimmed)) return false;
+  return isLikelyCssSelector(trimmed);
+}
+
+function buildRetryFingerprintSummary(step: CodegenStep): LlmRetryFingerprintSummary | undefined {
+  if (!step.fingerprint) return undefined;
+
+  const attrs = inferStepSignalAttributes(step);
+  const summary: LlmRetryFingerprintSummary = {
+    tagName: step.fingerprint.tagName?.toLowerCase() || attrs.tagName,
+    textExcerpt: step.fingerprint.textExcerpt || undefined,
+    href: attrs.href,
+    role: attrs.role,
+    ariaLabel: attrs.ariaLabel,
+    name: attrs.name,
+    placeholder: attrs.placeholder,
+    type: attrs.type,
+    dataTestId: attrs.dataTestId,
+    dataCy: attrs.dataCy,
+    dataQa: attrs.dataQa,
+    controlFamily: inferStepControlFamily(step),
+  };
+
+  const parentSelector = step.fingerprint.parentSelector ?? attrs.parentSelector;
+  if (isSafeRetryParentSelector(parentSelector)) {
+    summary.parentSelector = parentSelector ?? undefined;
+  }
+
+  return Object.values(summary).some(value => value != null && value !== '')
+    ? summary
+    : undefined;
+}
+
+function buildRetryFailedCandidates(metadata: ResolverMetadata): LlmRetryFailedCandidate[] {
+  return (metadata.llmRejectedCandidates ?? [])
+    .slice(0, 3)
+    .map(candidate => ({
+      selector: candidate.selector,
+      rejectReason: candidate.rejectReason,
+    }));
+}
+
+function isRetryValidationFailure(reason: string | null | undefined): boolean {
+  return [
+    'invalid-llm-selector',
+    'llm-selector-too-complex',
+    'llm-selector-not-unique',
+    'llm-intent-mismatch',
+    'href_mismatch',
+    'control_family_mismatch',
+    'text_mismatch',
+  ].includes(reason ?? '');
+}
+
+type LlmCandidateValidationResult = {
+  accepted: boolean;
+  rejectReason: string | null;
+  warningCode: string | null;
+  validation: CandidateValidation | null;
+};
+
+function validateLlmCandidateSelector(
+  draft: StepResolutionDraft,
+  selector: string,
+  config: ResolvedResolverConfig,
+): LlmCandidateValidationResult {
+  let rejectReason: string | null = null;
+  let warningCode: string | null = null;
+
+  if (isLlmSelectorTooComplex(selector)) {
+    rejectReason = 'llm-selector-too-complex';
+    warningCode = 'llm-selector-too-complex';
+  }
+
+  const validation = rejectReason ? null : validateCandidate(selector, draft.snapshot as Document, draft.step);
+  if (!rejectReason && validation?.reason === 'invalid-selector') {
+    rejectReason = 'invalid-llm-selector';
+    warningCode = 'llm-invalid-selector';
+  }
+  if (
+    !rejectReason &&
+    validation &&
+    (
+      validation.effectiveMatchCount !== 1 ||
+      validation.reason !== 'unique-visible'
+    )
+  ) {
+    rejectReason = 'llm-selector-not-unique';
+    warningCode = 'llm-non-unique';
+  }
+
+  const match = !rejectReason && validation
+    ? validation.resolvedElement ??
+      getCandidateElement(draft.snapshot as Document, selector) ??
+      (isLikelyCssSelector(selector) ? (draft.snapshot as Document).querySelector(selector) : null)
+    : null;
+
+  if (!rejectReason && (!match || !matchesIntent(match, draft.step, config.intentMinScore))) {
+    rejectReason = 'llm-intent-mismatch';
+    warningCode = 'llm-intent-mismatch';
+  }
+
+  if (!rejectReason && shouldBlockGenericShellOverride(draft.step.selector, selector)) {
+    rejectReason = 'llm-intent-mismatch';
+    warningCode = 'blocked-generic-shell-override';
+  }
+
+  if (!rejectReason && validation) {
+    const llmCandidateEvaluation = evaluateSemanticReject(
+      draft.step,
+      {
+        candidate: {
+          selector,
+          source: 'other',
+          rank: 10,
+        },
+        validation,
+        score: 0,
+      },
+      draft.snapshot as Document,
+    );
+    if (llmCandidateEvaluation.rejectReason) {
+      rejectReason = llmCandidateEvaluation.rejectReason;
+      warningCode = 'llm-semantic-reject';
+    }
+  }
+
+  return {
+    accepted: rejectReason === null,
+    rejectReason,
+    warningCode,
+    validation,
+  };
+}
+
+function isLlmSelectorTooComplex(selector: string): boolean {
+  if (selector.length > 160) return true;
+  if (/^(?:html|body)\b/i.test(selector)) return true;
+  if (/(?:^|\s)(?:html|body)\s*>/i.test(selector)) return true;
+
+  const nthHeavyCount = (selector.match(/:nth-(?:child|of-type)\(/gi) ?? []).length;
+  if (nthHeavyCount >= 2) return true;
+
+  const depthCount =
+    (selector.match(/\s+>\s+/g) ?? []).length +
+    (selector.match(/\s+(?![>+~])/g) ?? []).length;
+  if (depthCount >= 5) return true;
+
+  return false;
 }
 
 function pushWarningCode(metadata: ResolverMetadata, code: string): void {
@@ -1526,6 +1986,14 @@ function pushWarningCode(metadata: ResolverMetadata, code: string): void {
 function applyLowScoreFallback(draft: StepResolutionDraft): void {
   if (!draft.lowScoreFallback) return;
   draft.resolvedSelector = draft.lowScoreFallback.candidate.selector;
+  draft.resolvedSelectorSpec = buildResolvedSelectorSpec({
+    step: draft.step,
+    selector: draft.lowScoreFallback.candidate.selector,
+    source: 'resolver',
+    proofLevel: 'semantic_validated',
+    rank: draft.lowScoreFallback.candidate.rank,
+    confidence: draft.lowScoreFallback.validation.confidenceScore ?? draft.lowScoreFallback.score,
+  });
   draft.metadata = {
     ...draft.metadata,
     resolvedSelector: draft.lowScoreFallback.candidate.selector,
@@ -1636,13 +2104,16 @@ export async function resolveSelectorsForSession(
       llmAttemptedStepNumbers.push(draft.step.step);
     }
 
+    const excerptByStep = new Map<number, { excerpt: string }>();
     const request: LlmFallbackRequest = {
+      mode: 'initial',
       steps: llmTargets.map(draft => {
         const excerptInfo = serializeSnapshotExcerpt(
           draft.snapshot as Document,
           draft.step,
           resolvedConfig.maxSnapshotExcerptChars,
         );
+        excerptByStep.set(draft.step.step, { excerpt: excerptInfo.excerpt });
         draft.metadata = {
           ...draft.metadata,
           excerptBuildTotalMs: excerptInfo.metrics.excerptBuildTotalMs,
@@ -1667,63 +2138,71 @@ export async function resolveSelectorsForSession(
     };
 
     try {
-      const suggestions = await withTimeout(llmFallbackProvider(request), resolvedConfig.llmTimeoutMs);
-      const seenSteps = new Set<number>();
+      const providerSuggestions = await withTimeout(
+        llmFallbackProvider(request),
+        resolvedConfig.llmTimeoutMs,
+        'Selector fallback',
+      );
+      const suggestions = normalizeLlmSuggestions(providerSuggestions as unknown[], resolvedConfig.llmMaxCandidatesPerStep);
+      const suggestionsByStep = new Map(suggestions.map(suggestion => [suggestion.stepNumber, suggestion]));
+      const retryEligibleTargets: StepResolutionDraft[] = [];
+
+      for (const target of llmTargets) {
+        const suggestion = suggestionsByStep.get(target.step.step);
+        target.metadata.llmCandidatesReturned = suggestion?.candidates ?? [];
+        target.metadata.llmCandidatesTried = [];
+        target.metadata.llmRejectedCandidates = [];
+        target.metadata.llmAcceptedRank = null;
+        target.metadata.llmResponseFormat = suggestion?.responseFormat;
+        target.metadata.llmRetryStatus = 'not-eligible';
+        if (suggestion?.truncated) {
+          pushWarningCode(target.metadata, 'llm-retry-cap-reached');
+        }
+      }
 
       for (const suggestion of suggestions) {
-        if (seenSteps.has(suggestion.stepNumber)) continue;
-        seenSteps.add(suggestion.stepNumber);
-
         const target = llmTargets.find(draft => draft.step.step === suggestion.stepNumber);
         if (!target || !target.snapshot) continue;
 
-        const suggestedSelectors = selectorsFromSuggestion(suggestion);
-        if (suggestedSelectors.length === 0) {
-          target.metadata.rejectReason = 'invalid-llm-selector';
-          pushWarningCode(target.metadata, 'llm-invalid-selector');
-          continue;
-        }
-
-        const limitedSelectors = suggestedSelectors.slice(0, resolvedConfig.llmMaxRetriesPerStep);
-        if (suggestedSelectors.length > limitedSelectors.length) {
-          pushWarningCode(target.metadata, 'llm-retry-cap-reached');
-        }
-
         let accepted = false;
-        for (const selector of limitedSelectors) {
+        for (const [index, selector] of suggestion.candidates.entries()) {
           target.metadata.llmAlternative = selector;
-          const validation = validateCandidate(selector, target.snapshot, target.step);
-          if (validation.reason === 'invalid-selector') {
-            target.metadata.rejectReason = 'invalid-llm-selector';
-            pushWarningCode(target.metadata, 'llm-invalid-selector');
-            continue;
-          }
-          if (validation.effectiveMatchCount !== 1) {
-            target.metadata.rejectReason = 'llm-selector-not-unique';
-            pushWarningCode(target.metadata, 'llm-non-unique');
-            continue;
-          }
+          target.metadata.llmCandidatesTried?.push(selector);
 
-          const match = getCandidateElement(target.snapshot, selector) ??
-            (isLikelyCssSelector(selector) ? target.snapshot.querySelector(selector) : null);
-          if (!match || !matchesIntent(match, target.step, resolvedConfig.intentMinScore)) {
-            target.metadata.rejectReason = 'llm-intent-mismatch';
-            pushWarningCode(target.metadata, 'llm-intent-mismatch');
+          const candidateResult = validateLlmCandidateSelector(target, selector, resolvedConfig);
+          const { rejectReason, warningCode, validation } = candidateResult;
+
+          if (rejectReason) {
+            target.metadata.rejectReason = rejectReason;
+            target.metadata.llmRejectedCandidates?.push({ selector, rejectReason });
+            if (warningCode) {
+              pushWarningCode(target.metadata, warningCode);
+            }
             continue;
           }
 
           target.resolvedSelector = selector;
+          target.resolvedSelectorSpec = buildResolvedSelectorSpec({
+            step: target.step,
+            selector,
+            source: 'llm',
+            proofLevel: 'semantic_validated',
+            confidence: validation?.confidenceScore ?? 0.95,
+          });
           target.metadata = {
             ...target.metadata,
             resolvedSelector: selector,
             resolvedBy: 'llm-accepted',
             bestScore: Math.max(target.metadata.bestScore, 0.95),
-            effectiveMatchCount: validation.effectiveMatchCount,
-            matchCount: validation.matchCount ?? validation.visibleMatchCount,
-            confidenceScore: validation.confidenceScore ?? 0.95,
-            ambiguityReason: validation.ambiguityReason ?? null,
+            effectiveMatchCount: validation?.effectiveMatchCount ?? 1,
+            matchCount: validation?.matchCount ?? validation?.visibleMatchCount,
+            confidenceScore: validation?.confidenceScore ?? 0.95,
+            ambiguityReason: validation?.ambiguityReason ?? null,
             llmAccepted: true,
+            llmAcceptedRank: index + 1,
+            llmAlternative: selector,
             rejectReason: null,
+            semanticRejectReason: null,
           };
           llmAcceptedStepNumbers.push(target.step.step);
           accepted = true;
@@ -1731,7 +2210,7 @@ export async function resolveSelectorsForSession(
         }
 
         if (!accepted) {
-          if (suggestedSelectors.length > 0) {
+          if (suggestion.candidates.length > 0) {
             pushWarningCode(target.metadata, 'llm-retries-exhausted');
           }
           if (target.lowScoreFallback) {
@@ -1741,11 +2220,135 @@ export async function resolveSelectorsForSession(
       }
 
       for (const target of llmTargets) {
+        const suggestion = suggestionsByStep.get(target.step.step);
+        const returnedCandidates = suggestion?.candidates ?? [];
+        const rejectedCandidates = target.metadata.llmRejectedCandidates ?? [];
+        const retryEligible =
+          !target.metadata.llmAccepted &&
+          returnedCandidates.length > 0 &&
+          rejectedCandidates.length === returnedCandidates.length &&
+          rejectedCandidates.every(candidate => isRetryValidationFailure(candidate.rejectReason));
+
+        if (retryEligible) {
+          target.metadata.llmRetryTriggered = true;
+          target.metadata.llmRetryTimeoutMs = resolvedConfig.llmRetryTimeoutMs;
+          target.metadata.llmRetryStatus = 'triggered';
+          retryEligibleTargets.push(target);
+          continue;
+        }
+
         if (!target.metadata.llmAccepted && !target.metadata.rejectReason) {
           target.metadata.rejectReason = 'llm-no-valid-suggestion';
+          target.metadata.llmRetryStatus = 'skipped-empty-response';
           pushWarningCode(target.metadata, 'llm-no-valid-suggestion');
-          if (target.lowScoreFallback) {
-            applyLowScoreFallback(target);
+          pushWarningCode(target.metadata, 'llm-retry-skipped-empty-response');
+        }
+
+        if (!target.metadata.llmAccepted && target.lowScoreFallback) {
+          applyLowScoreFallback(target);
+        }
+      }
+
+      if (retryEligibleTargets.length > 0) {
+        const retryRequest: LlmCorrectiveRetryRequest = {
+          mode: 'retry',
+          steps: retryEligibleTargets.map(target => ({
+            stepNumber: target.step.step,
+            action: target.step.action,
+            intent: target.step.intent,
+            originalSelector: target.step.selector,
+            fingerprint: buildRetryFingerprintSummary(target.step),
+            snapshotExcerpt:
+              excerptByStep.get(target.step.step)?.excerpt ??
+              serializeSnapshotExcerpt(
+                target.snapshot as Document,
+                target.step,
+                resolvedConfig.maxSnapshotExcerptChars,
+              ).excerpt,
+            failedCandidates: buildRetryFailedCandidates(target.metadata),
+          }) satisfies LlmCorrectiveRetryStep),
+          config: resolvedConfig,
+        };
+
+        try {
+          const retrySuggestions = await withTimeout(
+            llmFallbackProvider(retryRequest),
+            resolvedConfig.llmRetryTimeoutMs,
+            'Selector corrective retry',
+          );
+          const normalizedRetrySuggestions = normalizeLlmRetrySuggestions(retrySuggestions as unknown[]);
+          const retryByStep = new Map(normalizedRetrySuggestions.map(suggestion => [suggestion.stepNumber, suggestion]));
+
+          for (const target of retryEligibleTargets) {
+            const retrySuggestion = retryByStep.get(target.step.step);
+            if (!retrySuggestion) {
+              target.metadata.llmRetryStatus = 'skipped-empty-response';
+              pushWarningCode(target.metadata, 'llm-retry-skipped-empty-response');
+              if (target.lowScoreFallback) {
+                applyLowScoreFallback(target);
+              }
+              continue;
+            }
+
+            target.metadata.llmRetrySelector = retrySuggestion.selector;
+            target.metadata.llmAlternative = retrySuggestion.selector;
+            const retryResult = validateLlmCandidateSelector(target, retrySuggestion.selector, resolvedConfig);
+
+            if (!retryResult.accepted) {
+              target.metadata.rejectReason = retryResult.rejectReason;
+              target.metadata.llmRetryRejectReason = retryResult.rejectReason;
+              target.metadata.llmRetryAccepted = false;
+              target.metadata.llmRetryStatus = 'rejected';
+              if (retryResult.warningCode) {
+                pushWarningCode(target.metadata, retryResult.warningCode);
+              }
+              pushWarningCode(target.metadata, 'llm-retry-rejected');
+              if (target.lowScoreFallback) {
+                applyLowScoreFallback(target);
+              }
+              continue;
+            }
+
+            target.resolvedSelector = retrySuggestion.selector;
+            target.resolvedSelectorSpec = buildResolvedSelectorSpec({
+              step: target.step,
+              selector: retrySuggestion.selector,
+              source: 'llm',
+              proofLevel: 'semantic_validated',
+              confidence: retryResult.validation?.confidenceScore ?? 0.95,
+            });
+            target.metadata = {
+              ...target.metadata,
+              resolvedSelector: retrySuggestion.selector,
+              resolvedBy: 'llm-accepted',
+              bestScore: Math.max(target.metadata.bestScore, 0.95),
+              effectiveMatchCount: retryResult.validation?.effectiveMatchCount ?? 1,
+              matchCount: retryResult.validation?.matchCount ?? retryResult.validation?.visibleMatchCount,
+              confidenceScore: retryResult.validation?.confidenceScore ?? 0.95,
+              ambiguityReason: retryResult.validation?.ambiguityReason ?? null,
+              llmAccepted: true,
+              llmAlternative: retrySuggestion.selector,
+              llmRetrySelector: retrySuggestion.selector,
+              llmRetryRejectReason: null,
+              llmRetryAccepted: true,
+              llmRetryStatus: 'accepted',
+              rejectReason: null,
+              semanticRejectReason: null,
+            };
+            pushWarningCode(target.metadata, 'llm-retry-accepted');
+            llmAcceptedStepNumbers.push(target.step.step);
+          }
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          const timedOut = /timed out/i.test(reason);
+          for (const target of retryEligibleTargets) {
+            target.metadata.llmRetryAccepted = false;
+            target.metadata.llmRetryRejectReason = reason;
+            target.metadata.llmRetryStatus = timedOut ? 'skipped-timeout' : 'skipped-provider-error';
+            pushWarningCode(target.metadata, timedOut ? 'llm-retry-timeout' : 'llm-retry-error');
+            if (target.lowScoreFallback) {
+              applyLowScoreFallback(target);
+            }
           }
         }
       }
@@ -1765,7 +2368,9 @@ export async function resolveSelectorsForSession(
     stepNumber: draft.step.step,
     sourceNodeId: draft.step.sourceNodeId ?? null,
     originalSelector: draft.step.selector,
+    selectorSpec: draft.selectorSpec,
     resolvedSelector: draft.resolvedSelector || draft.step.selector,
+    resolvedSelectorSpec: draft.resolvedSelectorSpec,
     resolverMetadata: {
       ...draft.metadata,
       resolvedSelector: draft.resolvedSelector || draft.step.selector,

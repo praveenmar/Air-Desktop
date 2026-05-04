@@ -43,6 +43,10 @@ export type {
   TemporalClass,
   SnapshotSelectionProvenance,
   SnapshotCandidateTraceEntry,
+  SelectorEngine,
+  SelectorSource,
+  SelectorProofLevel,
+  SelectorSpec,
 } from './types';
 
 export type {

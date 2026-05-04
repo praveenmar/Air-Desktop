@@ -47,6 +47,46 @@ export type SelectorPriority =
   | 'chained'
   | 'unknown';
 
+export type SelectorEngine =
+  | 'css'
+  | 'xpath'
+  | 'text'
+  | 'testid'
+  | 'role'
+  | 'label'
+  | 'placeholder'
+  | 'playwright';
+
+export type SelectorSource =
+  | 'interceptor'
+  | 'resolver'
+  | 'llm'
+  | 'manual'
+  | 'codegen'
+  | 'smoke-repair';
+
+export type SelectorProofLevel =
+  | 'recorded'
+  | 'snapshot_validated'
+  | 'semantic_validated'
+  | 'live_smoke_validated'
+  | 'proven_equivalent'
+  | 'inferred_unproven'
+  | 'weak_but_usable'
+  | 'blocked'
+  | 'unvalidated';
+
+export interface SelectorSpec {
+  selector: string;
+  engine: SelectorEngine;
+  source: SelectorSource;
+  proofLevel: SelectorProofLevel;
+  rank?: number;
+  confidence?: number;
+  rejectReason?: string;
+  warningCodes?: string[];
+}
+
 export type ResolverResolvedBy =
   | 'kept-original'
   | 'deterministic-override'
@@ -59,6 +99,16 @@ export type ResolverResolvedBy =
 export interface RejectedCandidateTrace {
   selector: string;
   reason: string;
+}
+
+export type LlmResponseFormat =
+  | 'legacy-selector'
+  | 'legacy-selectors'
+  | 'candidates-v2';
+
+export interface LlmRejectedCandidateTrace {
+  selector: string;
+  rejectReason: string;
 }
 
 export type TemporalClass =
@@ -133,6 +183,24 @@ export interface ResolverMetadata {
   llmAttempted: boolean;
   llmAccepted: boolean;
   llmAlternative: string | null;
+  llmCandidatesReturned?: string[];
+  llmCandidatesTried?: string[];
+  llmAcceptedRank?: number | null;
+  llmRejectedCandidates?: LlmRejectedCandidateTrace[];
+  llmResponseFormat?: LlmResponseFormat;
+  llmRetryTriggered?: boolean;
+  llmRetrySelector?: string | null;
+  llmRetryRejectReason?: string | null;
+  llmRetryAccepted?: boolean;
+  llmRetryTimeoutMs?: number;
+  llmRetryStatus?:
+    | 'not-eligible'
+    | 'triggered'
+    | 'accepted'
+    | 'rejected'
+    | 'skipped-provider-error'
+    | 'skipped-timeout'
+    | 'skipped-empty-response';
   rejectReason: string | null;
   semanticRejectReason?: string | null;
   rejectedCandidates?: RejectedCandidateTrace[];
@@ -224,6 +292,9 @@ export interface CodegenStep {
   /** The CSS selector or XPath to target the element */
   selector: string;
 
+  /** Additive first-class selector contract for the originally captured selector. */
+  selectorSpec?: SelectorSpec;
+
   /**
    * Node ID of the DOM snapshot before this step executes.
    * Additive-only field used by D3.5 selector resolution for generation.
@@ -312,6 +383,9 @@ export interface CodegenStep {
    * recorded graph/session truth.
    */
   resolvedSelector?: string;
+
+  /** Additive resolved selector contract used only for generation output. */
+  resolvedSelectorSpec?: SelectorSpec;
 
   /**
    * Additive D3.5 resolver diagnostics for sidecar and observability.

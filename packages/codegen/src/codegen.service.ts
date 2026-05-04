@@ -48,6 +48,7 @@ import {
   getUserDefinedAssertions,
   hasUserAssertionSupport,
 } from './assertion.stub';
+import { buildSelectorSpec } from './selector-spec';
 import { normalizeUrl } from '@air/shared';
 import { openSqliteReadonlyDatabase, SqliteDatabase } from './sqlite-client';
 
@@ -888,6 +889,13 @@ export class CodegenService {
         sourceNodeId,
         selectorPriority,
         selectorRank,
+        selectorSpec:     buildSelectorSpec({
+          selector: fingerprint.selector,
+          selectorPriority,
+          source: 'interceptor',
+          proofLevel: 'recorded',
+          rank: selectorRank,
+        }),
         fingerprint:      fingerprint ?? undefined,
         nestedContext:    extractNestedContext(ev.payload),
         controlSignature,

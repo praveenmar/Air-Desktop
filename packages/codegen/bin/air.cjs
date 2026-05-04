@@ -4,6 +4,7 @@
  *   npx air review [args]
  *   npx air generate [args]
  *   npx air trace [args]
+ *   npx air smoke [args]
  */
 
 const path = require('path');
@@ -26,6 +27,7 @@ if (!command || command === '--help' || command === '-h') {
       '  npx air review [sessionId] [--list] [--db <path>]',
       '  npx air generate <sessionId>',
       '  npx air trace [sessionId] [--list] [--json|--csv] [--out <path>] [--db <path>]',
+      '  npx air smoke --spec <spec.ts> [--sidecar <file.air.json>] [--generated <page.ts>] [--out <report.json>]',
     ].join('\n')
   );
   process.exit(0);
@@ -40,6 +42,9 @@ switch (command) {
     break;
   case 'trace':
     run('air-trace.ts', args);
+    break;
+  case 'smoke':
+    run('air-smoke.ts', args);
     break;
   default:
     console.error(`[ERR] Unknown command: ${command}`);

@@ -6,7 +6,8 @@
   "types": "dist/index.d.ts",
   "bin": {
     "air": "bin/air.cjs",
-    "air-trace": "bin/air-trace.cjs"
+    "air-trace": "bin/air-trace.cjs",
+    "air-smoke": "bin/air-smoke.cjs"
   },
   "scripts": {
     "build": "tsc",
@@ -14,7 +15,8 @@
     "review": "node bin/run-ts-cli.cjs air-review.ts",
     "review:list": "node bin/run-ts-cli.cjs air-review.ts --list",
     "trace": "node bin/run-ts-cli.cjs air-trace.ts",
-    "trace:list": "node bin/run-ts-cli.cjs air-trace.ts --list"
+    "trace:list": "node bin/run-ts-cli.cjs air-trace.ts --list",
+    "smoke": "node bin/run-ts-cli.cjs air-smoke.ts"
   },
   "dependencies": {
     "@air/shared": "0.1.0"

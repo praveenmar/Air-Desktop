@@ -1410,6 +1410,13 @@ describe('selector-resolver', () => {
     expect(resolution.resolvedSelector).toBe('div > div:nth-of-type(1)');
     expect(resolution.resolverMetadata.resolvedBy).toBe('blocked-snapshot-target-missing');
     expect(resolution.resolverMetadata.rejectReason).toBe('snapshot_target_missing');
+    expect(resolution.resolvedSelectorSpec).toEqual(expect.objectContaining({
+      selector: 'div > div:nth-of-type(1)',
+      engine: 'css',
+      source: 'resolver',
+      proofLevel: 'blocked',
+      rejectReason: 'snapshot_target_missing',
+    }));
   });
 
   it('still resolves Logout menu item when role and text align', async () => {
@@ -1478,6 +1485,18 @@ describe('selector-resolver', () => {
 
     expect(resolution.resolvedSelector).toBe('[id="submit-btn"]');
     expect(resolution.resolverMetadata.resolvedBy).toBe('kept-original');
+    expect(resolution.selectorSpec).toEqual(expect.objectContaining({
+      selector: '[id="submit-btn"]',
+      engine: 'css',
+      source: 'interceptor',
+      proofLevel: 'recorded',
+    }));
+    expect(resolution.resolvedSelectorSpec).toEqual(expect.objectContaining({
+      selector: '[id="submit-btn"]',
+      engine: 'css',
+      source: 'interceptor',
+      proofLevel: 'snapshot_validated',
+    }));
     expect(result.llmAttemptedStepNumbers).toHaveLength(0);
   });
 
@@ -1503,6 +1522,12 @@ describe('selector-resolver', () => {
 
     expect(resolution.resolvedSelector).toBe('text=Logout');
     expect(resolution.resolverMetadata.resolvedBy).toBe('kept-original');
+    expect(resolution.resolvedSelectorSpec).toEqual(expect.objectContaining({
+      selector: 'text=Logout',
+      engine: 'text',
+      source: 'interceptor',
+      proofLevel: 'snapshot_validated',
+    }));
   });
 
   it('performs deterministic override when original is non-unique and stable candidate is unique', async () => {
@@ -1528,6 +1553,12 @@ describe('selector-resolver', () => {
 
     expect(resolution.resolvedSelector).toBe('[data-testid="save-primary"]');
     expect(resolution.resolverMetadata.resolvedBy).toBe('deterministic-override');
+    expect(resolution.resolvedSelectorSpec).toEqual(expect.objectContaining({
+      selector: '[data-testid="save-primary"]',
+      engine: 'css',
+      source: 'resolver',
+      proofLevel: 'semantic_validated',
+    }));
   });
 
   it('performs deterministic override to unique text candidate when css selector is non-unique', async () => {
@@ -2125,6 +2156,12 @@ describe('selector-resolver', () => {
     expect(resolution.resolvedSelector).toBe('button[aria-label="submit"]');
     expect(resolution.resolverMetadata.resolvedBy).toBe('llm-accepted');
     expect(resolution.resolverMetadata.llmAccepted).toBe(true);
+    expect(resolution.resolvedSelectorSpec).toEqual(expect.objectContaining({
+      selector: 'button[aria-label="submit"]',
+      engine: 'css',
+      source: 'llm',
+      proofLevel: 'semantic_validated',
+    }));
     expect(result.llmAttemptedStepNumbers).toEqual([1]);
     expect(result.llmAcceptedStepNumbers).toEqual([1]);
   });
@@ -2298,14 +2335,13 @@ describe('selector-resolver', () => {
     });
 
     const loginContainer = makeElement({ class: 'orangehrm-login-layout' }, { text: 'Username Password Login' });
-    const duplicateOne = makeElement({ name: 'username' }, { text: '' });
-    const duplicateTwo = makeElement({ name: 'username' }, { text: '' });
+    const uniqueInput = makeElement({ name: 'username' }, { text: '', tagName: 'INPUT' });
 
     const snapshotCache = makeSnapshotCache({
       'node-1': makeDocument({
-        'input[name="username"]': [duplicateOne, duplicateTwo],
+        'input[name="username"]': [uniqueInput],
         '.orangehrm-login-layout': [loginContainer],
-        '*': [loginContainer, duplicateOne, duplicateTwo],
+        '*': [loginContainer, uniqueInput],
       }),
     });
 
@@ -2328,6 +2364,10 @@ describe('selector-resolver', () => {
     expect(result.llmAcceptedStepNumbers).toEqual([1]);
     expect(resolution.resolverMetadata.warningCodes).not.toContain('deterministic-low-score-fallback');
     expect(resolution.resolverMetadata.rejectReason).toBeNull();
+    expect(resolution.resolverMetadata.llmCandidatesReturned).toEqual(['input[name="username"]']);
+    expect(resolution.resolverMetadata.llmCandidatesTried).toEqual(['input[name="username"]']);
+    expect(resolution.resolverMetadata.llmAcceptedRank).toBe(1);
+    expect(resolution.resolverMetadata.llmResponseFormat).toBe('legacy-selector');
   });
 
   it('rejects false-positive LLM selector when intent token does not match target element context', async () => {
@@ -2371,6 +2411,714 @@ describe('selector-resolver', () => {
     expect(resolution.resolverMetadata.rejectReason).toBe('llm-intent-mismatch');
     expect(resolution.resolverMetadata.warningCodes).toContain('llm-intent-mismatch');
     expect(resolution.resolverMetadata.llmAlternative).toBe('a[href="/web/index.php/admin/viewAdminModule"]');
+    expect(resolution.resolverMetadata.llmRejectedCandidates).toEqual([
+      {
+        selector: 'a[href="/web/index.php/admin/viewAdminModule"]',
+        rejectReason: 'llm-intent-mismatch',
+      },
+    ]);
+  });
+
+  it('accepts a later LLM candidate after an earlier invalid selector', async () => {
+    const step = makeStep(1, {
+      selector: 'button',
+      intent: 'click_submit',
+      sourceNodeId: 'node-1',
+    });
+    const submit = makeElement({}, { text: 'Submit', tagName: 'BUTTON' });
+    const cancel = makeElement({}, { text: 'Submit', tagName: 'BUTTON' });
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        button: [submit, cancel],
+        '.dialog button.primary': [submit],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      {
+        enableLLMFallback: true,
+        resolverMinScore: 1.3,
+      },
+      async () => [
+        {
+          stepNumber: 1,
+          candidates: [
+            { selector: 'button[' },
+            { selector: '.dialog button.primary' },
+          ],
+        },
+      ],
+    );
+
+    const resolution = result.resolutions[0];
+    expect(resolution.resolvedSelector).toBe('.dialog button.primary');
+    expect(resolution.resolverMetadata.resolvedBy).toBe('llm-accepted');
+    expect(resolution.resolverMetadata.llmAcceptedRank).toBe(2);
+    expect(resolution.resolverMetadata.llmRejectedCandidates).toEqual([
+      {
+        selector: 'button[',
+        rejectReason: 'invalid-llm-selector',
+      },
+    ]);
+  });
+
+  it('accepts a later LLM candidate after an earlier non-unique selector', async () => {
+    const step = makeStep(1, {
+      selector: 'button',
+      intent: 'click_submit',
+      sourceNodeId: 'node-1',
+    });
+    const submit = makeElement({}, { text: 'Submit', tagName: 'BUTTON' });
+    const cancel = makeElement({}, { text: 'Submit', tagName: 'BUTTON' });
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        button: [submit, cancel],
+        '.dialog button.primary': [submit],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      {
+        enableLLMFallback: true,
+        resolverMinScore: 1.3,
+      },
+      async () => [
+        {
+          stepNumber: 1,
+          selectors: [
+            'button',
+            '.dialog button.primary',
+          ],
+        },
+      ],
+    );
+
+    const resolution = result.resolutions[0];
+    expect(resolution.resolvedSelector).toBe('.dialog button.primary');
+    expect(resolution.resolverMetadata.resolvedBy).toBe('llm-accepted');
+    expect(resolution.resolverMetadata.llmAcceptedRank).toBe(2);
+    expect(resolution.resolverMetadata.llmRejectedCandidates).toEqual([
+      {
+        selector: 'button',
+        rejectReason: 'llm-selector-not-unique',
+      },
+    ]);
+  });
+
+  it('merges duplicate LLM step objects and accepts a later valid candidate', async () => {
+    const step = makeStep(1, {
+      selector: 'button',
+      intent: 'click_submit',
+      sourceNodeId: 'node-1',
+    });
+    const submit = makeElement({ 'aria-label': 'submit' }, { text: 'Submit' });
+    const cancel = makeElement({ 'aria-label': 'cancel' }, { text: 'Cancel' });
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        button: [submit, cancel],
+        'button[aria-label="submit"]': [submit],
+        'button[aria-label="cancel"]': [cancel],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      {
+        enableLLMFallback: true,
+        resolverMinScore: 1.3,
+        llmMaxCandidatesPerStep: 3,
+      },
+      async () => [
+        { stepNumber: 1, selector: 'button[aria-label="cancel"]' },
+        { stepNumber: 1, selectors: ['button[aria-label="submit"]'] },
+      ],
+    );
+
+    const resolution = result.resolutions[0];
+    expect(resolution.resolvedSelector).toBe('button[aria-label="submit"]');
+    expect(resolution.resolverMetadata.llmCandidatesReturned).toEqual([
+      'button[aria-label="cancel"]',
+      'button[aria-label="submit"]',
+    ]);
+    expect(resolution.resolverMetadata.llmCandidatesTried).toEqual([
+      'button[aria-label="cancel"]',
+      'button[aria-label="submit"]',
+    ]);
+    expect(resolution.resolverMetadata.llmAcceptedRank).toBe(2);
+  });
+
+  it('applies href mismatch semantic safety to LLM candidates before accepting later valid candidate', async () => {
+    const step = makeStep(1, {
+      selector: '.menu-link',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_admin',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: '.menu-link',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'a',
+        textExcerpt: 'Admin',
+        attributes: {
+          href: '/web/index.php/admin/viewAdminModule',
+        },
+      },
+    });
+
+    const adminLink = makeElement({ href: '/web/index.php/admin/viewAdminModule' }, { text: 'Admin' });
+    const wrongLink = makeElement({ href: '/web/index.php/pim/viewPimModule' }, { text: 'Admin' });
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.menu-link': [adminLink, wrongLink],
+        'a[href="/web/index.php/pim/viewPimModule"]': [wrongLink],
+        'a[href="/web/index.php/admin/viewAdminModule"]': [adminLink],
+        '*': [adminLink, wrongLink],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      {
+        enableLLMFallback: true,
+        resolverMinScore: 1.3,
+      },
+      async () => [
+        {
+          stepNumber: 1,
+          candidates: [
+            { selector: 'a[href="/web/index.php/pim/viewPimModule"]' },
+            { selector: 'a[href="/web/index.php/admin/viewAdminModule"]' },
+          ],
+        },
+      ],
+    );
+
+    const resolution = result.resolutions[0];
+    expect(resolution.resolvedSelector).toBe('a[href="/web/index.php/admin/viewAdminModule"]');
+    expect(resolution.resolverMetadata.llmRejectedCandidates).toEqual([
+      {
+        selector: 'a[href="/web/index.php/pim/viewPimModule"]',
+        rejectReason: 'href_mismatch',
+      },
+    ]);
+  });
+
+  it('applies control-family mismatch safety to LLM candidates', async () => {
+    const step = makeStep(1, {
+      selector: '.menu-item',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_logout',
+      action: 'custom-select',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: '[role="menuitem"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'a',
+        textExcerpt: 'Logout',
+        attributes: {
+          role: 'menuitem',
+          href: '/logout',
+        },
+      },
+    });
+
+    const wrongButton = makeElement({ role: 'button', 'aria-label': 'Logout' }, { text: 'Logout' });
+    const rightMenuItem = makeElement({ role: 'menuitem', href: '/logout' }, { text: 'Logout' });
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.menu-item': [wrongButton, rightMenuItem],
+        '[role="button"]': [wrongButton],
+        '[role="menuitem"]': [rightMenuItem],
+        '*': [wrongButton, rightMenuItem],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      {
+        enableLLMFallback: true,
+        resolverMinScore: 1.3,
+      },
+      async () => [
+        {
+          stepNumber: 1,
+          candidates: [
+            { selector: '[role="button"]' },
+            { selector: '[role="menuitem"]' },
+          ],
+        },
+      ],
+    );
+
+    const resolution = result.resolutions[0];
+    expect(resolution.resolvedSelector).toBe('[role="menuitem"]');
+    expect(resolution.resolverMetadata.llmRejectedCandidates).toEqual([
+      {
+        selector: '[role="button"]',
+        rejectReason: 'control_family_mismatch',
+      },
+    ]);
+  });
+
+  it('applies text mismatch safety to LLM candidates', async () => {
+    const step = makeStep(1, {
+      selector: '.nav-link',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_admin',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: '.nav-link',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'a',
+        textExcerpt: 'Admin',
+        attributes: {
+          href: '/web/index.php/admin/viewAdminModule',
+        },
+      },
+    });
+
+    const adminLink = makeElement({ href: '/web/index.php/admin/viewAdminModule' }, { text: 'Admin' });
+    const pimLink = makeElement({ href: '/web/index.php/admin/viewAdminModule' }, { text: 'PIM' });
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.nav-link': [adminLink, pimLink],
+        '.sidebar a.pim-link': [pimLink],
+        '.sidebar a.admin-link': [adminLink],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      {
+        enableLLMFallback: true,
+        resolverMinScore: 1.3,
+      },
+      async () => [
+        {
+          stepNumber: 1,
+          candidates: [
+            { selector: '.sidebar a.pim-link' },
+            { selector: '.sidebar a.admin-link' },
+          ],
+        },
+      ],
+    );
+
+    const resolution = result.resolutions[0];
+    expect(resolution.resolvedSelector).toBe('.sidebar a.admin-link');
+    expect(resolution.resolverMetadata.llmRejectedCandidates).toEqual([
+      {
+        selector: '.sidebar a.pim-link',
+        rejectReason: 'text_mismatch',
+      },
+    ]);
+  });
+
+  it('rejects overly complex LLM selectors before accepting a simpler valid candidate', async () => {
+    const step = makeStep(1, {
+      selector: 'button',
+      intent: 'click_submit',
+      sourceNodeId: 'node-1',
+    });
+    const submit = makeElement({ 'aria-label': 'submit' }, { text: 'Submit' });
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        button: [submit],
+        'button[aria-label="submit"]': [submit],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      {
+        enableLLMFallback: true,
+        resolverMinScore: 1.3,
+      },
+      async () => [
+        {
+          stepNumber: 1,
+          candidates: [
+            {
+              selector: 'html body main section div div div div div button:nth-child(2):nth-of-type(1)',
+            },
+            {
+              selector: 'button[aria-label="submit"]',
+            },
+          ],
+        },
+      ],
+    );
+
+    const resolution = result.resolutions[0];
+    expect(resolution.resolvedSelector).toBe('button[aria-label="submit"]');
+    expect(resolution.resolverMetadata.llmRejectedCandidates).toEqual([
+      {
+        selector: 'html body main section div div div div div button:nth-child(2):nth-of-type(1)',
+        rejectReason: 'llm-selector-too-complex',
+      },
+    ]);
+  });
+
+  it('triggers one corrective retry after all top-k candidates fail and accepts a normalized retry selector', async () => {
+    const step = makeStep(1, {
+      selector: '.login-panel',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'input_username',
+      action: 'input',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: '.login-panel',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'input',
+        textExcerpt: 'Username',
+        parentSelector: 'form.login-form',
+        attributes: {
+          name: 'username',
+          placeholder: 'Username',
+          'data-testid': 'username-input',
+          'data-cy': 'username-field',
+          role: 'textbox',
+        },
+      },
+    });
+
+    const container = makeElement({ class: 'login-panel' }, { text: 'Login', tagName: 'DIV' });
+    const usernameInput = makeElement(
+      { name: 'username', placeholder: 'Username', role: 'textbox' },
+      { tagName: 'INPUT' },
+    );
+    const provider = vi.fn(async (request: any) => {
+      if (request.mode === 'retry') {
+        return [{ stepNumber: 1, selector: 'locator(\'input[name="username"]\')' }];
+      }
+      return [
+        {
+          stepNumber: 1,
+          candidates: [
+            { selector: 'button[' },
+            { selector: '.login-panel' },
+          ],
+        },
+      ];
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.login-panel': [container],
+        'input[name="username"]': [usernameInput],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      {
+        enableLLMFallback: true,
+        resolverMinScore: 1.3,
+      },
+      provider,
+    );
+
+    const resolution = result.resolutions[0];
+    expect(provider).toHaveBeenCalledTimes(2);
+    expect(resolution.resolvedSelector).toBe('input[name="username"]');
+    expect(resolution.resolverMetadata.resolvedBy).toBe('llm-accepted');
+    expect(resolution.resolverMetadata.llmRetryTriggered).toBe(true);
+    expect(resolution.resolverMetadata.llmRetrySelector).toBe('input[name="username"]');
+    expect(resolution.resolverMetadata.llmRetryAccepted).toBe(true);
+    expect(resolution.resolverMetadata.llmRetryStatus).toBe('accepted');
+  });
+
+  it('applies existing low-score fallback after retry rejection and does not retry more than once', async () => {
+    const step = makeStep(1, {
+      selector: 'button',
+      intent: 'click_submit',
+      sourceNodeId: 'node-1',
+    });
+    const shell = makeElement({ class: 'shell' }, { text: 'Layout', tagName: 'DIV' });
+    const submit = makeElement({ 'aria-label': 'submit' }, { text: 'Submit', tagName: 'BUTTON' });
+    const cancel = makeElement({ 'aria-label': 'cancel' }, { text: 'Submit', tagName: 'BUTTON' });
+    const provider = vi.fn(async (request: any) => {
+      if (request.mode === 'retry') {
+        return [{ stepNumber: 1, selector: 'button' }];
+      }
+      return [
+        {
+          stepNumber: 1,
+          candidates: [
+            { selector: 'button[' },
+            { selector: '.shell' },
+          ],
+        },
+      ];
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        button: [submit, cancel],
+        '.shell': [shell],
+        '[aria-label="submit"]': [submit],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      {
+        enableLLMFallback: true,
+        resolverMinScore: 1.3,
+      },
+      provider,
+    );
+
+    const resolution = result.resolutions[0];
+    expect(provider).toHaveBeenCalledTimes(2);
+    expect(resolution.resolvedSelector).toBe('[aria-label="submit"]');
+    expect(resolution.resolverMetadata.resolvedBy).toBe('deterministic-override');
+    expect(resolution.resolverMetadata.llmRetryTriggered).toBe(true);
+    expect(resolution.resolverMetadata.llmRetryAccepted).toBe(false);
+    expect(resolution.resolverMetadata.llmRetryRejectReason).toBe('llm-selector-not-unique');
+    expect(resolution.resolverMetadata.llmRetryStatus).toBe('rejected');
+    expect(resolution.resolverMetadata.warningCodes).toContain('deterministic-low-score-fallback');
+  });
+
+  it('rejects semantically wrong retry selectors through the same validation gates', async () => {
+    const step = makeStep(1, {
+      selector: '.menu-link',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_admin',
+      sourceNodeId: 'node-1',
+      fingerprint: {
+        selector: '.menu-link',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'a',
+        textExcerpt: 'Admin',
+        attributes: {
+          href: '/web/index.php/admin/viewAdminModule',
+        },
+      },
+    });
+    const adminLink = makeElement({ href: '/web/index.php/admin/viewAdminModule' }, { text: 'Admin' });
+    const wrongLink = makeElement({ href: '/web/index.php/pim/viewPimModule' }, { text: 'Admin' });
+    const provider = vi.fn(async (request: any) => {
+      if (request.mode === 'retry') {
+        return [{ stepNumber: 1, selector: 'a[href="/web/index.php/pim/viewPimModule"]' }];
+      }
+      return [
+        {
+          stepNumber: 1,
+          candidates: [
+            { selector: 'button[' },
+            { selector: '.menu-link' },
+          ],
+        },
+      ];
+    });
+
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.menu-link': [adminLink, wrongLink],
+        'a[href="/web/index.php/admin/viewAdminModule"]': [adminLink],
+        'a[href="/web/index.php/pim/viewPimModule"]': [wrongLink],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      {
+        enableLLMFallback: true,
+        resolverMinScore: 1.3,
+      },
+      provider,
+    );
+
+    const resolution = result.resolutions[0];
+    expect(provider).toHaveBeenCalledTimes(2);
+    expect(resolution.resolverMetadata.llmRetryTriggered).toBe(true);
+    expect(resolution.resolverMetadata.llmRetryRejectReason).toBe('href_mismatch');
+    expect(resolution.resolverMetadata.llmRetryStatus).toBe('rejected');
+  });
+
+  it('does not run corrective retry for blocked-snapshot-target-missing steps', async () => {
+    const step = makeStep(1, {
+      selector: 'div > div:nth-of-type(1)',
+      selectorPriority: 'path',
+      selectorRank: 10,
+      intent: 'click_select',
+      sourceNodeId: 'node-1',
+      eventId: 'ev-1',
+    });
+    const provider = vi.fn(async () => []);
+    const selectTrigger = makeElement({ 'aria-haspopup': 'listbox' }, { text: '-- Select --', tagName: 'DIV' });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': makeDocument({ '*': [selectTrigger] }) },
+      () => ({
+        snapshot: makeDocument({ '*': [selectTrigger] }),
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'selected_source_node_snapshot_after_event_local_missing',
+          eventId: 'ev-1',
+          sourceNodeId: 'node-1',
+          confidenceScore: 0.35,
+          snapshotTargetEvidence: false,
+          snapshotTargetEvidenceReason: 'target_missing_in_snapshot',
+        },
+        evaluatedCandidates: [
+          {
+            source: 'source-node-snapshot',
+            temporalClass: 'pre_action',
+            selected: true,
+            reason: 'selected_source_node_snapshot_after_event_local_missing',
+            sourceNodeId: 'node-1',
+            confidenceScore: 0.35,
+            targetPresent: false,
+            snapshotTargetEvidenceReason: 'target_missing_in_snapshot',
+          },
+        ],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      { enableLLMFallback: true },
+      provider,
+    );
+
+    expect(provider).not.toHaveBeenCalled();
+    expect(result.resolutions[0].resolverMetadata.resolvedBy).toBe('blocked-snapshot-target-missing');
+    expect(result.resolutions[0].resolverMetadata.llmRetryTriggered).toBe(false);
+  });
+
+  it('does not run corrective retry on empty initial response', async () => {
+    const step = makeStep(1, {
+      selector: 'button',
+      intent: 'click_submit',
+      sourceNodeId: 'node-1',
+    });
+    const submit = makeElement({ 'aria-label': 'submit' }, { text: 'Submit', tagName: 'BUTTON' });
+    const provider = vi.fn(async () => []);
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        button: [submit],
+        '[aria-label="submit"]': [submit],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      {
+        enableLLMFallback: true,
+        resolverMinScore: 1.3,
+      },
+      provider,
+    );
+
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(result.resolutions[0].resolverMetadata.llmRetryTriggered).toBe(false);
+    expect(result.resolutions[0].resolverMetadata.llmRetryStatus).toBe('skipped-empty-response');
+  });
+
+  it('does not run corrective retry on initial provider error', async () => {
+    const step = makeStep(1, {
+      selector: 'button',
+      intent: 'click_submit',
+      sourceNodeId: 'node-1',
+    });
+    const submit = makeElement({ 'aria-label': 'submit' }, { text: 'Submit', tagName: 'BUTTON' });
+    const provider = vi.fn(async () => {
+      throw new Error('provider-down');
+    });
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        button: [submit],
+        '[aria-label="submit"]': [submit],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      {
+        enableLLMFallback: true,
+        resolverMinScore: 1.3,
+      },
+      provider,
+    );
+
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(result.resolutions[0].resolverMetadata.llmRetryTriggered).toBe(false);
+  });
+
+  it('uses llmRetryTimeoutMs for corrective retry and falls back safely on timeout', async () => {
+    const step = makeStep(1, {
+      selector: 'button',
+      intent: 'click_submit',
+      sourceNodeId: 'node-1',
+    });
+    const shell = makeElement({ class: 'shell' }, { text: 'Layout', tagName: 'DIV' });
+    const submit = makeElement({ 'aria-label': 'submit' }, { text: 'Submit', tagName: 'BUTTON' });
+    const cancel = makeElement({ 'aria-label': 'cancel' }, { text: 'Submit', tagName: 'BUTTON' });
+    const provider = vi.fn(async (request: any) => {
+      if (request.mode === 'retry') {
+        return await new Promise(() => {});
+      }
+      return [
+        {
+          stepNumber: 1,
+          candidates: [
+            { selector: 'button[' },
+            { selector: '.shell' },
+          ],
+        },
+      ];
+    });
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        button: [submit, cancel],
+        '.shell': [shell],
+        '[aria-label="submit"]': [submit],
+      }),
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      {
+        enableLLMFallback: true,
+        resolverMinScore: 1.3,
+        llmRetryTimeoutMs: 1,
+      },
+      provider,
+    );
+
+    const resolution = result.resolutions[0];
+    expect(provider).toHaveBeenCalledTimes(2);
+    expect(resolution.resolvedSelector).toBe('[aria-label="submit"]');
+    expect(resolution.resolverMetadata.llmRetryTriggered).toBe(true);
+    expect(resolution.resolverMetadata.llmRetryTimeoutMs).toBe(1);
+    expect(resolution.resolverMetadata.llmRetryStatus).toBe('skipped-timeout');
   });
 
   it('uses controlSignature-specific snapshots for same normalized URL', async () => {

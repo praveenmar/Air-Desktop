@@ -2,8 +2,10 @@ import type {
   CodegenAssertion,
   CodegenSession,
   CodegenStep,
+  LlmResponseFormat,
   ResolverMetadata,
   ResolverSnapshotSource,
+  SelectorSpec,
   SelectorPriority,
 } from '../types';
 import type { SnapshotSelectionResult } from '../snapshot-selector';
@@ -15,7 +17,10 @@ export interface ResolverConfig {
   maxSnapshotBytesForValidation?: number;
   maxSnapshotExcerptChars?: number;
   llmTimeoutMs?: number;
+  llmRetryTimeoutMs?: number;
   maxLLMFallbackPerSession?: number;
+  llmMaxCandidatesPerStep?: number;
+  /** @deprecated Use llmMaxCandidatesPerStep. */
   llmMaxRetriesPerStep?: number;
 }
 
@@ -26,7 +31,10 @@ export interface ResolvedResolverConfig {
   maxSnapshotBytesForValidation: number;
   maxSnapshotExcerptChars: number;
   llmTimeoutMs: number;
+  llmRetryTimeoutMs: number;
   maxLLMFallbackPerSession?: number;
+  llmMaxCandidatesPerStep: number;
+  /** @deprecated Use llmMaxCandidatesPerStep. */
   llmMaxRetriesPerStep: number;
 }
 
@@ -67,7 +75,10 @@ export interface RawCandidate {
     | 'role+name'
     | 'class'
     | 'text'
-    | 'parent-scope';
+    | 'parent-scope'
+    | 'other'
+    | 'path'
+    | 'chained';
   rank: number;
 }
 
@@ -90,6 +101,8 @@ export interface RankedElementScore {
 export interface StepResolutionDraft {
   step: CodegenStep;
   snapshot: Document | null;
+  selectorSpec?: SelectorSpec;
+  resolvedSelectorSpec?: SelectorSpec;
   resolvedSelector: string;
   metadata: ResolverMetadata;
   llmEligible: boolean;
@@ -113,24 +126,87 @@ export interface LlmFallbackStep {
   selectorPriority?: SelectorPriority;
 }
 
+export interface LlmRetryFingerprintSummary {
+  tagName?: string;
+  textExcerpt?: string;
+  href?: string;
+  role?: string;
+  ariaLabel?: string;
+  name?: string;
+  placeholder?: string;
+  type?: string;
+  dataTestId?: string;
+  dataCy?: string;
+  dataQa?: string;
+  parentSelector?: string;
+  controlFamily?: ControlFamily;
+}
+
+export interface LlmRetryFailedCandidate {
+  selector: string;
+  rejectReason: string;
+}
+
+export interface LlmCorrectiveRetryStep {
+  stepNumber: number;
+  action: CodegenStep['action'];
+  intent: string;
+  originalSelector: string;
+  fingerprint?: LlmRetryFingerprintSummary;
+  snapshotExcerpt: string;
+  failedCandidates: LlmRetryFailedCandidate[];
+}
+
+export interface LlmFallbackCandidatePayload {
+  selector?: string;
+  reason?: string;
+}
+
 export interface LlmFallbackSuggestion {
   stepNumber: number;
-  selector: string;
+  selector?: string;
   selectors?: string[];
+  candidates?: Array<string | LlmFallbackCandidatePayload>;
+  responseFormat?: LlmResponseFormat;
+}
+
+export interface NormalizedLlmSuggestion {
+  stepNumber: number;
+  candidates: string[];
+  responseFormat: LlmResponseFormat;
+  truncated?: boolean;
+}
+
+export interface NormalizedLlmRetrySuggestion {
+  stepNumber: number;
+  selector: string;
 }
 
 export interface LlmFallbackRequest {
+  mode: 'initial';
   steps: LlmFallbackStep[];
   config: ResolvedResolverConfig;
 }
 
-export type SelectorFallbackProvider = (request: LlmFallbackRequest) => Promise<LlmFallbackSuggestion[]>;
+export interface LlmCorrectiveRetryRequest {
+  mode: 'retry';
+  steps: LlmCorrectiveRetryStep[];
+  config: ResolvedResolverConfig;
+}
+
+export type SelectorFallbackRequest = LlmFallbackRequest | LlmCorrectiveRetryRequest;
+
+export type SelectorFallbackProvider = (
+  request: SelectorFallbackRequest
+) => Promise<LlmFallbackSuggestion[] | NormalizedLlmRetrySuggestion[] | unknown[]>;
 
 export interface SelectorResolution {
   stepNumber: number;
   sourceNodeId: string | null;
   originalSelector: string;
+  selectorSpec?: SelectorSpec;
   resolvedSelector: string;
+  resolvedSelectorSpec?: SelectorSpec;
   resolverMetadata: ResolverMetadata;
 }
 
