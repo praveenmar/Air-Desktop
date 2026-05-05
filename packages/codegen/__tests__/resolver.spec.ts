@@ -7,7 +7,9 @@ import {
   validateTextCandidate,
   SnapshotCache,
 } from '../src/selector-resolver';
+import type { SelectorFallbackProvider, SelectorFallbackRequest } from '../src/selector-resolver';
 import { getSourceNodeId } from '../src/codegen.service';
+import { classifySelectorCategory } from '../src/selector-evaluation';
 import { CodegenSession, CodegenStep } from '../src/types';
 import type { SnapshotSelectionResult } from '../src/snapshot-selector';
 import { inferStepSignalAttributes } from '../src/resolver/text-matching';
@@ -172,7 +174,7 @@ function scoreExplicitCandidate(
   step: CodegenStep,
   snapshot: Document,
   selector: string,
-  source: 'class' | 'path' | 'text' | 'parent-scope' | 'id' | 'name' | 'testid' | 'aria' | 'placeholder' | 'role+name' | 'original',
+  source: 'class' | 'path' | 'text' | 'parent-scope' | 'id' | 'name' | 'testid' | 'data-cy' | 'data-qa' | 'aria' | 'placeholder' | 'href' | 'role+name' | 'original',
   rank: number,
 ): number {
   const validation = selector.startsWith('text=')
@@ -240,6 +242,141 @@ describe('selector-resolver', () => {
       'FINGERPRINT_ATTRIBUTE_INFERRED_DOWNSTREAM',
       expect.objectContaining({ attribute: 'placeholder' }),
     );
+  });
+
+  it('classifies current selector categories including data-cy, data-qa, href, and xpath', () => {
+    expect(classifySelectorCategory('[data-testid="submit"]', 'testid')).toBe('testid');
+    expect(classifySelectorCategory('[data-cy="submit"]', 'data-cy')).toBe('data-cy');
+    expect(classifySelectorCategory('[data-qa="submit"]', 'data-qa')).toBe('data-qa');
+    expect(classifySelectorCategory('[name="username"]', 'name')).toBe('name');
+    expect(classifySelectorCategory('[href="/admin"]', 'href')).toBe('href');
+    expect(classifySelectorCategory('[placeholder="Username"]', 'placeholder')).toBe('placeholder');
+    expect(classifySelectorCategory('[aria-label="Search"]', 'aria')).toBe('aria-label');
+    expect(classifySelectorCategory('.btn.btn-primary', 'class')).toBe('class');
+    expect(classifySelectorCategory('form .field [name="username"]', 'parent-scope')).toBe('parent-scoped');
+    expect(classifySelectorCategory('div > div:nth-child(2) > input', 'path')).toBe('structural');
+    expect(classifySelectorCategory('//button[@id="submit"]', 'original')).toBe('xpath');
+  });
+
+  it('prefers proven testid over weaker class selector when both are valid', () => {
+    const submit = makeElement(
+      { 'data-testid': 'submit-btn', class: 'btn btn-primary' },
+      { tagName: 'BUTTON', text: 'Submit', className: 'btn btn-primary' },
+    );
+    const snapshot = makeDocument({
+      '[data-testid="submit-btn"]': [submit],
+      '.btn': [submit],
+    });
+    const step = makeStep(1, {
+      selector: '.btn',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.btn',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'button',
+        textExcerpt: 'Submit',
+        attributes: {
+          'data-testid': 'submit-btn',
+          class: 'btn btn-primary',
+        },
+      },
+    });
+
+    const testidScore = scoreExplicitCandidate(step, snapshot, '[data-testid="submit-btn"]', 'testid', 1);
+    const classScore = scoreExplicitCandidate(step, snapshot, '.btn', 'class', 7);
+
+    expect(testidScore).toBeGreaterThan(classScore);
+  });
+
+  it('prefers proven name selector over brittle structural selector and keeps compact scoped selectors usable', () => {
+    const username = makeElement(
+      { name: 'username' },
+      { tagName: 'INPUT' },
+    );
+    const snapshot = makeDocument({
+      '[name="username"]': [username],
+      'form [name="username"]': [username],
+      'div > div:nth-child(2) > input': [username],
+    });
+    const step = makeStep(1, {
+      action: 'input',
+      selector: 'div > div:nth-child(2) > input',
+      selectorPriority: 'path',
+      selectorRank: 10,
+      fingerprint: {
+        selector: 'div > div:nth-child(2) > input',
+        selectorPriority: 'path',
+        selectorRank: 10,
+        tagName: 'input',
+        attributes: {
+          name: 'username',
+        },
+      },
+    });
+
+    const nameScore = scoreExplicitCandidate(step, snapshot, '[name="username"]', 'name', 3);
+    const scopedScore = scoreExplicitCandidate(step, snapshot, 'form [name="username"]', 'parent-scope', 4);
+    const structuralScore = scoreExplicitCandidate(step, snapshot, 'div > div:nth-child(2) > input', 'path', 10);
+
+    expect(nameScore).toBeGreaterThan(structuralScore);
+    expect(scopedScore).toBeGreaterThan(structuralScore);
+  });
+
+  it('persists selector evaluation summary for deterministic winners', async () => {
+    const submit = makeElement(
+      { 'data-cy': 'submit-btn' },
+      { tagName: 'BUTTON', text: 'Submit' },
+    );
+    const cancel = makeElement(
+      { class: 'submit' },
+      { tagName: 'BUTTON', text: 'Cancel', className: 'submit' },
+    );
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '.submit': [submit, cancel],
+        '[data-cy="submit-btn"]': [submit],
+        'button[data-cy="submit-btn"]': [submit],
+        '*': [submit, cancel],
+      }),
+    });
+    const step = makeStep(1, {
+      selector: '.submit',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_submit',
+      fingerprint: {
+        selector: '.submit',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'button',
+        textExcerpt: 'Submit',
+        attributes: {
+          'data-cy': 'submit-btn',
+          class: 'submit',
+        },
+      },
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toBe('button[data-cy="submit-btn"]');
+    expect(resolution.resolverMetadata.selectorEvaluation).toEqual(expect.objectContaining({
+      category: 'data-cy',
+      proof: expect.objectContaining({
+        proofLevel: 'semantic_validated',
+        proofSource: 'semantic',
+      }),
+      scoring: expect.objectContaining({
+        finalScore: expect.any(Number),
+        stabilityScore: expect.any(Number),
+        semanticScore: expect.any(Number),
+        brittlenessPenalty: expect.any(Number),
+      }),
+      reasons: expect.arrayContaining(['category:data-cy', 'proof:semantic_validated']),
+    }));
   });
 
   it('rejects unique href-mismatched deterministic candidate', async () => {
@@ -2248,15 +2385,15 @@ describe('selector-resolver', () => {
       });
     }
 
-    const llmProvider = vi.fn(async request =>
-      request.steps.map((item: any) => ({ stepNumber: item.stepNumber, selector: `button[aria-label="submit ${item.stepNumber}"]` })),
-    );
+    const providerImpl: SelectorFallbackProvider = async (request: SelectorFallbackRequest) =>
+      request.steps.map((item: any) => ({ stepNumber: item.stepNumber, selector: `button[aria-label="submit ${item.stepNumber}"]` }));
+    const llmProvider = vi.fn(providerImpl);
 
     const result = await resolveSelectorsForSession(
       makeSession(steps),
       makeSnapshotCache(snapshotEntries),
       { enableLLMFallback: true, resolverMinScore: 1.3 },
-      llmProvider,
+      llmProvider as unknown as SelectorFallbackProvider,
     );
 
     expect(result.llmAttemptedStepNumbers).toHaveLength(3);
@@ -3080,7 +3217,7 @@ describe('selector-resolver', () => {
     const shell = makeElement({ class: 'shell' }, { text: 'Layout', tagName: 'DIV' });
     const submit = makeElement({ 'aria-label': 'submit' }, { text: 'Submit', tagName: 'BUTTON' });
     const cancel = makeElement({ 'aria-label': 'cancel' }, { text: 'Submit', tagName: 'BUTTON' });
-    const provider = vi.fn(async (request: any) => {
+    const providerImpl: SelectorFallbackProvider = async (request: SelectorFallbackRequest) => {
       if (request.mode === 'retry') {
         return await new Promise(() => {});
       }
@@ -3093,7 +3230,8 @@ describe('selector-resolver', () => {
           ],
         },
       ];
-    });
+    };
+    const provider = vi.fn(providerImpl);
     const snapshotCache = makeSnapshotCache({
       'node-1': makeDocument({
         button: [submit, cancel],
@@ -3110,7 +3248,7 @@ describe('selector-resolver', () => {
         resolverMinScore: 1.3,
         llmRetryTimeoutMs: 1,
       },
-      provider,
+      provider as unknown as SelectorFallbackProvider,
     );
 
     const resolution = result.resolutions[0];

@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { 
   CodegenService,
@@ -380,6 +382,104 @@ describe('CodegenService - Step Metadata Preservation', () => {
     expect(session.steps[0].controlSignature).toBe('sig-profile-v1');
     expect(session.steps[0].fingerprint?.tagName).toBe('button');
     expect(session.steps[0].fingerprint?.parentSelector).toBe('#profile-form');
+  });
+
+  it('buildSession preserves nestedContext fields used by snapshot selection', () => {
+    const eventPayload = JSON.stringify({
+      normalizedUrl: 'https://app.test/profile',
+      nestedContext: {
+        isShadowDom: true,
+        isIframe: true,
+        iframeSrc: 'https://app.test/embedded-profile',
+        degradedReason: 'probable_closed_shadow_host',
+      },
+      pageSnapshot: {
+        html: '<div>shadow content</div>',
+      },
+      fingerprint: {
+        selector: '[name="email"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'input',
+        textExcerpt: 'Email',
+        attributes: {
+          name: 'email',
+        },
+        attributesHash: 'nested-context-hash',
+      },
+    });
+
+    const fakeDb = {
+      prepare(sql: string) {
+        if (sql.includes('FROM sessions')) {
+          return {
+            get: () => ({
+              id: 'session-test',
+              started_at: 1_700_000_000_000,
+            }),
+          };
+        }
+
+        if (sql.includes('FROM events e')) {
+          return {
+            all: () => ([{
+              eventId: 'ev-1',
+              eventType: 'click',
+              timestamp: 1_700_000_000_100,
+              pageUrl: 'https://app.test/profile',
+              traceId: 'trace-1',
+              nodeId: 'node-1',
+              payload: eventPayload,
+            }]),
+          };
+        }
+
+        if (sql.includes('WHERE ed.fingerprint_hash IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('WHERE ed.trigger_event_id IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('SELECT control_signature AS controlSignature')) {
+          return { get: () => undefined };
+        }
+
+        if (sql.includes('FROM nodes')) {
+          return {
+            all: () => [],
+            get: () => undefined,
+          };
+        }
+
+        return {
+          get: () => undefined,
+          all: () => [],
+        };
+      },
+      close() {
+        return undefined;
+      },
+    };
+
+    const service = Object.create(CodegenService.prototype) as any;
+    service.db = fakeDb;
+    service.options = {
+      dbPath: ':memory:',
+      minConfidence: 0,
+      includeScrollSteps: false,
+      includeHoverSteps: false,
+    };
+
+    const session = (service as CodegenService).buildSession('session-test');
+    expect(session.steps).toHaveLength(1);
+    expect(session.steps[0].nestedContext).toEqual(expect.objectContaining({
+      isShadowDom: true,
+      isIframe: true,
+      iframeSrc: 'https://app.test/embedded-profile',
+      degradedReason: 'probable_closed_shadow_host',
+    }));
   });
 
   it('falls back to source-node control_signature when payload signature is missing', () => {
@@ -886,5 +986,26 @@ describe('CodegenService - Step Metadata Preservation', () => {
       'https://opensource-demo.orangehrmlive.com/web/index.php/admin/viewAdminModule'
     );
     expect(session.steps[0].fingerprint?.textExcerpt).toBe('Admin');
+  });
+
+  it('documents inventory policy as HTML/provenance/controlSignature-centered', () => {
+    const codegenSource = fs.readFileSync(
+      path.join(process.cwd(), 'packages/codegen/src/codegen.service.ts'),
+      'utf8',
+    );
+
+    // Capture/schema durability for compositeAnchors, metrics, and snapshotBuildId is already
+    // covered in event-schema-survival.spec.ts and active-path-contract-fixture.e2e.spec.ts.
+    // The current inventory contract intentionally reconstructs from HTML plus lightweight
+    // provenance/control-signature fields instead of rich snapshot metadata.
+    expect(codegenSource).toContain('SELECT snapshot_html AS snapshotHtml');
+    expect(codegenSource).toContain('normalized_url AS normalizedUrl');
+    expect(codegenSource).toContain('control_signature AS controlSignature');
+    expect(codegenSource).toContain('is_stable AS isStable');
+    expect(codegenSource).toContain('captured_at AS capturedAt');
+    expect(codegenSource).toContain('payload?.[fieldName]?.html');
+    expect(codegenSource).not.toContain('payload?.[fieldName]?.compositeAnchors');
+    expect(codegenSource).not.toContain('payload?.[fieldName]?.metrics');
+    expect(codegenSource).not.toContain('payload?.[fieldName]?.snapshotBuildId');
   });
 });

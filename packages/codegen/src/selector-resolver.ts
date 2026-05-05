@@ -3,6 +3,8 @@ import type {
   CodegenStep,
   LlmResponseFormat,
   ResolverMetadata,
+  SelectorCategory,
+  SelectorEvaluation,
   SelectorPriority,
   ResolverSnapshotSource,
 } from './types';
@@ -70,6 +72,13 @@ import {
 } from './resolver/visibility';
 import { serializeSnapshotExcerpt } from './resolver/excerpt-builder';
 import { buildSelectorSpec } from './selector-spec';
+import {
+  classifySelectorCategory,
+  mapSelectorProofSource,
+  proofScoreForValidation,
+  stabilityBaseScoreForCategory,
+  summarizeSelectorEvaluation,
+} from './selector-evaluation';
 
 export type {
   CandidateValidation,
@@ -622,6 +631,20 @@ export function generateCandidates(step: CodegenStep, snapshot: Document): RawCa
     }
   }
 
+  if (attrs.dataCy) {
+    pushCandidate(candidates, seen, `[data-cy="${cssEscape(attrs.dataCy)}"]`, 'data-cy', 1);
+    if (tagName) {
+      pushCandidate(candidates, seen, `${tagName}[data-cy="${cssEscape(attrs.dataCy)}"]`, 'data-cy', 1);
+    }
+  }
+
+  if (attrs.dataQa) {
+    pushCandidate(candidates, seen, `[data-qa="${cssEscape(attrs.dataQa)}"]`, 'data-qa', 1);
+    if (tagName) {
+      pushCandidate(candidates, seen, `${tagName}[data-qa="${cssEscape(attrs.dataQa)}"]`, 'data-qa', 1);
+    }
+  }
+
   if (attrs.id) {
     for (const selector of buildIdSelectors(attrs.id)) {
       pushCandidate(candidates, seen, selector, 'id', 2);
@@ -656,6 +679,13 @@ export function generateCandidates(step: CodegenStep, snapshot: Document): RawCa
     pushCandidate(candidates, seen, `[role="${cssEscape(attrs.role)}"]`, 'role+name', 3);
   }
 
+  if (attrs.href) {
+    pushCandidate(candidates, seen, `[href="${cssEscape(attrs.href)}"]`, 'href', 3);
+    if (tagName) {
+      pushCandidate(candidates, seen, `${tagName}[href="${cssEscape(attrs.href)}"]`, 'href', 3);
+    }
+  }
+
   const stableClass = findStableClassFromAttributes(attrs.class);
   if (stableClass) {
     pushCandidate(candidates, seen, `.${stableClass}`, 'class', 7);
@@ -684,12 +714,15 @@ export function generateCandidates(step: CodegenStep, snapshot: Document): RawCa
     : attrs.parentSelector;
   if (scopedBase && isLikelyCssSelector(scopedBase)) {
     if (attrs.dataTestId) pushCandidate(candidates, seen, `${scopedBase} [data-testid="${cssEscape(attrs.dataTestId)}"]`, 'parent-scope', 2);
+    if (attrs.dataCy) pushCandidate(candidates, seen, `${scopedBase} [data-cy="${cssEscape(attrs.dataCy)}"]`, 'parent-scope', 2);
+    if (attrs.dataQa) pushCandidate(candidates, seen, `${scopedBase} [data-qa="${cssEscape(attrs.dataQa)}"]`, 'parent-scope', 2);
     if (attrs.id) {
       for (const selector of buildIdSelectors(attrs.id)) {
         pushCandidate(candidates, seen, `${scopedBase} ${selector}`, 'parent-scope', 2);
       }
     }
     if (attrs.name) pushCandidate(candidates, seen, `${scopedBase} [name="${cssEscape(attrs.name)}"]`, 'parent-scope', 4);
+    if (attrs.href) pushCandidate(candidates, seen, `${scopedBase} [href="${cssEscape(attrs.href)}"]`, 'parent-scope', 4);
     if (attrs.ariaLabel) pushCandidate(candidates, seen, `${scopedBase} [aria-label="${cssEscape(attrs.ariaLabel)}"]`, 'parent-scope', 4);
     if (tagName) pushCandidate(candidates, seen, `${scopedBase} ${tagName}`, 'parent-scope', 6);
     if (step.selector && isLikelyCssSelector(step.selector)) {
@@ -991,14 +1024,20 @@ function collectCompatibilityEvidence(
 }
 
 function compareSemanticCandidates(
-  left: { candidate: CandidateScore; semantic: SemanticCompatibilityEvaluation },
-  right: { candidate: CandidateScore; semantic: SemanticCompatibilityEvaluation },
+  left: { candidate: CandidateScore; semantic: SemanticCompatibilityEvaluation; selectorEvaluation: SelectorEvaluation },
+  right: { candidate: CandidateScore; semantic: SemanticCompatibilityEvaluation; selectorEvaluation: SelectorEvaluation },
 ): number {
-  if (right.candidate.score !== left.candidate.score) {
-    return right.candidate.score - left.candidate.score;
+  if (right.selectorEvaluation.scoring.proofScore !== left.selectorEvaluation.scoring.proofScore) {
+    return right.selectorEvaluation.scoring.proofScore - left.selectorEvaluation.scoring.proofScore;
   }
   if (right.semantic.score !== left.semantic.score) {
     return right.semantic.score - left.semantic.score;
+  }
+  if (right.selectorEvaluation.scoring.finalScore !== left.selectorEvaluation.scoring.finalScore) {
+    return right.selectorEvaluation.scoring.finalScore - left.selectorEvaluation.scoring.finalScore;
+  }
+  if (right.selectorEvaluation.scoring.stabilityScore !== left.selectorEvaluation.scoring.stabilityScore) {
+    return right.selectorEvaluation.scoring.stabilityScore - left.selectorEvaluation.scoring.stabilityScore;
   }
   return compareCandidates(left.candidate, right.candidate);
 }
@@ -1138,7 +1177,135 @@ export function volatilityPenalty(selector: string): number {
   return penalty;
 }
 
-export function scoreCandidate(
+function selectorDepth(selector: string): number {
+  return Math.max(0, (selector.match(/\s+/g)?.length ?? 0) + (selector.match(/>/g)?.length ?? 0));
+}
+
+function computeBrittlenessPenalty(selector: string, category: SelectorCategory): { penalty: number; reasons: string[] } {
+  let penalty = 0;
+  const reasons: string[] = [];
+  const addPenalty = (amount: number, reason: string): void => {
+    if (reasons.includes(reason)) return;
+    penalty += amount;
+    reasons.push(reason);
+  };
+
+  if (/nth-child|nth-of-type/i.test(selector)) addPenalty(0.22, 'nth-index-selector');
+  const depth = selectorDepth(selector);
+  if (depth >= 4) {
+    addPenalty(0.14, 'deep-descendant-selector');
+  } else if (depth >= 2) {
+    addPenalty(0.05, 'descendant-selector');
+  }
+  if (selector.length >= 96) {
+    addPenalty(0.12, 'very-long-selector');
+  } else if (selector.length >= 56) {
+    addPenalty(0.06, 'long-selector');
+  }
+  if (category === 'structural') addPenalty(0.16, 'structural-selector');
+  if (category === 'parent-scoped' && depth >= 3) addPenalty(0.04, 'deep-parent-scope');
+  if (/\.(?:container|wrapper|row|item|content|layout|shell|panel|section|body|header|footer)\b/i.test(selector)) {
+    addPenalty(0.08, 'generic-shell-class');
+  }
+
+  return { penalty: Math.min(0.4, penalty), reasons };
+}
+
+function computeEvaluationFinalScore(params: {
+  baselineScore: number;
+  proofScore: number;
+  stabilityScore: number;
+  semanticScore: number;
+  brittlenessPenalty: number;
+  entropyPenalty: number;
+}): number {
+  return Math.max(0, Math.min(1.5, params.baselineScore));
+}
+
+function buildCandidateSelectorEvaluation(params: {
+  step: CodegenStep;
+  candidate: RawCandidate;
+  validation: CandidateValidation;
+  baselineScore: number;
+  snapshotTargetEvidence?: boolean;
+  semanticScore?: number;
+  semanticReasons?: string[];
+  semanticRejectReason?: string | null;
+  proofLevel?: 'snapshot_validated' | 'semantic_validated' | 'unvalidated';
+  proofSource?: 'snapshot' | 'semantic' | 'llm-validator' | 'none';
+  source?: 'resolver' | 'llm';
+  idEntropyScore?: number;
+  idPenaltyReason?: string[];
+  classEntropyScore?: number;
+  classPenaltyReason?: string[];
+  warningCodes?: string[];
+}): SelectorEvaluation {
+  const category = classifySelectorCategory(params.candidate.selector, params.source ?? params.candidate.source);
+  const proofLevel = params.proofLevel ?? (params.validation.effectiveMatchCount === 1 ? 'snapshot_validated' : 'unvalidated');
+  const selectorSpec = buildSelectorSpec({
+    selector: params.candidate.selector,
+    source: params.source ?? 'resolver',
+    proofLevel,
+    rank: params.candidate.rank,
+    confidence: params.validation.confidenceScore ?? params.baselineScore,
+    warningCodes: params.warningCodes,
+    rejectReason: params.semanticRejectReason ?? undefined,
+  });
+  const proofScore = proofScoreForValidation(params.validation);
+  const brittleness = computeBrittlenessPenalty(params.candidate.selector, category);
+  const entropyPenalty = Math.max(0, -(params.idEntropyScore ?? 0)) + Math.max(0, -(params.classEntropyScore ?? 0));
+  const stabilityScore = Math.max(0, Math.min(1, stabilityBaseScoreForCategory(category) - (brittleness.penalty * 0.45) - (entropyPenalty * 0.35)));
+  const semanticScore = Math.max(
+    0,
+    Math.min(
+      1,
+      params.semanticScore ??
+        Math.max(
+          params.validation.confidenceScore ?? 0,
+          params.validation.effectiveMatchCount === 1 ? 0.5 : 0.2,
+        ),
+    ),
+  );
+  const reasons = Array.from(new Set([
+    `category:${category}`,
+    `proof:${proofLevel}`,
+    ...(params.semanticReasons ?? []),
+    ...(params.idPenaltyReason ?? []).map(reason => `id:${reason}`),
+    ...(params.classPenaltyReason ?? []).map(reason => `class:${reason}`),
+    ...brittleness.reasons,
+  ]));
+
+  return summarizeSelectorEvaluation(selectorSpec, {
+    category,
+    validation: {
+      valid: params.validation.reason !== 'invalid-selector' && params.validation.visibleMatchCount > 0,
+      matchCount: params.validation.matchCount ?? params.validation.totalMatchCount,
+      visibleMatchCount: params.validation.visibleMatchCount,
+      uniqueVisible: params.validation.effectiveMatchCount === 1,
+      invalidReason: params.validation.reason === 'invalid-selector' ? 'invalid-selector' : undefined,
+    },
+    proofSource: params.proofSource ?? mapSelectorProofSource({ source: params.source ?? 'resolver', proofLevel }),
+    snapshotTargetEvidence: params.snapshotTargetEvidence,
+    proofScore,
+    stabilityScore,
+    semanticScore,
+    brittlenessPenalty: brittleness.penalty,
+    entropyPenalty,
+    finalScore: computeEvaluationFinalScore({
+      baselineScore: params.baselineScore,
+      proofScore,
+      stabilityScore,
+      semanticScore,
+      brittlenessPenalty: brittleness.penalty,
+      entropyPenalty,
+    }),
+    reasons,
+    warningCodes: params.warningCodes,
+    rejectReason: params.semanticRejectReason,
+  });
+}
+
+function computeBaselineCandidateScore(
   candidate: RawCandidate,
   validation: CandidateValidation,
   step: CodegenStep,
@@ -1186,8 +1353,55 @@ export function scoreCandidate(
   return Math.max(0, Math.min(1.5, score));
 }
 
+export function scoreCandidate(
+  candidate: RawCandidate,
+  validation: CandidateValidation,
+  step: CodegenStep,
+  snapshot?: Document,
+): number {
+  const baselineScore = computeBaselineCandidateScore(candidate, validation, step, snapshot);
+  const idEntropy = computeIdEntropy(step, candidate, validation, snapshot);
+  const classEntropy = computeClassEntropy(step, candidate, validation, snapshot);
+  const selectorEvaluation = buildCandidateSelectorEvaluation({
+    step,
+    candidate,
+    validation,
+    baselineScore,
+    snapshotTargetEvidence: true,
+    idEntropyScore: candidateUsesIdSelector(candidate) ? idEntropy.score : undefined,
+    idPenaltyReason: candidateUsesIdSelector(candidate) ? idEntropy.reasons : undefined,
+    classEntropyScore: candidateUsesClassSelector(candidate) ? classEntropy.score : undefined,
+    classPenaltyReason: candidateUsesClassSelector(candidate) ? classEntropy.reasons : undefined,
+  });
+
+  return selectorEvaluation.scoring.finalScore;
+}
+
 function compareCandidates(left: CandidateScore, right: CandidateScore): number {
+  const leftEvaluation = left.selectorEvaluation;
+  const rightEvaluation = right.selectorEvaluation;
+  if (
+    leftEvaluation &&
+    rightEvaluation &&
+    rightEvaluation.scoring.proofScore !== leftEvaluation.scoring.proofScore
+  ) {
+    return rightEvaluation.scoring.proofScore - leftEvaluation.scoring.proofScore;
+  }
   if (right.score !== left.score) return right.score - left.score;
+  if (
+    leftEvaluation &&
+    rightEvaluation &&
+    rightEvaluation.scoring.stabilityScore !== leftEvaluation.scoring.stabilityScore
+  ) {
+    return rightEvaluation.scoring.stabilityScore - leftEvaluation.scoring.stabilityScore;
+  }
+  if (
+    leftEvaluation &&
+    rightEvaluation &&
+    rightEvaluation.scoring.semanticScore !== leftEvaluation.scoring.semanticScore
+  ) {
+    return rightEvaluation.scoring.semanticScore - leftEvaluation.scoring.semanticScore;
+  }
   if (right.validation.effectiveMatchCount !== left.validation.effectiveMatchCount) {
     return right.validation.effectiveMatchCount - left.validation.effectiveMatchCount;
   }
@@ -1227,6 +1441,88 @@ function buildResolvedSelectorSpec(params: {
     confidence: params.confidence,
     rejectReason: params.rejectReason,
     warningCodes: params.warningCodes,
+  });
+}
+
+function buildResolutionSelectorEvaluation(params: {
+  step: CodegenStep;
+  selectorSpec: NonNullable<ReturnType<typeof buildResolvedSelectorSpec>>;
+  metadata: ResolverMetadata;
+  candidateEvaluation?: SelectorEvaluation;
+  snapshotTargetEvidence?: boolean;
+}): SelectorEvaluation {
+  if (params.candidateEvaluation) {
+    return summarizeSelectorEvaluation(
+      {
+        ...params.candidateEvaluation.selectorSpec,
+        selector: params.selectorSpec.selector,
+        engine: params.selectorSpec.engine,
+        source: params.selectorSpec.source,
+        proofLevel: params.selectorSpec.proofLevel,
+        rank: params.selectorSpec.rank,
+        confidence: params.selectorSpec.confidence,
+        rejectReason: params.selectorSpec.rejectReason,
+        warningCodes: params.selectorSpec.warningCodes,
+      },
+      {
+        category: params.candidateEvaluation.category,
+        validation: params.candidateEvaluation.validation,
+        proofSource: mapSelectorProofSource({
+          source: params.selectorSpec.source,
+          proofLevel: params.selectorSpec.proofLevel,
+        }),
+        snapshotTargetEvidence: params.snapshotTargetEvidence,
+        proofScore: params.candidateEvaluation.scoring.proofScore,
+        stabilityScore: params.candidateEvaluation.scoring.stabilityScore,
+        semanticScore: params.metadata.semanticCompatibilityScore ?? params.candidateEvaluation.scoring.semanticScore,
+        brittlenessPenalty: params.candidateEvaluation.scoring.brittlenessPenalty,
+        entropyPenalty: params.candidateEvaluation.scoring.entropyPenalty,
+        finalScore: params.metadata.bestScore || params.candidateEvaluation.scoring.finalScore,
+        reasons: params.candidateEvaluation.reasons,
+        warningCodes: params.metadata.warningCodes,
+        rejectReason: params.metadata.rejectReason,
+      },
+    );
+  }
+
+  const category = classifySelectorCategory(params.selectorSpec.selector, params.selectorSpec.source);
+  const proofSource = mapSelectorProofSource({
+    source: params.selectorSpec.source,
+    proofLevel: params.selectorSpec.proofLevel,
+  });
+  const fallbackValidation = {
+    valid: params.selectorSpec.proofLevel !== 'blocked' && params.selectorSpec.proofLevel !== 'unvalidated',
+    matchCount: params.metadata.matchCount,
+    visibleMatchCount: params.metadata.effectiveMatchCount,
+    uniqueVisible: params.metadata.effectiveMatchCount === 1,
+    invalidReason: params.metadata.rejectReason ?? undefined,
+  };
+  const proofScore =
+    params.selectorSpec.proofLevel === 'recorded'
+      ? 0.6
+      : params.selectorSpec.proofLevel === 'blocked' || params.selectorSpec.proofLevel === 'unvalidated'
+        ? 0
+        : 1;
+  const stabilityScore = stabilityBaseScoreForCategory(category);
+
+  return summarizeSelectorEvaluation(params.selectorSpec, {
+    category,
+    validation: fallbackValidation,
+    proofSource,
+    snapshotTargetEvidence: params.snapshotTargetEvidence,
+    proofScore,
+    stabilityScore,
+    semanticScore: params.metadata.semanticCompatibilityScore ?? (fallbackValidation.valid ? 0.5 : 0),
+    brittlenessPenalty: complexityPenalty(params.selectorSpec.selector) + volatilityPenalty(params.selectorSpec.selector),
+    entropyPenalty: Math.max(0, -(params.metadata.idEntropyScore ?? 0)) + Math.max(0, -(params.metadata.classEntropyScore ?? 0)),
+    finalScore: params.metadata.bestScore,
+    reasons: [
+      `category:${category}`,
+      `proof:${params.selectorSpec.proofLevel}`,
+      ...(params.metadata.semanticCompatibilityReasons ?? []),
+    ],
+    warningCodes: params.metadata.warningCodes,
+    rejectReason: params.metadata.rejectReason,
   });
 }
 
@@ -1284,42 +1580,62 @@ function deriveDeterministicResolution(
     if (!ctx.snapshotEngineAvailable) {
       baseMetadata.warningCodes.push('snapshot-engine-unavailable');
     }
+    const resolvedSelectorSpec = buildResolvedSelectorSpec({
+      step,
+      selector: step.selector,
+      source: 'resolver',
+      proofLevel: 'unvalidated',
+      rank: step.selectorRank,
+      confidence: 0,
+      warningCodes: baseMetadata.warningCodes,
+    });
+    const metadata: ResolverMetadata = {
+      ...baseMetadata,
+    };
+    metadata.selectorEvaluation = buildResolutionSelectorEvaluation({
+      step,
+      selectorSpec: resolvedSelectorSpec,
+      metadata,
+      snapshotTargetEvidence: snapshotSelection?.snapshotTargetEvidence,
+    });
     return {
       step,
       snapshot: null,
       selectorSpec: originalSelectorSpec,
-      resolvedSelectorSpec: buildResolvedSelectorSpec({
-        step,
-        selector: step.selector,
-        source: 'resolver',
-        proofLevel: 'unvalidated',
-        rank: step.selectorRank,
-        confidence: 0,
-        warningCodes: baseMetadata.warningCodes,
-      }),
+      resolvedSelectorSpec,
       resolvedSelector: step.selector,
-      metadata: baseMetadata,
+      metadata,
       llmEligible: false,
     };
   }
 
   if (!step.selector) {
     baseMetadata.warningCodes.push('missing-original-selector');
+    const resolvedSelectorSpec = buildResolvedSelectorSpec({
+      step,
+      selector: step.selector,
+      source: 'resolver',
+      proofLevel: 'unvalidated',
+      rank: step.selectorRank,
+      confidence: 0,
+      warningCodes: baseMetadata.warningCodes,
+    });
+    const metadata: ResolverMetadata = {
+      ...baseMetadata,
+    };
+    metadata.selectorEvaluation = buildResolutionSelectorEvaluation({
+      step,
+      selectorSpec: resolvedSelectorSpec,
+      metadata,
+      snapshotTargetEvidence: snapshotSelection?.snapshotTargetEvidence,
+    });
     return {
       step,
       snapshot,
       selectorSpec: originalSelectorSpec,
-      resolvedSelectorSpec: buildResolvedSelectorSpec({
-        step,
-        selector: step.selector,
-        source: 'resolver',
-        proofLevel: 'unvalidated',
-        rank: step.selectorRank,
-        confidence: 0,
-        warningCodes: baseMetadata.warningCodes,
-      }),
+      resolvedSelectorSpec,
       resolvedSelector: step.selector,
-      metadata: baseMetadata,
+      metadata,
       llmEligible: false,
     };
   }
@@ -1328,31 +1644,39 @@ function deriveDeterministicResolution(
   if (shouldTrustOriginalOnSnapshotMiss(step, originalValidation)) {
     const rank = getSelectorRank(step.selector, step.selectorPriority, step.selectorRank);
     const score = Math.max(rankScore(rank), 0.65);
+    const resolvedSelectorSpec = buildResolvedSelectorSpec({
+      step,
+      selector: step.selector,
+      source: 'interceptor',
+      proofLevel: 'recorded',
+      rank,
+      confidence: originalValidation.confidenceScore ?? score,
+      warningCodes: [...baseMetadata.warningCodes, 'trusted-original-snapshot-miss'],
+    });
+    const metadata: ResolverMetadata = {
+      ...baseMetadata,
+      resolvedSelector: step.selector,
+      resolvedBy: 'kept-original',
+      bestScore: score,
+      effectiveMatchCount: originalValidation.effectiveMatchCount,
+      matchCount: originalValidation.matchCount ?? originalValidation.visibleMatchCount,
+      confidenceScore: originalValidation.confidenceScore ?? score,
+      ambiguityReason: originalValidation.ambiguityReason ?? null,
+      warningCodes: [...baseMetadata.warningCodes, 'trusted-original-snapshot-miss'],
+    };
+    metadata.selectorEvaluation = buildResolutionSelectorEvaluation({
+      step,
+      selectorSpec: resolvedSelectorSpec,
+      metadata,
+      snapshotTargetEvidence: snapshotSelection?.snapshotTargetEvidence,
+    });
     return {
       step,
       snapshot,
       selectorSpec: originalSelectorSpec,
-      resolvedSelectorSpec: buildResolvedSelectorSpec({
-        step,
-        selector: step.selector,
-        source: 'interceptor',
-        proofLevel: 'recorded',
-        rank,
-        confidence: originalValidation.confidenceScore ?? score,
-        warningCodes: [...baseMetadata.warningCodes, 'trusted-original-snapshot-miss'],
-      }),
+      resolvedSelectorSpec,
       resolvedSelector: step.selector,
-      metadata: {
-        ...baseMetadata,
-        resolvedSelector: step.selector,
-        resolvedBy: 'kept-original',
-        bestScore: score,
-        effectiveMatchCount: originalValidation.effectiveMatchCount,
-        matchCount: originalValidation.matchCount ?? originalValidation.visibleMatchCount,
-        confidenceScore: originalValidation.confidenceScore ?? score,
-        ambiguityReason: originalValidation.ambiguityReason ?? null,
-        warningCodes: [...baseMetadata.warningCodes, 'trusted-original-snapshot-miss'],
-      },
+      metadata,
       llmEligible: false,
     };
   }
@@ -1360,29 +1684,37 @@ function deriveDeterministicResolution(
   if (shouldKeepOriginal(step, snapshot, config)) {
     const rank = getSelectorRank(step.selector, step.selectorPriority, step.selectorRank);
     const score = rankScore(rank) + 0.3;
+    const resolvedSelectorSpec = buildResolvedSelectorSpec({
+      step,
+      selector: step.selector,
+      source: 'interceptor',
+      proofLevel: 'snapshot_validated',
+      rank,
+      confidence: originalValidation.confidenceScore ?? score,
+    });
+    const metadata: ResolverMetadata = {
+      ...baseMetadata,
+      resolvedSelector: step.selector,
+      resolvedBy: 'kept-original',
+      bestScore: score,
+      effectiveMatchCount: originalValidation.effectiveMatchCount,
+      matchCount: originalValidation.matchCount ?? originalValidation.visibleMatchCount,
+      confidenceScore: originalValidation.confidenceScore ?? score,
+      ambiguityReason: originalValidation.ambiguityReason ?? null,
+    };
+    metadata.selectorEvaluation = buildResolutionSelectorEvaluation({
+      step,
+      selectorSpec: resolvedSelectorSpec,
+      metadata,
+      snapshotTargetEvidence: snapshotSelection?.snapshotTargetEvidence,
+    });
     return {
       step,
       snapshot,
       selectorSpec: originalSelectorSpec,
-      resolvedSelectorSpec: buildResolvedSelectorSpec({
-        step,
-        selector: step.selector,
-        source: 'interceptor',
-        proofLevel: 'snapshot_validated',
-        rank,
-        confidence: originalValidation.confidenceScore ?? score,
-      }),
+      resolvedSelectorSpec,
       resolvedSelector: step.selector,
-      metadata: {
-        ...baseMetadata,
-        resolvedSelector: step.selector,
-        resolvedBy: 'kept-original',
-        bestScore: score,
-        effectiveMatchCount: originalValidation.effectiveMatchCount,
-        matchCount: originalValidation.matchCount ?? originalValidation.visibleMatchCount,
-        confidenceScore: originalValidation.confidenceScore ?? score,
-        ambiguityReason: originalValidation.ambiguityReason ?? null,
-      },
+      metadata,
       llmEligible: false,
     };
   }
@@ -1391,35 +1723,43 @@ function deriveDeterministicResolution(
     snapshotSelection?.temporalClass !== 'outcome_state' &&
     snapshotSelection?.snapshotTargetEvidence === false
   ) {
+    const resolvedSelectorSpec = buildResolvedSelectorSpec({
+      step,
+      selector: step.selector,
+      source: 'resolver',
+      proofLevel: 'blocked',
+      rank: step.selectorRank,
+      confidence: originalValidation.confidenceScore ?? 0,
+      rejectReason: 'snapshot_target_missing',
+      warningCodes: [...baseMetadata.warningCodes, 'snapshot-target-missing'],
+    });
+    const metadata: ResolverMetadata = {
+      ...baseMetadata,
+      resolvedSelector: step.selector,
+      resolvedBy: 'blocked-snapshot-target-missing',
+      effectiveMatchCount: originalValidation.effectiveMatchCount,
+      matchCount: originalValidation.matchCount ?? originalValidation.visibleMatchCount,
+      confidenceScore: originalValidation.confidenceScore ?? 0,
+      ambiguityReason: originalValidation.ambiguityReason ?? null,
+      rejectReason: 'snapshot_target_missing',
+      semanticRejectReason: 'snapshot_target_missing',
+      semanticCompatibilityScore: 0,
+      semanticCompatibilityReasons: ['snapshot_target_missing'],
+      warningCodes: [...baseMetadata.warningCodes, 'snapshot-target-missing'],
+    };
+    metadata.selectorEvaluation = buildResolutionSelectorEvaluation({
+      step,
+      selectorSpec: resolvedSelectorSpec,
+      metadata,
+      snapshotTargetEvidence: snapshotSelection?.snapshotTargetEvidence,
+    });
     return {
       step,
       snapshot,
       selectorSpec: originalSelectorSpec,
-      resolvedSelectorSpec: buildResolvedSelectorSpec({
-        step,
-        selector: step.selector,
-        source: 'resolver',
-        proofLevel: 'blocked',
-        rank: step.selectorRank,
-        confidence: originalValidation.confidenceScore ?? 0,
-        rejectReason: 'snapshot_target_missing',
-        warningCodes: [...baseMetadata.warningCodes, 'snapshot-target-missing'],
-      }),
+      resolvedSelectorSpec,
       resolvedSelector: step.selector,
-      metadata: {
-        ...baseMetadata,
-        resolvedSelector: step.selector,
-        resolvedBy: 'blocked-snapshot-target-missing',
-        effectiveMatchCount: originalValidation.effectiveMatchCount,
-        matchCount: originalValidation.matchCount ?? originalValidation.visibleMatchCount,
-        confidenceScore: originalValidation.confidenceScore ?? 0,
-        ambiguityReason: originalValidation.ambiguityReason ?? null,
-        rejectReason: 'snapshot_target_missing',
-        semanticRejectReason: 'snapshot_target_missing',
-        semanticCompatibilityScore: 0,
-        semanticCompatibilityReasons: ['snapshot_target_missing'],
-        warningCodes: [...baseMetadata.warningCodes, 'snapshot-target-missing'],
-      },
+      metadata,
       llmEligible: false,
     };
   }
@@ -1430,10 +1770,23 @@ function deriveDeterministicResolution(
     const usesId = candidateUsesIdSelector(candidate);
     const classEntropy = computeClassEntropy(step, candidate, validation, snapshot);
     const usesClass = candidateUsesClassSelector(candidate);
+    const baselineScore = computeBaselineCandidateScore(candidate, validation, step, snapshot);
+    const selectorEvaluation = buildCandidateSelectorEvaluation({
+      step,
+      candidate,
+      validation,
+      baselineScore,
+      snapshotTargetEvidence: snapshotSelection?.snapshotTargetEvidence,
+      idEntropyScore: usesId ? idEntropy.score : undefined,
+      idPenaltyReason: usesId ? idEntropy.reasons : undefined,
+      classEntropyScore: usesClass ? classEntropy.score : undefined,
+      classPenaltyReason: usesClass ? classEntropy.reasons : undefined,
+    });
     return {
       candidate,
       validation,
-      score: scoreCandidate(candidate, validation, step, snapshot),
+      score: selectorEvaluation.scoring.finalScore,
+      selectorEvaluation,
       idEntropyScore: usesId ? idEntropy.score : undefined,
       idPenaltyReason: usesId ? idEntropy.reasons : undefined,
       classEntropyScore: usesClass ? classEntropy.score : undefined,
@@ -1445,10 +1798,30 @@ function deriveDeterministicResolution(
     .filter(candidate => candidate.validation.effectiveMatchCount === 1)
     .sort(compareCandidates);
 
-  const semanticEvaluations = uniqueCandidates.map(candidate => ({
-    candidate,
-    semantic: evaluateSemanticReject(step, candidate, snapshot),
-  }));
+  const semanticEvaluations = uniqueCandidates.map(candidate => {
+    const semantic = evaluateSemanticReject(step, candidate, snapshot);
+    return {
+      candidate,
+      semantic,
+      selectorEvaluation: buildCandidateSelectorEvaluation({
+        step,
+        candidate: candidate.candidate,
+        validation: candidate.validation,
+        baselineScore: candidate.score,
+        snapshotTargetEvidence: snapshotSelection?.snapshotTargetEvidence,
+        semanticScore: semantic.score,
+        semanticReasons: semantic.reasons,
+        semanticRejectReason: semantic.rejectReason,
+        proofLevel: semantic.rejectReason === null ? 'semantic_validated' : 'unvalidated',
+        proofSource: semantic.rejectReason === null ? 'semantic' : 'none',
+        idEntropyScore: candidate.idEntropyScore,
+        idPenaltyReason: candidate.idPenaltyReason,
+        classEntropyScore: candidate.classEntropyScore,
+        classPenaltyReason: candidate.classPenaltyReason,
+        warningCodes: candidate.selectorEvaluation?.warningCodes,
+      }),
+    };
+  });
 
   const rejectedCandidates = semanticEvaluations
     .filter(evaluation => evaluation.semantic.rejectReason !== null)
@@ -1481,30 +1854,39 @@ function deriveDeterministicResolution(
   const hadRejectedLowScoreFallback = lowScoreFallbackCandidates.length > 0 && !lowScoreFallback;
 
   if (winner && shouldBlockGenericShellOverride(step.selector, winner.candidate.candidate.selector)) {
+    const resolvedSelectorSpec = buildResolvedSelectorSpec({
+      step,
+      selector: step.selector,
+      source: 'resolver',
+      proofLevel: 'unvalidated',
+      rank: step.selectorRank,
+      confidence: originalValidation.confidenceScore ?? 0,
+      warningCodes: [...baseMetadata.warningCodes, 'blocked-generic-shell-override'],
+    });
+    const metadata: ResolverMetadata = {
+      ...baseMetadata,
+      resolvedSelector: step.selector,
+      effectiveMatchCount: originalValidation.effectiveMatchCount,
+      matchCount: originalValidation.matchCount ?? originalValidation.visibleMatchCount,
+      confidenceScore: originalValidation.confidenceScore ?? 0,
+      ambiguityReason: originalValidation.ambiguityReason ?? null,
+      warningCodes: [...baseMetadata.warningCodes, 'blocked-generic-shell-override'],
+    };
+    metadata.selectorEvaluation = buildResolutionSelectorEvaluation({
+      step,
+      selectorSpec: resolvedSelectorSpec,
+      metadata,
+      candidateEvaluation: winner.selectorEvaluation,
+      snapshotTargetEvidence: snapshotSelection?.snapshotTargetEvidence,
+    });
     return {
       step,
       snapshot,
       selectorSpec: originalSelectorSpec,
       resolvedSelector: step.selector,
-      metadata: {
-        ...baseMetadata,
-        resolvedSelector: step.selector,
-        effectiveMatchCount: originalValidation.effectiveMatchCount,
-        matchCount: originalValidation.matchCount ?? originalValidation.visibleMatchCount,
-        confidenceScore: originalValidation.confidenceScore ?? 0,
-        ambiguityReason: originalValidation.ambiguityReason ?? null,
-        warningCodes: [...baseMetadata.warningCodes, 'blocked-generic-shell-override'],
-      },
+      metadata,
       llmEligible: true,
-      resolvedSelectorSpec: buildResolvedSelectorSpec({
-        step,
-        selector: step.selector,
-        source: 'resolver',
-        proofLevel: 'unvalidated',
-        rank: step.selectorRank,
-        confidence: originalValidation.confidenceScore ?? 0,
-        warningCodes: [...baseMetadata.warningCodes, 'blocked-generic-shell-override'],
-      }),
+      resolvedSelectorSpec,
       lowScoreFallback,
     };
   }
@@ -1544,81 +1926,99 @@ function deriveDeterministicResolution(
     if (originalValidation.reason === 'invalid-selector') {
       baseMetadata.warningCodes.push('invalid-original-selector');
     }
+    const resolvedSelectorSpec = buildResolvedSelectorSpec({
+      step,
+      selector: step.selector,
+      source: 'resolver',
+      proofLevel: baseMetadata.resolvedBy === 'blocked-semantic-mismatch' ? 'blocked' : 'unvalidated',
+      rank: step.selectorRank,
+      confidence: originalValidation.confidenceScore ?? 0,
+      rejectReason: baseMetadata.rejectReason,
+      warningCodes: baseMetadata.warningCodes,
+    });
+    const metadata: ResolverMetadata = {
+      ...baseMetadata,
+      effectiveMatchCount: originalValidation.effectiveMatchCount,
+      matchCount: originalValidation.matchCount ?? originalValidation.visibleMatchCount,
+      confidenceScore: originalValidation.confidenceScore ?? 0,
+      ambiguityReason: originalValidation.ambiguityReason ?? null,
+      rejectedCandidates: baseMetadata.rejectedCandidates,
+      semanticCompatibilityScore: baseMetadata.semanticCompatibilityScore,
+      semanticCompatibilityReasons: baseMetadata.semanticCompatibilityReasons,
+      semanticRejectReason: baseMetadata.semanticRejectReason,
+      idEntropyScore: baseMetadata.idEntropyScore,
+      idPenaltyReason: baseMetadata.idPenaltyReason,
+      classEntropyScore: baseMetadata.classEntropyScore,
+      classPenaltyReason: baseMetadata.classPenaltyReason,
+    };
+    metadata.selectorEvaluation = buildResolutionSelectorEvaluation({
+      step,
+      selectorSpec: resolvedSelectorSpec,
+      metadata,
+      candidateEvaluation: bestAvailableCandidate?.selectorEvaluation,
+      snapshotTargetEvidence: snapshotSelection?.snapshotTargetEvidence,
+    });
     return {
       step,
       snapshot,
       selectorSpec: originalSelectorSpec,
-      resolvedSelectorSpec: buildResolvedSelectorSpec({
-        step,
-        selector: step.selector,
-        source: 'resolver',
-        proofLevel: baseMetadata.resolvedBy === 'blocked-semantic-mismatch' ? 'blocked' : 'unvalidated',
-        rank: step.selectorRank,
-        confidence: originalValidation.confidenceScore ?? 0,
-        rejectReason: baseMetadata.rejectReason,
-        warningCodes: baseMetadata.warningCodes,
-      }),
+      resolvedSelectorSpec,
       resolvedSelector: step.selector,
-      metadata: {
-        ...baseMetadata,
-        effectiveMatchCount: originalValidation.effectiveMatchCount,
-        matchCount: originalValidation.matchCount ?? originalValidation.visibleMatchCount,
-        confidenceScore: originalValidation.confidenceScore ?? 0,
-        ambiguityReason: originalValidation.ambiguityReason ?? null,
-        rejectedCandidates: baseMetadata.rejectedCandidates,
-        semanticCompatibilityScore: baseMetadata.semanticCompatibilityScore,
-        semanticCompatibilityReasons: baseMetadata.semanticCompatibilityReasons,
-        semanticRejectReason: baseMetadata.semanticRejectReason,
-        idEntropyScore: baseMetadata.idEntropyScore,
-        idPenaltyReason: baseMetadata.idPenaltyReason,
-        classEntropyScore: baseMetadata.classEntropyScore,
-        classPenaltyReason: baseMetadata.classPenaltyReason,
-      },
+      metadata,
       llmEligible: true,
       lowScoreFallback,
     };
   }
 
+  const resolvedSelectorSpec = buildResolvedSelectorSpec({
+    step,
+    selector: winner.candidate.candidate.selector,
+    source: 'resolver',
+    proofLevel: 'semantic_validated',
+    rank: winner.candidate.candidate.rank,
+    confidence: winner.candidate.validation.confidenceScore ?? winner.candidate.score,
+    warningCodes: [
+      ...baseMetadata.warningCodes,
+      'deterministic-override',
+      ...(winner.candidate.validation.ambiguityReason ? ['deterministic-dom-order-tiebreaker'] : []),
+    ],
+  });
+  const metadata: ResolverMetadata = {
+    ...baseMetadata,
+    resolvedSelector: winner.candidate.candidate.selector,
+    resolvedBy: 'deterministic-override',
+    bestScore: winner.candidate.score,
+    effectiveMatchCount: winner.candidate.validation.effectiveMatchCount,
+    matchCount: winner.candidate.validation.matchCount ?? winner.candidate.validation.visibleMatchCount,
+    confidenceScore: winner.candidate.validation.confidenceScore ?? winner.candidate.score,
+    ambiguityReason: winner.candidate.validation.ambiguityReason ?? null,
+    semanticCompatibilityScore: winner.semantic.score,
+    semanticCompatibilityReasons: winner.semantic.reasons,
+    idEntropyScore: winner.candidate.idEntropyScore,
+    idPenaltyReason: winner.candidate.idPenaltyReason,
+    classEntropyScore: winner.candidate.classEntropyScore,
+    classPenaltyReason: winner.candidate.classPenaltyReason,
+    rejectedCandidates: rejectedCandidates.length > 0 ? rejectedCandidates : undefined,
+    warningCodes: [
+      ...baseMetadata.warningCodes,
+      'deterministic-override',
+      ...(winner.candidate.validation.ambiguityReason ? ['deterministic-dom-order-tiebreaker'] : []),
+    ],
+  };
+  metadata.selectorEvaluation = buildResolutionSelectorEvaluation({
+    step,
+    selectorSpec: resolvedSelectorSpec,
+    metadata,
+    candidateEvaluation: winner.selectorEvaluation,
+    snapshotTargetEvidence: snapshotSelection?.snapshotTargetEvidence,
+  });
   return {
     step,
     snapshot,
     selectorSpec: originalSelectorSpec,
-    resolvedSelectorSpec: buildResolvedSelectorSpec({
-      step,
-      selector: winner.candidate.candidate.selector,
-      source: 'resolver',
-      proofLevel: 'semantic_validated',
-      rank: winner.candidate.candidate.rank,
-      confidence: winner.candidate.validation.confidenceScore ?? winner.candidate.score,
-      warningCodes: [
-        ...baseMetadata.warningCodes,
-        'deterministic-override',
-        ...(winner.candidate.validation.ambiguityReason ? ['deterministic-dom-order-tiebreaker'] : []),
-      ],
-    }),
+    resolvedSelectorSpec,
     resolvedSelector: winner.candidate.candidate.selector,
-    metadata: {
-      ...baseMetadata,
-      resolvedSelector: winner.candidate.candidate.selector,
-      resolvedBy: 'deterministic-override',
-      bestScore: winner.candidate.score,
-      effectiveMatchCount: winner.candidate.validation.effectiveMatchCount,
-      matchCount: winner.candidate.validation.matchCount ?? winner.candidate.validation.visibleMatchCount,
-      confidenceScore: winner.candidate.validation.confidenceScore ?? winner.candidate.score,
-      ambiguityReason: winner.candidate.validation.ambiguityReason ?? null,
-      semanticCompatibilityScore: winner.semantic.score,
-      semanticCompatibilityReasons: winner.semantic.reasons,
-      idEntropyScore: winner.candidate.idEntropyScore,
-      idPenaltyReason: winner.candidate.idPenaltyReason,
-      classEntropyScore: winner.candidate.classEntropyScore,
-      classPenaltyReason: winner.candidate.classPenaltyReason,
-      rejectedCandidates: rejectedCandidates.length > 0 ? rejectedCandidates : undefined,
-      warningCodes: [
-        ...baseMetadata.warningCodes,
-        'deterministic-override',
-        ...(winner.candidate.validation.ambiguityReason ? ['deterministic-dom-order-tiebreaker'] : []),
-      ],
-    },
+    metadata,
     llmEligible: false,
   };
 }
@@ -1885,6 +2285,7 @@ type LlmCandidateValidationResult = {
   rejectReason: string | null;
   warningCode: string | null;
   validation: CandidateValidation | null;
+  selectorEvaluation?: SelectorEvaluation;
 };
 
 function validateLlmCandidateSelector(
@@ -1953,11 +2354,33 @@ function validateLlmCandidateSelector(
     }
   }
 
+  const selectorEvaluation = validation
+    ? buildCandidateSelectorEvaluation({
+        step: draft.step,
+        candidate: {
+          selector,
+          source: 'other',
+          rank: 10,
+        },
+        validation,
+        baselineScore: 0.6,
+        snapshotTargetEvidence: draft.metadata.snapshotTargetEvidence,
+        semanticScore: rejectReason ? 0 : 0.75,
+        semanticReasons: rejectReason ? [rejectReason] : ['llm-validated'],
+        semanticRejectReason: rejectReason,
+        proofLevel: rejectReason ? 'unvalidated' : 'semantic_validated',
+        proofSource: rejectReason ? 'none' : 'llm-validator',
+        source: 'llm',
+        warningCodes: warningCode ? [warningCode] : [],
+      })
+    : undefined;
+
   return {
     accepted: rejectReason === null,
     rejectReason,
     warningCode,
     validation,
+    selectorEvaluation,
   };
 }
 
@@ -1994,7 +2417,7 @@ function applyLowScoreFallback(draft: StepResolutionDraft): void {
     rank: draft.lowScoreFallback.candidate.rank,
     confidence: draft.lowScoreFallback.validation.confidenceScore ?? draft.lowScoreFallback.score,
   });
-  draft.metadata = {
+  const nextMetadata: ResolverMetadata = {
     ...draft.metadata,
     resolvedSelector: draft.lowScoreFallback.candidate.selector,
     resolvedBy: 'deterministic-override',
@@ -2009,7 +2432,15 @@ function applyLowScoreFallback(draft: StepResolutionDraft): void {
     classPenaltyReason: draft.lowScoreFallback.classPenaltyReason,
     llmAccepted: false,
   };
-  pushWarningCode(draft.metadata, 'deterministic-low-score-fallback');
+  pushWarningCode(nextMetadata, 'deterministic-low-score-fallback');
+  nextMetadata.selectorEvaluation = buildResolutionSelectorEvaluation({
+    step: draft.step,
+    selectorSpec: draft.resolvedSelectorSpec,
+    metadata: nextMetadata,
+    candidateEvaluation: draft.lowScoreFallback.selectorEvaluation,
+    snapshotTargetEvidence: draft.metadata.snapshotTargetEvidence,
+  });
+  draft.metadata = nextMetadata;
 }
 
 export async function resolveSelectorsForSession(
@@ -2189,7 +2620,7 @@ export async function resolveSelectorsForSession(
             proofLevel: 'semantic_validated',
             confidence: validation?.confidenceScore ?? 0.95,
           });
-          target.metadata = {
+          const nextMetadata: ResolverMetadata = {
             ...target.metadata,
             resolvedSelector: selector,
             resolvedBy: 'llm-accepted',
@@ -2204,6 +2635,14 @@ export async function resolveSelectorsForSession(
             rejectReason: null,
             semanticRejectReason: null,
           };
+          nextMetadata.selectorEvaluation = buildResolutionSelectorEvaluation({
+            step: target.step,
+            selectorSpec: target.resolvedSelectorSpec,
+            metadata: nextMetadata,
+            candidateEvaluation: candidateResult.selectorEvaluation,
+            snapshotTargetEvidence: target.metadata.snapshotTargetEvidence,
+          });
+          target.metadata = nextMetadata;
           llmAcceptedStepNumbers.push(target.step.step);
           accepted = true;
           break;
@@ -2317,7 +2756,7 @@ export async function resolveSelectorsForSession(
               proofLevel: 'semantic_validated',
               confidence: retryResult.validation?.confidenceScore ?? 0.95,
             });
-            target.metadata = {
+            const nextMetadata: ResolverMetadata = {
               ...target.metadata,
               resolvedSelector: retrySuggestion.selector,
               resolvedBy: 'llm-accepted',
@@ -2335,6 +2774,14 @@ export async function resolveSelectorsForSession(
               rejectReason: null,
               semanticRejectReason: null,
             };
+            nextMetadata.selectorEvaluation = buildResolutionSelectorEvaluation({
+              step: target.step,
+              selectorSpec: target.resolvedSelectorSpec,
+              metadata: nextMetadata,
+              candidateEvaluation: retryResult.selectorEvaluation,
+              snapshotTargetEvidence: target.metadata.snapshotTargetEvidence,
+            });
+            target.metadata = nextMetadata;
             pushWarningCode(target.metadata, 'llm-retry-accepted');
             llmAcceptedStepNumbers.push(target.step.step);
           }

@@ -1,5 +1,6 @@
 import * as path from 'path';
 import { runSmokeBaseline } from '../src/smoke/smoke-runner';
+import { main as runSmokeSummaryCli } from './air-smoke-summary';
 
 interface ParsedArgs {
   specFile?: string;
@@ -16,6 +17,7 @@ function printUsage(): void {
       'Usage:',
       '  npx air smoke --spec <spec.ts> [--sidecar <file.air.json>] [--generated <page.ts>] [--out <report.json>]',
       '  npx air-smoke --spec <spec.ts> [--sidecar <file.air.json>] [--generated <page.ts>] [--out <report.json>]',
+      '  npx air smoke summary [--dir <.air/smoke>] [--report <smoke-report.json> ...] [--out <summary.json>] [--session-map <.air/session-map.json>]',
     ].join('\n'),
   );
 }
@@ -57,7 +59,14 @@ function parseArgs(argv: string[]): ParsedArgs {
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  if (argv[0] === 'summary') {
+    await runSmokeSummaryCli(argv.slice(1));
+    process.exit(0);
+    return;
+  }
+
+  const args = parseArgs(argv);
   if (!args.specFile) {
     printUsage();
     process.exit(1);

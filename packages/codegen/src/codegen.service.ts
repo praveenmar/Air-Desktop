@@ -1378,6 +1378,10 @@ export class CodegenService {
         });
       };
 
+      // Current inventory contract is intentionally HTML/provenance/control-signature centered.
+      // Rich snapshot metadata such as compositeAnchors, captured metrics, and snapshotBuildId
+      // is proven earlier in capture/schema tests but is not reconstructed here until a concrete
+      // downstream consumer exists.
       const inventory: SnapshotInventory = {
         snapshotEngineAvailable,
         hardBoundaries,

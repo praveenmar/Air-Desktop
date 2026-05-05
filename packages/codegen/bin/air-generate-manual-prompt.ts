@@ -8,6 +8,8 @@ import {
   resolveSelectorsForSession,
   type ResolverConfig,
   type LlmFallbackRequest,
+  type SelectorFallbackProvider,
+  type SelectorFallbackRequest,
   type LlmFallbackSuggestion,
 } from '../src/selector-resolver';
 
@@ -244,9 +246,11 @@ async function main() {
 
     const snapshotCache = await service.loadSnapshots(session, resolverConfig);
     let capturedFallbackRequest: LlmFallbackRequest | null = null;
-    const llmProvider = effectiveEnableLlmFallback
-      ? async (request: LlmFallbackRequest): Promise<LlmFallbackSuggestion[]> => {
-          capturedFallbackRequest = request;
+    const llmProvider: SelectorFallbackProvider | undefined = effectiveEnableLlmFallback
+      ? async (request: SelectorFallbackRequest): Promise<LlmFallbackSuggestion[]> => {
+          if (request.mode === 'initial') {
+            capturedFallbackRequest = request;
+          }
           if (selectorSuggestions && selectorSuggestions.length > 0) {
             return selectorSuggestions;
           }

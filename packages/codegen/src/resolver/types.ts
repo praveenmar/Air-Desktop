@@ -5,6 +5,7 @@ import type {
   LlmResponseFormat,
   ResolverMetadata,
   ResolverSnapshotSource,
+  SelectorEvaluation,
   SelectorSpec,
   SelectorPriority,
 } from '../types';
@@ -70,8 +71,11 @@ export interface RawCandidate {
     | 'id'
     | 'name'
     | 'testid'
+    | 'data-cy'
+    | 'data-qa'
     | 'aria'
     | 'placeholder'
+    | 'href'
     | 'role+name'
     | 'class'
     | 'text'
@@ -86,6 +90,7 @@ export interface CandidateScore {
   candidate: RawCandidate;
   validation: CandidateValidation;
   score: number;
+  selectorEvaluation?: SelectorEvaluation;
   idEntropyScore?: number;
   idPenaltyReason?: string[];
   classEntropyScore?: number;

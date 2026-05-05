@@ -180,6 +180,42 @@ describe('snapshot-selector IC policy', () => {
     expect(result.provenance.snapshotTargetEvidenceReason).toBe('target_missing_in_snapshot');
   });
 
+  it('treats closed shadow hosts as intentional degraded target-missing fallbacks', () => {
+    const doc = makeDocument({
+      '[name="email"]': [],
+      '*': [makeElement({}, 'Profile')],
+    });
+    const inventory = emptyInventory();
+    inventory.eventLocalByEventId.set('ev-1', {
+      pageState: handle('event-local-pageState', 'action_local', doc, {
+        eventId: 'ev-1',
+        timestamp: 1000,
+        tabId: 'tab-1',
+      }),
+    });
+
+    const result = selectSnapshotForStep(
+      baseStep({
+        nestedContext: {
+          isShadowDom: true,
+          isIframe: true,
+          degradedReason: 'probable_closed_shadow_host',
+        },
+      }),
+      inventory,
+      'action',
+    );
+
+    expect(result.provenance.source).toBe('event-local-pageState');
+    expect(result.provenance.snapshotTargetEvidence).toBe(false);
+    expect(result.provenance.snapshotTargetEvidenceReason).toBe('closed_shadow_dom_unobservable');
+    expect(result.evaluatedCandidates[0]).toEqual(expect.objectContaining({
+      selected: true,
+      shadowDegraded: true,
+      skipReason: 'closed_shadow_dom_unobservable',
+    }));
+  });
+
   it('skips exact IC when controlSignature is missing and downgrades stable-by-url fallback', () => {
     const doc = makeDocument({
       '[name="email"]': [makeElement({ name: 'email' }, 'Email')],

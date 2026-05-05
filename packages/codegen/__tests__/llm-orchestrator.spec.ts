@@ -837,6 +837,18 @@ describe('LlmOrchestrator - sidecar resolver metadata', () => {
       ],
       llmResponseFormat: 'candidates-v2',
       resolvedBy: 'llm-accepted',
+      selectorEvaluation: expect.objectContaining({
+        category: 'aria-label',
+        proof: expect.objectContaining({
+          proofLevel: 'semantic_validated',
+          proofSource: 'llm-validator',
+        }),
+        scoring: expect.objectContaining({
+          finalScore: expect.any(Number),
+          stabilityScore: expect.any(Number),
+          semanticScore: expect.any(Number),
+        }),
+      }),
     }));
     expect(sidecar.methods.clickSubmit.originalSelector).toBe('button');
     expect(sidecar.methods.clickSubmit.selectorUsed).toBe('button[aria-label="submit"]');
@@ -966,6 +978,13 @@ describe('LlmOrchestrator - sidecar resolver metadata', () => {
       llmRetryTimeoutMs: 10000,
       llmRetryStatus: 'accepted',
       resolvedBy: 'llm-accepted',
+      selectorEvaluation: expect.objectContaining({
+        category: 'name',
+        proof: expect.objectContaining({
+          proofLevel: 'semantic_validated',
+          proofSource: 'llm-validator',
+        }),
+      }),
     }));
     expect(sidecar.methods.fillUsername.resolvedSelectorSpec).toEqual(expect.objectContaining({
       selector: 'input[name="username"]',

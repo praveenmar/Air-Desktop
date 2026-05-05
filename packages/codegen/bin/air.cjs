@@ -5,6 +5,7 @@
  *   npx air generate [args]
  *   npx air trace [args]
  *   npx air smoke [args]
+ *   npx air smoke summary [args]
  */
 
 const path = require('path');
@@ -28,6 +29,7 @@ if (!command || command === '--help' || command === '-h') {
       '  npx air generate <sessionId>',
       '  npx air trace [sessionId] [--list] [--json|--csv] [--out <path>] [--db <path>]',
       '  npx air smoke --spec <spec.ts> [--sidecar <file.air.json>] [--generated <page.ts>] [--out <report.json>]',
+      '  npx air smoke summary [--dir <.air/smoke>] [--report <smoke-report.json> ...] [--out <summary.json>] [--session-map <.air/session-map.json>]',
     ].join('\n')
   );
   process.exit(0);

@@ -44,7 +44,10 @@ export type {
   SnapshotSelectionProvenance,
   SnapshotCandidateTraceEntry,
   SelectorEngine,
+  SelectorCategory,
+  SelectorEvaluation,
   SelectorSource,
+  SelectorProofSource,
   SelectorProofLevel,
   SelectorSpec,
 } from './types';

@@ -87,6 +87,62 @@ export interface SelectorSpec {
   warningCodes?: string[];
 }
 
+export type SelectorCategory =
+  | 'testid'
+  | 'data-cy'
+  | 'data-qa'
+  | 'id'
+  | 'name'
+  | 'href'
+  | 'placeholder'
+  | 'aria-label'
+  | 'role-attr'
+  | 'text'
+  | 'class'
+  | 'semantic-css'
+  | 'parent-scoped'
+  | 'structural'
+  | 'xpath'
+  | 'llm'
+  | 'unknown';
+
+export type SelectorProofSource =
+  | 'snapshot'
+  | 'fingerprint'
+  | 'semantic'
+  | 'llm-validator'
+  | 'recorded'
+  | 'smoke'
+  | 'none';
+
+export interface SelectorEvaluation {
+  selectorSpec: SelectorSpec;
+  category: SelectorCategory;
+  validation: {
+    valid: boolean;
+    matchCount?: number;
+    visibleMatchCount?: number;
+    uniqueVisible?: boolean;
+    invalidReason?: string;
+  };
+  proof: {
+    proofLevel: SelectorProofLevel;
+    proofSource: SelectorProofSource;
+    snapshotTargetEvidence?: boolean;
+  };
+  scoring: {
+    proofScore: number;
+    stabilityScore: number;
+    semanticScore: number;
+    brittlenessPenalty: number;
+    entropyPenalty: number;
+    finalScore: number;
+  };
+  reasons: string[];
+  warningCodes: string[];
+  rejectReason?: string;
+}
+
 export type ResolverResolvedBy =
   | 'kept-original'
   | 'deterministic-override'
@@ -210,6 +266,7 @@ export interface ResolverMetadata {
   idPenaltyReason?: string[];
   classEntropyScore?: number;
   classPenaltyReason?: string[];
+  selectorEvaluation?: SelectorEvaluation;
   warningCodes: string[];
   resolverVersion: 1;
   temporalClass?: TemporalClass;
