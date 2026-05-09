@@ -269,7 +269,8 @@ export function findSeedElements(step: CodegenStep, snapshot: Document): Element
     const tokenScore = tokenMatchScore(element);
     const interactiveBonus = elementLooksInteractive(element) ? 0.2 : 0;
     const inputBonus = step.action === 'input' && elementLooksInputLike(element) ? 0.3 : 0;
-    const selectBonus = step.action === 'custom-select' && elementLooksInteractive(element) ? 0.15 : 0;
+    const selectBonus = (step.action === 'custom-select' || step.action === 'custom-menu-select')
+      && elementLooksInteractive(element) ? 0.15 : 0;
     const attrsBonus = attributeSignalScore(element);
     return (tokenScore * 0.5) + (intentScore * 0.35) + interactiveBonus + inputBonus + selectBonus + attrsBonus;
   };
@@ -500,7 +501,9 @@ export type IntentActionHint =
   | 'click'
   | 'input'
   | 'submit'
+  | 'custom-control-open'
   | 'custom-select'
+  | 'custom-menu-select'
   | 'hover'
   | 'scroll'
   | 'navigate'
@@ -551,6 +554,8 @@ const INTENT_STOP_TOKENS = new Set([
 
 function inferActionHint(step: CodegenStep, tokens: string[]): IntentActionHint {
   if (step.action) return step.action;
+  if (tokens.includes('custom') && tokens.includes('control') && tokens.includes('open')) return 'custom-control-open';
+  if (tokens.includes('custom') && tokens.includes('menu') && tokens.includes('select')) return 'custom-menu-select';
   if (tokens.includes('custom') && tokens.includes('select')) return 'custom-select';
   if (tokens.includes('submit')) return 'submit';
   if (tokens.includes('hover')) return 'hover';
@@ -571,7 +576,10 @@ function actionTagHints(actionHint: IntentActionHint, calendarMode = false): Set
       return new Set(['input', 'textarea', 'select']);
     case 'submit':
       return new Set(['button', 'input']);
+    case 'custom-control-open':
+      return new Set(['button', 'a', 'label', 'input', 'summary', 'div']);
     case 'custom-select':
+    case 'custom-menu-select':
       return new Set(['select', 'option', 'input', 'button', 'a']);
     case 'hover':
       return new Set(['button', 'a', 'label', 'div', 'li']);
@@ -636,7 +644,13 @@ function computeRoleScore(actionHint: IntentActionHint, role: string, tagName: s
     return 0.2;
   }
 
-  if (actionHint === 'custom-select') {
+  if (actionHint === 'custom-control-open') {
+    if (['button', 'combobox'].includes(roleLower)) return 1;
+    if (['button', 'input', 'a', 'div'].includes(tagLower)) return 0.9;
+    return 0.3;
+  }
+
+  if (actionHint === 'custom-select' || actionHint === 'custom-menu-select') {
     if (['option', 'listbox', 'combobox', 'menuitem'].includes(roleLower)) return 1;
     if (['select', 'option', 'input', 'button', 'a'].includes(tagLower)) return 0.9;
     return 0.3;
@@ -799,7 +813,11 @@ export function isLowScoreFallbackCandidateSafe(
     return interactive;
   }
 
-  if (step.action === 'custom-select') {
+  if (step.action === 'custom-control-open') {
+    return interactive && intentScore >= config.intentMinScore;
+  }
+
+  if (step.action === 'custom-select' || step.action === 'custom-menu-select') {
     return interactive || intentScore >= config.intentMinScore;
   }
 

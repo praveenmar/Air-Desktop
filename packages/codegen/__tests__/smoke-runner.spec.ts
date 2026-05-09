@@ -113,6 +113,41 @@ function makeSidecar(sessionId = 'session-demo') {
         emittedLocatorWarnings: [],
         usedSelectorSpec: true,
       },
+      clickEquivalent: {
+        step: 10,
+        intent: 'click_equivalent',
+        checksum: 'equivalent-checksum',
+        originalSelector: '[data-testid="save-primary"]',
+        selectorUsed: '[data-testid="save-primary"]',
+        resolvedSelectorSpec: {
+          selector: '[data-testid="save-primary"]',
+          engine: 'css',
+          source: 'resolver',
+          proofLevel: 'semantic_validated',
+        },
+        emittedLocator: 'getByTestId("save-primary")',
+        emittedLocatorEngine: 'testid',
+        emittedLocatorProofLevel: 'proven_equivalent',
+        emittedLocatorSource: 'resolver',
+        emittedLocatorWarnings: [],
+        usedSelectorSpec: true,
+        equivalentRenderingUsed: true,
+        equivalentLocator: 'getByTestId("save-primary")',
+        equivalentLocatorEngine: 'testid',
+        equivalentProofLevel: 'proven_equivalent',
+        equivalentProofSource: 'attribute-equivalence',
+        equivalentSourceSelector: '[data-testid="save-primary"]',
+        preferredRenderings: [
+          {
+            engine: 'testid',
+            locator: 'getByTestId("save-primary")',
+            proofLevel: 'proven_equivalent',
+            proofSource: 'attribute-equivalence',
+            sourceSelector: '[data-testid="save-primary"]',
+            sourceEngine: 'css',
+          },
+        ],
+      },
     },
   };
 }
@@ -410,6 +445,57 @@ describe('smoke baseline runner', () => {
     expect(report.emittedLocator).toContain('locator');
     expect(report.tracePath).toContain('trace.zip');
     expect(report.screenshotPath).toContain('screenshot.png');
+  });
+
+  it('preserves exact proof vs emitted equivalent distinction in the smoke report', async () => {
+    const dir = makeTempDir('air-smoke-equivalent-');
+    const specFile = path.join(dir, 'demo.smoke.spec.ts');
+    const generatedFile = path.join(dir, 'DemoPage.ts');
+    const sidecarFile = path.join(dir, 'DemoPage.air.json');
+    const source = [
+      `export class DemoPage {`,
+      `  // AIR step 10 | action=click | selectorType=attribute | resolvedBy=deterministic-override | score=1.2`,
+      `  async clickEquivalent() {`,
+      `    const target = this.page.getByTestId("save-primary");`,
+      `    await target.click();`,
+      `  }`,
+      `}`,
+      ``,
+    ].join('\n');
+    writeFile(specFile, 'test("demo", async () => {});');
+    writeFile(generatedFile, source);
+    writeFile(sidecarFile, JSON.stringify(makeSidecar(), null, 2));
+    const line = lineNumberOf(source, 'await target.click();');
+    const stack = `locator.click: Timeout 5000ms exceeded.\n    at DemoPage.clickEquivalent (${generatedFile}:${line}:11)`;
+
+    const report = await runSmokeBaseline({
+      specFile,
+      sidecarFile,
+      generatedFile,
+      executor: async (request) => {
+        fs.writeFileSync(
+          request.rawResultPath,
+          JSON.stringify(
+            makeFailingRawResult({
+              file: generatedFile,
+              message: 'locator.click: Timeout 5000ms exceeded.',
+              stack,
+            }),
+            null,
+            2,
+          ),
+        );
+        return { exitCode: 1 };
+      },
+    });
+
+    expect(report.exactProofSelector).toBe('[data-testid="save-primary"]');
+    expect(report.exactProofEngine).toBe('css');
+    expect(report.exactProofLevel).toBe('semantic_validated');
+    expect(report.emittedLocator).toBe('getByTestId("save-primary")');
+    expect(report.equivalentRenderingUsed).toBe(true);
+    expect(report.equivalentProofSource).toBe('attribute-equivalence');
+    expect(report.equivalentSourceSelector).toBe('[data-testid="save-primary"]');
   });
 
   it('produces compile_error report from reporter JSON global error', async () => {

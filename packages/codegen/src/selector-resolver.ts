@@ -1,6 +1,7 @@
 import type {
   CodegenSession,
   CodegenStep,
+  EquivalentRendering,
   LlmResponseFormat,
   ResolverMetadata,
   SelectorCategory,
@@ -557,7 +558,13 @@ function shouldTrustOriginalOnSnapshotMiss(
       /\[type=(?:"submit"|'submit')\]/i.test(selector);
   }
 
-  if (step.action === 'click' || step.action === 'custom-select' || step.action === 'hover') {
+  if (
+    step.action === 'click' ||
+    step.action === 'custom-control-open' ||
+    step.action === 'custom-select' ||
+    step.action === 'custom-menu-select' ||
+    step.action === 'hover'
+  ) {
     return true;
   }
 
@@ -1066,7 +1073,9 @@ function inferStepControlFamily(step: CodegenStep): ControlFamily {
     return type === 'password' ? 'password-input' : 'text-input';
   }
   if (
+    step.action === 'custom-control-open' ||
     step.action === 'custom-select' ||
+    step.action === 'custom-menu-select' ||
     text === '-- select --' ||
     selector.includes('select') ||
     role === 'listbox' ||
@@ -1222,6 +1231,105 @@ function computeEvaluationFinalScore(params: {
   return Math.max(0, Math.min(1.5, params.baselineScore));
 }
 
+function equivalentRenderingPriority(engine: EquivalentRendering['engine']): number {
+  switch (engine) {
+    case 'testid':
+      return 1;
+    case 'placeholder':
+      return 2;
+    case 'text':
+      return 3;
+    default:
+      return 10;
+  }
+}
+
+function sortPreferredRenderings(renderings: EquivalentRendering[]): EquivalentRendering[] {
+  return [...renderings].sort((left, right) => {
+    const leftPriority = equivalentRenderingPriority(left.engine);
+    const rightPriority = equivalentRenderingPriority(right.engine);
+    if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+    return left.locator.localeCompare(right.locator);
+  });
+}
+
+function buildPreferredEquivalentRenderings(params: {
+  selectorSpec: ReturnType<typeof buildSelectorSpec>;
+  category: SelectorCategory;
+  validation: CandidateValidation;
+  resolvedElement?: Element | null;
+}): EquivalentRendering[] {
+  if (params.validation.effectiveMatchCount !== 1 || params.validation.reason !== 'unique-visible') {
+    return [];
+  }
+
+  const selector = params.selectorSpec.selector.trim();
+  const renderings: EquivalentRendering[] = [];
+  const addRendering = (rendering: EquivalentRendering): void => {
+    if (renderings.some(existing => existing.engine === rendering.engine && existing.locator === rendering.locator)) {
+      return;
+    }
+    renderings.push(rendering);
+  };
+
+  const exactTestId = extractAttributeValue(selector, 'data-testid');
+  const hasAlternateTestIdAttr =
+    /\[data-cy=(?:"[^"]+"|'[^']+')\]/i.test(selector) ||
+    /\[data-qa=(?:"[^"]+"|'[^']+')\]/i.test(selector);
+  if (params.category === 'testid' && exactTestId && !hasAlternateTestIdAttr) {
+    addRendering({
+      engine: 'testid',
+      locator: `getByTestId(${JSON.stringify(exactTestId)})`,
+      proofLevel: 'proven_equivalent',
+      proofSource: 'attribute-equivalence',
+      sourceSelector: selector,
+      sourceEngine: params.selectorSpec.engine,
+    });
+  }
+
+  const exactPlaceholder = extractAttributeValue(selector, 'placeholder');
+  const resolvedTagName = params.resolvedElement?.tagName?.toLowerCase() ?? null;
+  const explicitPlaceholderTagMatch = selector.match(/^\s*([a-z0-9_-]+)\s*\[placeholder=/i);
+  const explicitPlaceholderTag = explicitPlaceholderTagMatch?.[1]?.toLowerCase() ?? null;
+  const placeholderTagFamily = explicitPlaceholderTag ?? resolvedTagName;
+  if (
+    params.category === 'placeholder' &&
+    exactPlaceholder &&
+    (placeholderTagFamily === 'input' || placeholderTagFamily === 'textarea')
+  ) {
+    addRendering({
+      engine: 'placeholder',
+      locator: `getByPlaceholder(${JSON.stringify(exactPlaceholder)}, { exact: true })`,
+      proofLevel: 'proven_equivalent',
+      proofSource: 'attribute-equivalence',
+      sourceSelector: selector,
+      sourceEngine: params.selectorSpec.engine,
+    });
+  }
+
+  if (
+    params.category === 'text' &&
+    selector.startsWith('text=') &&
+    !/:has-text\(/i.test(selector)
+  ) {
+    const matchedText = params.resolvedElement
+      ? textFromElement(params.resolvedElement)?.trim()
+      : '';
+    if (matchedText) {
+      addRendering({
+        engine: 'text',
+        locator: `getByText(${JSON.stringify(matchedText)}, { exact: true })`,
+        proofLevel: 'proven_equivalent',
+        proofSource: 'text-equivalence',
+        sourceSelector: selector,
+        sourceEngine: params.selectorSpec.engine,
+      });
+    }
+  }
+
+  return sortPreferredRenderings(renderings).slice(0, 3);
+}
+
 function buildCandidateSelectorEvaluation(params: {
   step: CodegenStep;
   candidate: RawCandidate;
@@ -1274,6 +1382,12 @@ function buildCandidateSelectorEvaluation(params: {
     ...(params.classPenaltyReason ?? []).map(reason => `class:${reason}`),
     ...brittleness.reasons,
   ]));
+  const preferredRenderings = buildPreferredEquivalentRenderings({
+    selectorSpec,
+    category,
+    validation: params.validation,
+    resolvedElement: params.validation.resolvedElement,
+  });
 
   return summarizeSelectorEvaluation(selectorSpec, {
     category,
@@ -1302,6 +1416,7 @@ function buildCandidateSelectorEvaluation(params: {
     reasons,
     warningCodes: params.warningCodes,
     rejectReason: params.semanticRejectReason,
+    preferredRenderings,
   });
 }
 
@@ -1450,6 +1565,7 @@ function buildResolutionSelectorEvaluation(params: {
   metadata: ResolverMetadata;
   candidateEvaluation?: SelectorEvaluation;
   snapshotTargetEvidence?: boolean;
+  validation?: CandidateValidation;
 }): SelectorEvaluation {
   if (params.candidateEvaluation) {
     return summarizeSelectorEvaluation(
@@ -1481,6 +1597,7 @@ function buildResolutionSelectorEvaluation(params: {
         reasons: params.candidateEvaluation.reasons,
         warningCodes: params.metadata.warningCodes,
         rejectReason: params.metadata.rejectReason,
+        preferredRenderings: params.candidateEvaluation.preferredRenderings,
       },
     );
   }
@@ -1497,6 +1614,14 @@ function buildResolutionSelectorEvaluation(params: {
     uniqueVisible: params.metadata.effectiveMatchCount === 1,
     invalidReason: params.metadata.rejectReason ?? undefined,
   };
+  const preferredRenderings = params.validation
+    ? buildPreferredEquivalentRenderings({
+        selectorSpec: params.selectorSpec,
+        category,
+        validation: params.validation,
+        resolvedElement: params.validation.resolvedElement,
+      })
+    : [];
   const proofScore =
     params.selectorSpec.proofLevel === 'recorded'
       ? 0.6
@@ -1523,6 +1648,7 @@ function buildResolutionSelectorEvaluation(params: {
     ],
     warningCodes: params.metadata.warningCodes,
     rejectReason: params.metadata.rejectReason,
+    preferredRenderings,
   });
 }
 
@@ -1669,6 +1795,7 @@ function deriveDeterministicResolution(
       selectorSpec: resolvedSelectorSpec,
       metadata,
       snapshotTargetEvidence: snapshotSelection?.snapshotTargetEvidence,
+      validation: originalValidation,
     });
     return {
       step,
@@ -1707,6 +1834,7 @@ function deriveDeterministicResolution(
       selectorSpec: resolvedSelectorSpec,
       metadata,
       snapshotTargetEvidence: snapshotSelection?.snapshotTargetEvidence,
+      validation: originalValidation,
     });
     return {
       step,

@@ -195,4 +195,65 @@ describe('active-path schema survival', () => {
     expect((parsed.pageSnapshot as Record<string, unknown>)?.snapshotBuildId).toBe('snap-shadow-1');
     expect(parsed).not.toHaveProperty('dangerousTopLevel');
   });
+
+  it('parses semantic custom-control events without stripping control relationship fields', () => {
+    const openParsed = AIREventSchema.parse({
+      id: '33333333-3333-4333-8333-333333333333',
+      type: 'custom-control-open',
+      timestamp: 1_700_000_000_020,
+      sessionId: 'session-33333333-3333-4333-8333-333333333333',
+      controlFamily: 'menu',
+      triggerText: 'Paul Collings',
+      triggerRole: 'button',
+      fingerprint: {
+        selector: '.oxd-userdropdown-name',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'span',
+        textExcerpt: 'Paul Collings',
+        context: {
+          parentTag: 'div',
+          nearestContainerTag: 'div',
+        },
+        attributes: {
+          role: 'button',
+        },
+        attributesHash: 'hash-open',
+      },
+    });
+
+    const menuParsed = AIREventSchema.parse({
+      id: '44444444-4444-4444-8444-444444444444',
+      type: 'custom-menu-select',
+      timestamp: 1_700_000_000_021,
+      sessionId: 'session-44444444-4444-4444-8444-444444444444',
+      controlFamily: 'menu',
+      optionRole: 'menuitem',
+      selection: {
+        label: 'Logout',
+        value: 'logout',
+        index: 0,
+      },
+      fingerprint: {
+        selector: '[role="menuitem"]:has-text("Logout")',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'li',
+        textExcerpt: 'Logout',
+        context: {
+          parentTag: 'ul',
+          nearestContainerTag: 'nav',
+        },
+        attributes: {
+          role: 'menuitem',
+        },
+        attributesHash: 'hash-menu',
+      },
+    });
+
+    expect(openParsed.type).toBe('custom-control-open');
+    expect((openParsed as Record<string, unknown>).controlFamily).toBe('menu');
+    expect(menuParsed.type).toBe('custom-menu-select');
+    expect((menuParsed as Record<string, unknown>).optionRole).toBe('menuitem');
+  });
 });

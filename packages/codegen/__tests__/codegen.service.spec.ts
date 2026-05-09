@@ -1008,4 +1008,132 @@ describe('CodegenService - Step Metadata Preservation', () => {
     expect(codegenSource).not.toContain('payload?.[fieldName]?.metrics');
     expect(codegenSource).not.toContain('payload?.[fieldName]?.snapshotBuildId');
   });
+
+  it('buildSession keeps semantic custom-control events actionable and preserves menu selection labels', () => {
+    const customOpenPayload = JSON.stringify({
+      normalizedUrl: 'https://example.test/admin',
+      fingerprint: {
+        selector: '.oxd-select-text',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        textExcerpt: 'User Role',
+        attributes: {
+          role: 'combobox',
+        },
+        attributesHash: 'hash-open',
+      },
+      controlFamily: 'dropdown',
+    });
+
+    const menuSelectPayload = JSON.stringify({
+      normalizedUrl: 'https://example.test/admin',
+      fingerprint: {
+        selector: '[role="menuitem"]:has-text("Logout")',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'li',
+        textExcerpt: 'Logout',
+        attributes: {
+          role: 'menuitem',
+        },
+        attributesHash: 'hash-logout',
+      },
+      triggerFingerprint: {
+        selector: '.oxd-userdropdown-name',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'span',
+        textExcerpt: 'Paul Collings',
+        attributes: {
+          role: 'button',
+        },
+        attributesHash: 'hash-trigger',
+      },
+      selection: {
+        label: 'Logout',
+        value: 'logout',
+        index: 0,
+      },
+      controlFamily: 'menu',
+    });
+
+    const fakeDb = {
+      prepare(sql: string) {
+        if (sql.includes('FROM sessions')) {
+          return {
+            get: () => ({
+              id: 'session-test',
+              started_at: 1_700_000_000_000,
+            }),
+          };
+        }
+
+        if (sql.includes('FROM events e')) {
+          return {
+            all: () => ([
+              {
+                eventId: 'ev-open',
+                eventType: 'custom-control-open',
+                timestamp: 1_700_000_000_100,
+                pageUrl: 'https://example.test/admin',
+                traceId: 'trace-open',
+                nodeId: 'node-1',
+                payload: customOpenPayload,
+              },
+              {
+                eventId: 'ev-menu',
+                eventType: 'custom-menu-select',
+                timestamp: 1_700_000_000_200,
+                pageUrl: 'https://example.test/admin',
+                traceId: 'trace-open',
+                nodeId: 'node-1',
+                payload: menuSelectPayload,
+              },
+            ]),
+          };
+        }
+
+        if (sql.includes('FROM edges ed')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('SELECT control_signature AS controlSignature')) {
+          return { get: () => undefined };
+        }
+
+        if (sql.includes('FROM nodes')) {
+          return {
+            all: () => [],
+            get: () => undefined,
+          };
+        }
+
+        return {
+          get: () => undefined,
+          all: () => [],
+        };
+      },
+      close() {
+        return undefined;
+      },
+    };
+
+    const service = Object.create(CodegenService.prototype) as any;
+    service.db = fakeDb;
+    service.options = {
+      dbPath: ':memory:',
+      minConfidence: 0,
+      includeScrollSteps: false,
+      includeHoverSteps: false,
+    };
+
+    const session = (service as CodegenService).buildSession('session-test');
+    expect(session.steps).toHaveLength(2);
+    expect(session.steps[0].action).toBe('custom-control-open');
+    expect(session.steps[0].selector).toBe('.oxd-select-text');
+    expect(session.steps[1].action).toBe('custom-menu-select');
+    expect(session.steps[1].selector).toBe('[role="menuitem"]:has-text("Logout")');
+    expect(session.steps[1].value).toBe('Logout');
+  });
 });

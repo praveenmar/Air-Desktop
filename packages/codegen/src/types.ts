@@ -24,7 +24,9 @@ export type ActionType =
   | 'click'
   | 'input'
   | 'submit'
+  | 'custom-control-open'
   | 'custom-select'
+  | 'custom-menu-select'
   | 'hover'
   | 'scroll'
   | 'navigate';
@@ -115,6 +117,36 @@ export type SelectorProofSource =
   | 'smoke'
   | 'none';
 
+export type EquivalentRenderingEngine =
+  | 'testid'
+  | 'placeholder'
+  | 'text'
+  | 'role'
+  | 'label'
+  | 'playwright';
+
+export type EquivalentRenderingProofLevel =
+  | 'proven_equivalent'
+  | 'live_smoke_validated'
+  | 'recorded';
+
+export type EquivalentRenderingProofSource =
+  | 'attribute-equivalence'
+  | 'text-equivalence'
+  | 'accessibility-recorded'
+  | 'smoke'
+  | 'manual';
+
+export interface EquivalentRendering {
+  engine: EquivalentRenderingEngine;
+  locator: string;
+  proofLevel: EquivalentRenderingProofLevel;
+  proofSource: EquivalentRenderingProofSource;
+  sourceSelector: string;
+  sourceEngine: SelectorEngine;
+  warningCodes?: string[];
+}
+
 export interface SelectorEvaluation {
   selectorSpec: SelectorSpec;
   category: SelectorCategory;
@@ -141,6 +173,7 @@ export interface SelectorEvaluation {
   reasons: string[];
   warningCodes: string[];
   rejectReason?: string;
+  preferredRenderings?: EquivalentRendering[];
 }
 
 export type ResolverResolvedBy =
@@ -267,6 +300,7 @@ export interface ResolverMetadata {
   classEntropyScore?: number;
   classPenaltyReason?: string[];
   selectorEvaluation?: SelectorEvaluation;
+  preferredRenderings?: EquivalentRendering[];
   warningCodes: string[];
   resolverVersion: 1;
   temporalClass?: TemporalClass;

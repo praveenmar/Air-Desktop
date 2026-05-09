@@ -161,7 +161,10 @@ function makeEvent(type: string, timestamp: number, extra: Record<string, unknow
     tabId: 'tab-a',
     pageUrl: 'https://example.test/start',
     normalizedUrl: 'https://example.test/start',
-    fingerprint: makeFingerprint(type === 'custom-select' ? 'div[role="option"]' : 'button', 'Save'),
+    fingerprint: makeFingerprint(
+      (type === 'custom-select' || type === 'custom-menu-select') ? 'div[role="option"]' : 'button',
+      'Save'
+    ),
     pageState: makeSnapshot('Start', 'https://example.test/start'),
     pageSnapshot: makeSnapshot('Start', 'https://example.test/start'),
     ...extra,
@@ -213,6 +216,29 @@ describe('GraphBuilder stale pointer protection', () => {
     const result = await harness.builder.processEvent(
       makeEvent('custom-select', 1_000, {
         selection: { label: 'Admin', value: 'admin', index: 0 },
+      }),
+    );
+
+    expect(result.stage).toBe('stale_pointer_bypassed');
+    expect(harness.builder.actionHandler.handleAction).not.toHaveBeenCalled();
+  });
+
+  it('bypasses late custom-control-open without pointer misuse', async () => {
+    const result = await harness.builder.processEvent(
+      makeEvent('custom-control-open', 1_000, {
+        controlFamily: 'dropdown',
+      }),
+    );
+
+    expect(result.stage).toBe('stale_pointer_bypassed');
+    expect(harness.builder.actionHandler.handleAction).not.toHaveBeenCalled();
+  });
+
+  it('bypasses late custom-menu-select without pointer misuse', async () => {
+    const result = await harness.builder.processEvent(
+      makeEvent('custom-menu-select', 1_000, {
+        selection: { label: 'Logout', value: 'logout', index: 0 },
+        controlFamily: 'menu',
       }),
     );
 

@@ -8,6 +8,8 @@ import { FlowReviewService } from './flow-review.service';
 import {
   canRenderSelectorSpecConfidently,
   getSelectorSpecRenderingWarnings,
+  pickPreferredEquivalentRendering,
+  renderLocatorExpressionFromEquivalentRendering,
   renderLocatorExpressionFromSelectorSpec,
 } from './selector-spec';
 import {
@@ -51,6 +53,13 @@ interface EmittedMethod {
   emittedLocatorSource: AirMethodMeta['emittedLocatorSource'];
   emittedLocatorWarnings: string[];
   usedSelectorSpec: boolean;
+  equivalentRenderingUsed: boolean;
+  equivalentLocator: string | null;
+  equivalentLocatorEngine: AirMethodMeta['equivalentLocatorEngine'];
+  equivalentProofLevel: AirMethodMeta['equivalentProofLevel'];
+  equivalentProofSource: AirMethodMeta['equivalentProofSource'];
+  equivalentSourceSelector: string | null;
+  preferredRenderings: AirMethodMeta['preferredRenderings'];
 }
 
 interface AssertionHelperSeed {
@@ -275,6 +284,13 @@ export class LlmOrchestrator {
         emittedLocatorSource: emittedMethod.emittedLocatorSource,
         emittedLocatorWarnings: emittedMethod.emittedLocatorWarnings,
         usedSelectorSpec: emittedMethod.usedSelectorSpec,
+        equivalentRenderingUsed: emittedMethod.equivalentRenderingUsed,
+        equivalentLocator: emittedMethod.equivalentLocator ?? undefined,
+        equivalentLocatorEngine: emittedMethod.equivalentLocatorEngine,
+        equivalentProofLevel: emittedMethod.equivalentProofLevel,
+        equivalentProofSource: emittedMethod.equivalentProofSource,
+        equivalentSourceSelector: emittedMethod.equivalentSourceSelector ?? undefined,
+        preferredRenderings: emittedMethod.preferredRenderings,
       };
     }
 
@@ -523,7 +539,7 @@ ${methodsContent.join('\n\n')}
   }
 
   private static supportsEnabledCheck(action: CodegenStep['action']): boolean {
-    return ['click', 'input', 'submit', 'custom-select', 'hover'].includes(action);
+    return ['click', 'input', 'submit', 'custom-control-open', 'custom-select', 'custom-menu-select', 'hover'].includes(action);
   }
 
   private static buildAssertionHelpers(seeds: AssertionHelperSeed[], usedNames: Set<string>): string[] {
@@ -693,7 +709,7 @@ ${methodsContent.join('\n\n')}
       candidate = 'searchText';
     } else if (/\b(date|calendar|day|month|year)\b/.test(signal)) {
       candidate = 'dateValue';
-    } else if (step.action === 'custom-select') {
+    } else if (step.action === 'custom-select' || step.action === 'custom-menu-select') {
       candidate = 'optionValue';
     } else {
       candidate = 'value';
@@ -759,8 +775,12 @@ ${methodsContent.join('\n\n')}
         return { locatorExpr, operation: 'hover', args: '' };
       case 'input':
         return { locatorExpr, operation: 'fill', args: JSON.stringify(this.resolveInputValue(step)) };
+      case 'custom-control-open':
+        return { locatorExpr, operation: 'click', args: '' };
       case 'custom-select':
         return { locatorExpr, operation: 'selectOption', args: JSON.stringify(this.resolveInputValue(step)) };
+      case 'custom-menu-select':
+        return { locatorExpr, operation: 'click', args: '' };
       case 'submit':
         if (this.shouldUseFormSubmit(selector)) {
           return { locatorExpr, operation: 'press', args: `'Enter'` };
@@ -788,22 +808,30 @@ ${methodsContent.join('\n\n')}
     const warnings = resolverMetadata?.warningCodes?.length ? resolverMetadata.warningCodes.join('|') : 'none';
     const usedSelectorSpec = !!resolvedSelectorSpec;
     const exactLocatorExpr = renderLocatorExpressionFromSelectorSpec(resolvedSelectorSpec);
+    const preferredRendering = pickPreferredEquivalentRendering(
+      resolverMetadata?.selectorEvaluation?.preferredRenderings,
+    );
+    const preferredEquivalentLocatorExpr = renderLocatorExpressionFromEquivalentRendering(
+      preferredRendering ?? undefined,
+    );
     const selectorSpecWarnings = getSelectorSpecRenderingWarnings(resolvedSelectorSpec);
+    const preferredRenderingWarnings = preferredRendering?.warningCodes ?? [];
     const missingSpecWarnings = usedSelectorSpec ? [] : ['selector-spec-missing-fallback'];
     const renderingWarnings = Array.from(new Set([
       ...selectorSpecWarnings,
+      ...preferredRenderingWarnings,
       ...missingSpecWarnings,
     ]));
     const renderConfidently = resolvedSelectorSpec
       ? canRenderSelectorSpecConfidently(resolvedSelectorSpec)
       : !!selectorUsed;
-    const emittedLocatorEngine = resolvedSelectorSpec?.engine ?? 'unknown';
-    const emittedLocatorProofLevel = resolvedSelectorSpec?.proofLevel ?? 'unknown';
-    const emittedLocatorSource = resolvedSelectorSpec?.source ?? (usedSelectorSpec ? 'unknown' : 'legacy-fallback');
+    const emittedLocatorEngine = preferredRendering?.engine ?? resolvedSelectorSpec?.engine ?? 'unknown';
+    const emittedLocatorProofLevel = preferredRendering?.proofLevel ?? resolvedSelectorSpec?.proofLevel ?? 'unknown';
+    const emittedLocatorSource = preferredRendering ? 'resolver' : (resolvedSelectorSpec?.source ?? (usedSelectorSpec ? 'unknown' : 'legacy-fallback'));
     const legacyLocatorExpr = !usedSelectorSpec && selectorUsed
       ? `locator(${JSON.stringify(selectorUsed)})`
       : null;
-    const preferredLocatorExpr = exactLocatorExpr ?? legacyLocatorExpr;
+    const preferredLocatorExpr = preferredEquivalentLocatorExpr ?? exactLocatorExpr ?? legacyLocatorExpr;
 
     const parsed = this.parseLocatorAction(trimmedAction);
     let fallbackReason: string | null = null;
@@ -826,14 +854,14 @@ ${methodsContent.join('\n\n')}
       effective &&
       resolvedSelectorSpec &&
       renderConfidently &&
-      exactLocatorExpr &&
-      effective.locatorExpr !== exactLocatorExpr
+      preferredLocatorExpr &&
+      effective.locatorExpr !== preferredLocatorExpr
     ) {
       effective = {
         ...effective,
-        locatorExpr: exactLocatorExpr,
+        locatorExpr: preferredLocatorExpr,
       };
-      fallbackReason = fallbackReason ?? 'selector-spec-exact-render';
+      fallbackReason = fallbackReason ?? (preferredRendering ? 'selector-spec-equivalent-render' : 'selector-spec-exact-render');
     }
 
     if (
@@ -858,7 +886,7 @@ ${methodsContent.join('\n\n')}
       let invocationArgs = effective.args;
       if (
         ['fill', 'type', 'selectOption'].includes(effective.operation) &&
-        (step.action === 'input' || step.action === 'custom-select')
+        (step.action === 'input' || step.action === 'custom-select' || step.action === 'custom-menu-select')
       ) {
         const valueParam = this.inferValueParameter(step);
         methodParams = `${valueParam.name}: string = ${JSON.stringify(valueParam.defaultValue)}`;
@@ -933,6 +961,13 @@ ${methodsContent.join('\n\n')}
       emittedLocatorSource,
       emittedLocatorWarnings: renderingWarnings,
       usedSelectorSpec,
+      equivalentRenderingUsed: !!preferredRendering,
+      equivalentLocator: preferredEquivalentLocatorExpr,
+      equivalentLocatorEngine: preferredRendering?.engine ?? 'unknown',
+      equivalentProofLevel: preferredRendering?.proofLevel ?? 'unknown',
+      equivalentProofSource: preferredRendering?.proofSource ?? 'unknown',
+      equivalentSourceSelector: preferredRendering?.sourceSelector ?? null,
+      preferredRenderings: resolverMetadata?.selectorEvaluation?.preferredRenderings?.slice(0, 3),
     };
   }
 

@@ -68,7 +68,7 @@ export class ActionHandler {
     const fpHash    = this.computeFingerprintHash(event);
     const safeEventId = event.id || crypto.randomUUID();
 
-    const shouldRegisterPending = ['click', 'submit', 'custom-select'].includes(event.type);
+    const shouldRegisterPending = ['click', 'submit', 'custom-control-open', 'custom-select', 'custom-menu-select'].includes(event.type);
 
     // 1. Register PENDING ACTION in DB (for future Outcome to resolve)
     if (shouldRegisterPending) {

@@ -183,6 +183,202 @@ describe('LlmOrchestrator - emission safety', () => {
     expect(emitted.methodCode).not.toContain('getByText');
   });
 
+  it('emits getByTestId when resolver provides a proven equivalent rendering', () => {
+    const step = createStep({
+      action: 'click',
+      intent: 'click_submit',
+      selector: '[data-testid="login-btn"]',
+      selectorPriority: 'data-testid',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'clickSubmit',
+      `locator('[data-testid="login-btn"]').click()`,
+      '[data-testid="login-btn"]',
+      {
+        selector: '[data-testid="login-btn"]',
+        engine: 'css',
+        source: 'resolver',
+        proofLevel: 'semantic_validated',
+      },
+      {
+        resolvedSelector: '[data-testid="login-btn"]',
+        resolvedBy: 'deterministic-override',
+        bestScore: 1.2,
+        effectiveMatchCount: 1,
+        snapshotSource: 'latest',
+        validationMethod: 'test',
+        llmAttempted: false,
+        llmAccepted: false,
+        llmAlternative: null,
+        rejectReason: null,
+        warningCodes: [],
+        resolverVersion: 1,
+        selectorEvaluation: {
+          selectorSpec: {
+            selector: '[data-testid="login-btn"]',
+            engine: 'css',
+            source: 'resolver',
+            proofLevel: 'semantic_validated',
+          },
+          category: 'testid',
+          validation: {
+            valid: true,
+            matchCount: 1,
+            visibleMatchCount: 1,
+            uniqueVisible: true,
+          },
+          proof: {
+            proofLevel: 'semantic_validated',
+            proofSource: 'semantic',
+          },
+          scoring: {
+            proofScore: 1,
+            stabilityScore: 0.8,
+            semanticScore: 0.9,
+            brittlenessPenalty: 0,
+            entropyPenalty: 0,
+            finalScore: 1.2,
+          },
+          reasons: ['category:testid', 'proof:semantic_validated'],
+          warningCodes: [],
+          preferredRenderings: [
+            {
+              engine: 'testid',
+              locator: `getByTestId("login-btn")`,
+              proofLevel: 'proven_equivalent',
+              proofSource: 'attribute-equivalence',
+              sourceSelector: '[data-testid="login-btn"]',
+              sourceEngine: 'css',
+            },
+          ],
+        },
+      },
+    );
+
+    expect(emitted.methodCode).toContain(`const target = this.page.getByTestId("login-btn");`);
+    expect(emitted.emittedLocator).toBe(`getByTestId("login-btn")`);
+    expect(emitted.emittedLocatorEngine).toBe('testid');
+    expect(emitted.equivalentRenderingUsed).toBe(true);
+    expect(emitted.equivalentProofSource).toBe('attribute-equivalence');
+  });
+
+  it('maps semantic custom control actions to click locators in deterministic fallback', () => {
+    const openStep = createStep({
+      action: 'custom-control-open',
+      intent: 'open_user_role',
+      selector: '.oxd-select-text',
+      selectorPriority: 'class',
+      selectorRank: 7,
+    });
+
+    const menuStep = createStep({
+      action: 'custom-menu-select',
+      intent: 'select_logout',
+      selector: '[role="menuitem"]:has-text("Logout")',
+      selectorPriority: 'attribute',
+      selectorRank: 3,
+    });
+
+    const openEmitted = (LlmOrchestrator as any).buildMethodCode(
+      openStep,
+      'openUserRole',
+      `locator('.oxd-select-text').noop()`,
+      openStep.selector,
+    );
+    const menuEmitted = (LlmOrchestrator as any).buildMethodCode(
+      menuStep,
+      'selectLogout',
+      `locator('[role="menuitem"]:has-text("Logout")').noop()`,
+      menuStep.selector,
+    );
+
+    expect(openEmitted.fallbackReason).toBe('llm-action-invalid-or-noop');
+    expect(openEmitted.methodCode).toContain(`await target.click();`);
+    expect(menuEmitted.fallbackReason).toBe('llm-action-invalid-or-noop');
+    expect(menuEmitted.methodCode).toContain(`await target.click();`);
+  });
+
+  it('emits getByPlaceholder exact only when resolver provides a placeholder equivalent rendering', () => {
+    const step = createStep({
+      action: 'input',
+      intent: 'input_username',
+      selector: 'input[placeholder="Username"]',
+      selectorPriority: 'attribute',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'fillUsername',
+      `locator('input[placeholder="Username"]').fill(value)`,
+      'input[placeholder="Username"]',
+      {
+        selector: 'input[placeholder="Username"]',
+        engine: 'css',
+        source: 'resolver',
+        proofLevel: 'semantic_validated',
+      },
+      {
+        resolvedSelector: 'input[placeholder="Username"]',
+        resolvedBy: 'deterministic-override',
+        bestScore: 1.1,
+        effectiveMatchCount: 1,
+        snapshotSource: 'latest',
+        validationMethod: 'test',
+        llmAttempted: false,
+        llmAccepted: false,
+        llmAlternative: null,
+        rejectReason: null,
+        warningCodes: [],
+        resolverVersion: 1,
+        selectorEvaluation: {
+          selectorSpec: {
+            selector: 'input[placeholder="Username"]',
+            engine: 'css',
+            source: 'resolver',
+            proofLevel: 'semantic_validated',
+          },
+          category: 'placeholder',
+          validation: {
+            valid: true,
+            matchCount: 1,
+            visibleMatchCount: 1,
+            uniqueVisible: true,
+          },
+          proof: {
+            proofLevel: 'semantic_validated',
+            proofSource: 'semantic',
+          },
+          scoring: {
+            proofScore: 1,
+            stabilityScore: 0.8,
+            semanticScore: 0.9,
+            brittlenessPenalty: 0,
+            entropyPenalty: 0,
+            finalScore: 1.1,
+          },
+          reasons: ['category:placeholder', 'proof:semantic_validated'],
+          warningCodes: [],
+          preferredRenderings: [
+            {
+              engine: 'placeholder',
+              locator: `getByPlaceholder("Username", { exact: true })`,
+              proofLevel: 'proven_equivalent',
+              proofSource: 'attribute-equivalence',
+              sourceSelector: 'input[placeholder="Username"]',
+              sourceEngine: 'css',
+            },
+          ],
+        },
+      },
+    );
+
+    expect(emitted.methodCode).toContain(`const target = this.page.getByPlaceholder("Username", { exact: true });`);
+    expect(emitted.emittedLocator).toBe(`getByPlaceholder("Username", { exact: true })`);
+    expect(emitted.emittedLocatorEngine).toBe('placeholder');
+  });
+
   it('renders recorded-only selector with inline recorded warning', () => {
     const step = createStep({
       action: 'click',
@@ -999,6 +1195,108 @@ describe('LlmOrchestrator - sidecar resolver metadata', () => {
       emittedLocatorSource: 'llm',
       emittedLocatorWarnings: [],
       usedSelectorSpec: true,
+    }));
+
+    callSpy.mockRestore();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('preserves exact resolvedSelectorSpec in sidecar when emitting getByTestId equivalent rendering', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'air-equiv-sidecar-'));
+    const outputDir = path.join(tempRoot, 'out');
+    const projectRoot = path.join(tempRoot, 'project');
+    fs.mkdirSync(outputDir, { recursive: true });
+    fs.mkdirSync(projectRoot, { recursive: true });
+
+    const session = createSession([
+      createStep({
+        step: 1,
+        action: 'click',
+        intent: 'click_login',
+        selector: 'button',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        sourceNodeId: 'node-1',
+        normalizedUrl: 'https://example.test/login',
+        fingerprint: {
+          selector: 'button',
+          selectorPriority: 'class',
+          selectorRank: 7,
+          tagName: 'button',
+          textExcerpt: 'Login',
+          attributes: {
+            'data-testid': 'login-btn',
+          },
+        },
+      }),
+    ], {
+      url: 'https://example.test/login',
+      stepCount: 1,
+    });
+
+    const snapshot = new JSDOM(`<!doctype html><html><body>
+      <button data-testid="login-btn">Login</button>
+      <button>Cancel</button>
+    </body></html>`).window.document;
+
+    const callSpy = vi.spyOn(LlmOrchestrator as any, 'callGeminiApi')
+      .mockResolvedValueOnce(JSON.stringify({
+        className: 'LoginPage',
+        methods: [
+          {
+            stepNumber: 1,
+            intent: 'click_login',
+            methodName: 'clickLogin',
+            playwrightAction: `locator('button').click()`,
+          },
+        ],
+      }));
+
+    await LlmOrchestrator.generatePageObjects(
+      session,
+      outputDir,
+      projectRoot,
+      {
+        resolverConfig: {
+          enableLLMFallback: false,
+        },
+        snapshotCache: {
+          get(nodeId: string) {
+            return nodeId === 'node-1' ? snapshot : null;
+          },
+          getSource() {
+            return 'source-node-snapshot';
+          },
+        },
+      },
+    );
+
+    const sidecar = JSON.parse(
+      fs.readFileSync(path.join(outputDir, 'LoginPage.air.json'), 'utf-8'),
+    );
+
+    expect(sidecar.methods.clickLogin.resolvedSelectorSpec).toEqual(expect.objectContaining({
+      selector: 'button[data-testid="login-btn"]',
+      engine: 'css',
+      source: 'resolver',
+      proofLevel: 'semantic_validated',
+    }));
+    expect(sidecar.methods.clickLogin).toEqual(expect.objectContaining({
+      emittedLocator: `getByTestId("login-btn")`,
+      emittedLocatorEngine: 'testid',
+      emittedLocatorProofLevel: 'proven_equivalent',
+      equivalentRenderingUsed: true,
+      equivalentLocator: `getByTestId("login-btn")`,
+      equivalentLocatorEngine: 'testid',
+      equivalentProofLevel: 'proven_equivalent',
+      equivalentProofSource: 'attribute-equivalence',
+      equivalentSourceSelector: 'button[data-testid="login-btn"]',
+      preferredRenderings: [
+        expect.objectContaining({
+          engine: 'testid',
+          locator: `getByTestId("login-btn")`,
+        }),
+      ],
     }));
 
     callSpy.mockRestore();

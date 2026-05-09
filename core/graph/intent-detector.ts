@@ -26,10 +26,17 @@ export class IntentDetector {
       }
     }
 
-    if (event.type === 'custom-select' && 'selection' in event) {
+    if ((event.type === 'custom-select' || event.type === 'custom-menu-select') && 'selection' in event) {
       const selection = (event as any).selection;
       if (selection?.label) {
         return `select_${this.cleanString(selection.label)}`;
+      }
+    }
+
+    if (event.type === 'custom-control-open' && 'fingerprint' in event && event.fingerprint) {
+      const context = this.extractContext(event.fingerprint);
+      if (context) {
+        return `open_${context}`;
       }
     }
 

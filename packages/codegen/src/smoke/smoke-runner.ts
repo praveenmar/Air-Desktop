@@ -107,32 +107,56 @@ function resolveFailureArtifacts(raw: RawPlaywrightResult | null): {
 }
 
 function enrichFromMethodMeta(methodMeta: AirMethodMeta | null): {
+  exactProofSelector: string | null;
+  exactProofEngine: string | null;
+  exactProofLevel: string | null;
   proofLevel: string | null;
   selector: string | null;
   emittedLocator: string | null;
   emittedLocatorWarnings: string[];
+  equivalentRenderingUsed: boolean;
+  equivalentProofSource: string | null;
+  equivalentSourceSelector: string | null;
 } {
   if (!methodMeta) {
     return {
+      exactProofSelector: null,
+      exactProofEngine: null,
+      exactProofLevel: null,
       proofLevel: null,
       selector: null,
       emittedLocator: null,
       emittedLocatorWarnings: [],
+      equivalentRenderingUsed: false,
+      equivalentProofSource: null,
+      equivalentSourceSelector: null,
     };
   }
 
+  const exactProofSelector =
+    methodMeta.resolvedSelectorSpec?.selector ??
+    methodMeta.selectorUsed ??
+    methodMeta.originalSelector ??
+    null;
+  const exactProofEngine =
+    methodMeta.resolvedSelectorSpec?.engine ??
+    null;
+  const exactProofLevel =
+    methodMeta.resolvedSelectorSpec?.proofLevel ??
+    (typeof methodMeta.emittedLocatorProofLevel === 'string' ? methodMeta.emittedLocatorProofLevel : null) ??
+    null;
+
   return {
-    proofLevel:
-      methodMeta.resolvedSelectorSpec?.proofLevel ??
-      (typeof methodMeta.emittedLocatorProofLevel === 'string' ? methodMeta.emittedLocatorProofLevel : null) ??
-      null,
-    selector:
-      methodMeta.resolvedSelectorSpec?.selector ??
-      methodMeta.selectorUsed ??
-      methodMeta.originalSelector ??
-      null,
+    exactProofSelector,
+    exactProofEngine,
+    exactProofLevel,
+    proofLevel: exactProofLevel,
+    selector: exactProofSelector,
     emittedLocator: methodMeta.emittedLocator ?? null,
     emittedLocatorWarnings: methodMeta.emittedLocatorWarnings ?? [],
+    equivalentRenderingUsed: methodMeta.equivalentRenderingUsed ?? false,
+    equivalentProofSource: methodMeta.equivalentProofSource ?? null,
+    equivalentSourceSelector: methodMeta.equivalentSourceSelector ?? null,
   };
 }
 
@@ -227,10 +251,16 @@ export async function runSmokeBaseline(options: SmokeRunOptions): Promise<SmokeR
     failingMethodName: mapping.failingMethodName,
     failureType,
     failureMessage: selectedError?.message ?? null,
+    exactProofSelector: emitted.exactProofSelector,
+    exactProofEngine: emitted.exactProofEngine,
+    exactProofLevel: emitted.exactProofLevel,
     proofLevel: emitted.proofLevel,
     selector: emitted.selector,
     emittedLocator: emitted.emittedLocator,
     emittedLocatorWarnings: emitted.emittedLocatorWarnings,
+    equivalentRenderingUsed: emitted.equivalentRenderingUsed,
+    equivalentProofSource: emitted.equivalentProofSource,
+    equivalentSourceSelector: emitted.equivalentSourceSelector,
     screenshotPath: artifacts.screenshotPath,
     tracePath: artifacts.tracePath,
     rawPlaywrightResultPath: config.rawResultPath,

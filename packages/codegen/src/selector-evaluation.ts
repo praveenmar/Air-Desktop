@@ -1,4 +1,5 @@
 import type {
+  EquivalentRendering,
   SelectorCategory,
   SelectorEvaluation,
   SelectorProofLevel,
@@ -138,6 +139,7 @@ export function summarizeSelectorEvaluation(
     reasons: string[];
     warningCodes?: string[];
     rejectReason?: string | null;
+    preferredRenderings?: EquivalentRendering[];
   },
 ): SelectorEvaluation {
   return {
@@ -160,5 +162,6 @@ export function summarizeSelectorEvaluation(
     reasons: params.reasons,
     warningCodes: params.warningCodes ?? selectorSpec.warningCodes ?? [],
     rejectReason: params.rejectReason ?? selectorSpec.rejectReason,
+    preferredRenderings: params.preferredRenderings,
   };
 }

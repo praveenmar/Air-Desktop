@@ -28,6 +28,8 @@ export interface SmokeKpiSummary {
   engineBreakdown: Record<string, number>;
   selectorCategoryBreakdown: Record<string, number>;
   warningBreakdown: Record<string, number>;
+  equivalentEmissionBreakdown: Record<string, number>;
+  equivalenceProofSourceBreakdown: Record<string, number>;
   mostCommonFailingSteps: Array<{ step: number; count: number }>;
   mostCommonFailureTypes: SmokeKpiSummaryEntry[];
   failuresByProofLevel: Record<string, number>;
@@ -67,6 +69,8 @@ interface EnrichedSmokeRecord {
   selectorCategory: string;
   warningCodes: string[];
   usedSelectorSpec: boolean | null;
+  equivalentRenderingUsed: boolean;
+  equivalentProofSource: string;
 }
 
 function normalizeKey(value: string | null | undefined, fallback = 'unknown'): string {
@@ -213,6 +217,8 @@ function enrichSmokeRecord(
       typeof methodMeta?.usedSelectorSpec === 'boolean'
         ? methodMeta.usedSelectorSpec
         : null,
+    equivalentRenderingUsed: methodMeta?.equivalentRenderingUsed ?? false,
+    equivalentProofSource: normalizeKey(methodMeta?.equivalentProofSource, 'none'),
   };
 }
 
@@ -241,6 +247,8 @@ export function summarizeSmokeReports(options: SmokeKpiOptions = {}): SmokeKpiSu
   const engineBreakdown: Record<string, number> = {};
   const selectorCategoryBreakdown: Record<string, number> = {};
   const warningBreakdown: Record<string, number> = {};
+  const equivalentEmissionBreakdown: Record<string, number> = {};
+  const equivalenceProofSourceBreakdown: Record<string, number> = {};
   const failingSteps: Record<string, number> = {};
   const failureTypes: Record<string, number> = {};
 
@@ -258,6 +266,8 @@ export function summarizeSmokeReports(options: SmokeKpiOptions = {}): SmokeKpiSu
     incrementBucket(proofLevelBreakdown, record.proofLevel);
     incrementBucket(engineBreakdown, record.engine);
     incrementBucket(selectorCategoryBreakdown, record.selectorCategory);
+    incrementBucket(equivalentEmissionBreakdown, record.equivalentRenderingUsed ? 'equivalent' : 'exact');
+    incrementBucket(equivalenceProofSourceBreakdown, record.equivalentProofSource);
     incrementBucket(failureTypes, record.report.failureType ?? 'runtime_unknown');
 
     if (typeof record.report.firstFailingStep === 'number') {
@@ -298,6 +308,8 @@ export function summarizeSmokeReports(options: SmokeKpiOptions = {}): SmokeKpiSu
     engineBreakdown,
     selectorCategoryBreakdown,
     warningBreakdown,
+    equivalentEmissionBreakdown,
+    equivalenceProofSourceBreakdown,
     mostCommonFailingSteps: toSortedStepEntries(failingSteps),
     mostCommonFailureTypes: toSortedEntries(failureTypes),
     failuresByProofLevel: proofLevelBreakdown,

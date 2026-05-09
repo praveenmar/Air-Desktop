@@ -1,5 +1,6 @@
 import type {
   ActionType,
+  EquivalentRendering,
   ResolverMetadata,
   SelectorEngine,
   SelectorPriority,
@@ -26,6 +27,13 @@ export interface AirMethodMeta {
   emittedLocatorSource?: SelectorSource | 'legacy-fallback' | 'unknown';
   emittedLocatorWarnings?: string[];
   usedSelectorSpec?: boolean;
+  equivalentRenderingUsed?: boolean;
+  equivalentLocator?: string;
+  equivalentLocatorEngine?: EquivalentRendering['engine'] | 'unknown';
+  equivalentProofLevel?: EquivalentRendering['proofLevel'] | 'unknown';
+  equivalentProofSource?: EquivalentRendering['proofSource'] | 'unknown';
+  equivalentSourceSelector?: string;
+  preferredRenderings?: EquivalentRendering[];
 }
 
 export interface AirMetadata {

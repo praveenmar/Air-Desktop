@@ -121,7 +121,11 @@ export class GraphBuilder {
   }
 
   private shouldRetainEventSnapshotsInPayload(event: AIREvent): boolean {
-    return event.type === 'input' || event.type === 'submit' || event.type === 'custom-select';
+    return event.type === 'input'
+      || event.type === 'submit'
+      || event.type === 'custom-control-open'
+      || event.type === 'custom-select'
+      || event.type === 'custom-menu-select';
   }
 
   private getSnapshotCandidate(event: AIREvent): {
@@ -269,7 +273,7 @@ export class GraphBuilder {
       return false;
     }
 
-    return ['click', 'submit', 'custom-select', 'outcome', 'spa-route-change'].includes(event.type);
+    return ['click', 'submit', 'custom-control-open', 'custom-select', 'custom-menu-select', 'outcome', 'spa-route-change'].includes(event.type);
   }
 
   private isCommittedInputEvent(event: AIREvent): boolean {
@@ -279,7 +283,9 @@ export class GraphBuilder {
   private isPointerDependentEvent(event: AIREvent): boolean {
     return event.type === 'click'
       || event.type === 'submit'
+      || event.type === 'custom-control-open'
       || event.type === 'custom-select'
+      || event.type === 'custom-menu-select'
       || this.isCommittedInputEvent(event);
   }
 
@@ -328,13 +334,19 @@ export class GraphBuilder {
           `parent:${this.normalizeDedupPart(fingerprint?.parentSelector)}`,
         );
       }
-    } else if (event.type === 'custom-select') {
+    } else if (event.type === 'custom-select' || event.type === 'custom-menu-select') {
       const customSelectEvent = event as any;
       eventSpecificParts.push(
         `selector:${this.normalizeDedupPart(selectorUsed)}`,
         `attributesHash:${this.normalizeDedupPart(attributesHashUsed)}`,
         `value:${this.normalizeDedupPart(customSelectEvent.selection?.value)}`,
         `label:${this.normalizeDedupPart(customSelectEvent.selection?.label)}`,
+      );
+    } else if (event.type === 'custom-control-open') {
+      eventSpecificParts.push(
+        `selector:${this.normalizeDedupPart(selectorUsed)}`,
+        `attributesHash:${this.normalizeDedupPart(attributesHashUsed)}`,
+        `family:${this.normalizeDedupPart((event as any).controlFamily)}`,
       );
     } else if (event.type === 'outcome') {
       eventSpecificParts.push(
@@ -533,9 +545,10 @@ export class GraphBuilder {
         const isInput = normalizedEvent.type === 'input';
         const isScroll = normalizedEvent.type === 'scroll';
         const isSubmit = normalizedEvent.type === 'submit';
-        const isCustomSelect = normalizedEvent.type === 'custom-select';
+        const isCustomControlOpen = normalizedEvent.type === 'custom-control-open';
+        const isCustomSelect = normalizedEvent.type === 'custom-select' || normalizedEvent.type === 'custom-menu-select';
         const isPointerDependentEvent = this.isPointerDependentEvent(normalizedEvent);
-        const usesEventLocalSnapshotPolicy = isInput || isSubmit || isCustomSelect;
+        const usesEventLocalSnapshotPolicy = isInput || isSubmit || isCustomControlOpen || isCustomSelect;
         const tabState = await this.sessionManager.getTabState(normalizedEvent.sessionId, effectiveTabId);
         const lastNodeId = tabState?.lastNodeId ?? null;
         const pointerTimestamp = tabState?.lastEventAt ?? null;
@@ -565,7 +578,7 @@ export class GraphBuilder {
         const intentRaw = IntentDetector.getRawIntent(eventForGraph);
         const slimPayload = { ...eventForGraph } as any;
         // Keep interactionContext in payload for D3.5 diagnostics.
-        // Keep input/submit/custom-select snapshots as event-local truth; trim large node-resolution snapshots elsewhere.
+        // Keep input/submit/custom-control snapshots as event-local truth; trim large node-resolution snapshots elsewhere.
         if (!this.shouldRetainEventSnapshotsInPayload(eventForGraph)) {
           delete slimPayload.pageSnapshot;
           delete slimPayload.pageState;
@@ -655,7 +668,7 @@ export class GraphBuilder {
             nodeId: currentNodeId,
             tabId: effectiveTabId,
           }, eventForGraph.sessionId ?? null, traceId ?? null);
-        } else if (['click', 'custom', 'outcome', 'scroll', 'custom-select', 'spa-route-change'].includes(eventForGraph.type)) {
+        } else if (['click', 'custom', 'outcome', 'scroll', 'custom-control-open', 'custom-select', 'custom-menu-select', 'spa-route-change'].includes(eventForGraph.type)) {
           currentNodeId = await this.baselineHandler.upsertNode(eventForGraph);
         }
 
@@ -702,7 +715,7 @@ export class GraphBuilder {
             return { success: true, stage: 'stale_pointer_bypassed', nodeId: currentNodeId, traceId };
           }
 
-          if (['click', 'input', 'submit', 'custom-select'].includes(eventForGraph.type) && !isHeartbeat) {
+          if (['click', 'input', 'submit', 'custom-control-open', 'custom-select', 'custom-menu-select'].includes(eventForGraph.type) && !isHeartbeat) {
             await this.actionHandler.handleAction(eventForGraph, traceId, currentNodeId, effectiveLastNodeId, effectiveTabId);
             await this.sessionManager.updatePointer(eventForGraph.sessionId, effectiveTabId, currentNodeId, eventForGraph.timestamp);
             await this.logWithContext('info', 'Event stage: action recorded, pending action registered', {

@@ -20,6 +20,11 @@ function makeSidecar(params: {
   warnings?: string[];
   usedSelectorSpec?: boolean;
   session?: string;
+  equivalentRenderingUsed?: boolean;
+  equivalentProofSource?: string;
+  emittedLocator?: string;
+  emittedLocatorEngine?: string;
+  emittedLocatorProofLevel?: string;
 }) {
   return {
     version: 1,
@@ -81,12 +86,14 @@ function makeSidecar(params: {
             warningCodes: params.warnings ?? [],
           },
         },
-        emittedLocator: 'locator("button[name=\\"thing\\"]")',
-        emittedLocatorEngine: params.engine,
-        emittedLocatorProofLevel: params.proofLevel,
+        emittedLocator: params.emittedLocator ?? 'locator("button[name=\\"thing\\"]")',
+        emittedLocatorEngine: params.emittedLocatorEngine ?? params.engine,
+        emittedLocatorProofLevel: params.emittedLocatorProofLevel ?? params.proofLevel,
         emittedLocatorSource: 'resolver',
         emittedLocatorWarnings: params.warnings ?? [],
         usedSelectorSpec: params.usedSelectorSpec ?? true,
+        equivalentRenderingUsed: params.equivalentRenderingUsed ?? false,
+        equivalentProofSource: params.equivalentProofSource,
       },
     },
   };
@@ -218,6 +225,39 @@ describe('smoke KPI summary', () => {
     expect(summary.failuresByEngine.css).toBe(1);
     expect(summary.failuresBySelectorCategory.testid).toBe(1);
     expect(summary.failuresByWarningCode['weak-selector']).toBe(1);
+  });
+
+  it('groups equivalent rendering usage and equivalence proof source', () => {
+    const dir = makeTempDir('air-smoke-kpi-equivalent-');
+    const pageFile = path.join(dir, 'DemoPage.ts');
+    const reportFile = path.join(dir, 'run', 'smoke-report.json');
+    const sidecarFile = path.join(dir, 'run', 'DemoPage.air.json');
+
+    writeJson(sidecarFile, makeSidecar({
+      proofLevel: 'semantic_validated',
+      engine: 'css',
+      category: 'testid',
+      equivalentRenderingUsed: true,
+      equivalentProofSource: 'attribute-equivalence',
+      emittedLocator: 'getByTestId("thing")',
+      emittedLocatorEngine: 'testid',
+      emittedLocatorProofLevel: 'proven_equivalent',
+    }));
+    writeJson(reportFile, makeSmokeReport({
+      generatedFile: pageFile,
+      sidecarFile,
+      passed: false,
+      failureType: 'locator_not_found',
+      proofLevel: 'semantic_validated',
+    }));
+
+    const summary = summarizeSmokeReports({
+      reportFiles: [reportFile],
+      cwd: dir,
+    });
+
+    expect(summary.equivalentEmissionBreakdown.equivalent).toBe(1);
+    expect(summary.equivalenceProofSourceBreakdown['attribute-equivalence']).toBe(1);
   });
 
   it('handles malformed and missing reports safely', () => {

@@ -12,7 +12,9 @@ export const EventTypeSchema = z.enum([
   'custom',
   'network', 
   'hover', 
+  'custom-control-open',
   'custom-select', 
+  'custom-menu-select',
   'spa-route-change'
 ]);
 export type EventType = z.infer<typeof EventTypeSchema>;
@@ -219,6 +221,44 @@ export const CustomSelectEventSchema = BaseEventSchema.extend({
   meta: z.record(z.string(), z.unknown()).optional(),
 });
 
+/** Advanced Event: Custom Control Open (semantic trigger click) */
+export const CustomControlOpenEventSchema = BaseEventSchema.extend({
+  type: z.literal('custom-control-open'),
+  trigger: z.string().optional(),
+  pageTitle: z.string().optional(),
+  viewport: ViewportSchema.optional(),
+  controlFamily: z.string().optional(),
+  triggerText: z.string().optional(),
+  triggerRole: z.string().optional(),
+  triggerFingerprint: ElementFingerprintSchema.nullable().optional(),
+  fingerprint: ElementFingerprintSchema.nullable().optional(),
+  pageSnapshot: PageSnapshotSchema.nullable().optional(),
+  pageState: PageSnapshotSchema.nullable().optional(),
+  interactionContext: PageSnapshotSchema.nullable().optional(),
+  meta: z.record(z.string(), z.unknown()).optional(),
+});
+
+/** Advanced Event: Custom Menu Select (menuitem-based dropdowns) */
+export const CustomMenuSelectEventSchema = BaseEventSchema.extend({
+  type: z.literal('custom-menu-select'),
+  trigger: z.string().optional(),
+  pageTitle: z.string().optional(),
+  viewport: ViewportSchema.optional(),
+  controlFamily: z.string().optional(),
+  optionRole: z.string().optional(),
+  selection: z.object({
+    label: z.string(),
+    value: z.string(),
+    index: z.number()
+  }).optional(),
+  triggerFingerprint: ElementFingerprintSchema.nullable().optional(),
+  fingerprint: ElementFingerprintSchema.nullable().optional(),
+  pageSnapshot: PageSnapshotSchema.nullable().optional(),
+  pageState: PageSnapshotSchema.nullable().optional(),
+  interactionContext: PageSnapshotSchema.nullable().optional(),
+  meta: z.record(z.string(), z.unknown()).optional(),
+});
+
 /** Advanced Event: SPA Route Change */
 export const SpaRouteChangeEventSchema = BaseEventSchema.extend({
   type: z.literal('spa-route-change'),
@@ -243,7 +283,9 @@ export const AIREventSchema = z.discriminatedUnion('type', [
   CustomEventSchema,
   NetworkEventSchema,
   HoverEventSchema,
+  CustomControlOpenEventSchema,
   CustomSelectEventSchema,
+  CustomMenuSelectEventSchema,
   SpaRouteChangeEventSchema
 ]);
 

@@ -379,6 +379,153 @@ describe('selector-resolver', () => {
     }));
   });
 
+  it('derives preferred getByTestId rendering only for exact data-testid selectors', async () => {
+    const submit = makeElement(
+      { 'data-testid': 'save-primary' },
+      { tagName: 'BUTTON', text: 'Save' },
+    );
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '[data-testid="save-primary"]': [submit],
+      }),
+    });
+    const step = makeStep(1, {
+      selector: '[data-testid="save-primary"]',
+      selectorPriority: 'data-testid',
+      selectorRank: 1,
+      sourceNodeId: 'node-1',
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const preferredRenderings = result.resolutions[0]?.resolverMetadata.selectorEvaluation?.preferredRenderings ?? [];
+
+    expect(preferredRenderings[0]).toEqual(expect.objectContaining({
+      engine: 'testid',
+      locator: `getByTestId("save-primary")`,
+      proofLevel: 'proven_equivalent',
+      proofSource: 'attribute-equivalence',
+      sourceSelector: '[data-testid="save-primary"]',
+      sourceEngine: 'css',
+    }));
+  });
+
+  it('does not derive getByTestId rendering for data-cy or data-qa selectors', async () => {
+    const submit = makeElement(
+      { 'data-cy': 'save-cy', 'data-qa': 'save-qa' },
+      { tagName: 'BUTTON', text: 'Save' },
+    );
+    const snapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '[data-cy="save-cy"]': [submit],
+        '[data-qa="save-qa"]': [submit],
+      }),
+    });
+
+    const dataCyStep = makeStep(1, {
+      selector: '[data-cy="save-cy"]',
+      selectorPriority: 'attribute',
+      selectorRank: 3,
+      sourceNodeId: 'node-1',
+    });
+    const dataQaStep = makeStep(2, {
+      selector: '[data-qa="save-qa"]',
+      selectorPriority: 'attribute',
+      selectorRank: 3,
+      sourceNodeId: 'node-1',
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([dataCyStep, dataQaStep]), snapshotCache, { enableLLMFallback: false });
+
+    expect(result.resolutions[0]?.resolverMetadata.selectorEvaluation?.preferredRenderings ?? []).toEqual([]);
+    expect(result.resolutions[1]?.resolverMetadata.selectorEvaluation?.preferredRenderings ?? []).toEqual([]);
+  });
+
+  it('derives exact getByPlaceholder rendering only for input and textarea families', async () => {
+    const input = makeElement(
+      { placeholder: 'Username' },
+      { tagName: 'INPUT' },
+    );
+    const div = makeElement(
+      { placeholder: 'Username' },
+      { tagName: 'DIV', text: 'Username' },
+    );
+    const inputSnapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        'input[placeholder="Username"]': [input],
+      }),
+    });
+    const divSnapshotCache = makeSnapshotCache({
+      'node-2': makeDocument({
+        'div[placeholder="Username"]': [div],
+      }),
+    });
+
+    const inputStep = makeStep(1, {
+      selector: 'input[placeholder="Username"]',
+      selectorPriority: 'attribute',
+      selectorRank: 3,
+      action: 'input',
+      sourceNodeId: 'node-1',
+    });
+    const divStep = makeStep(2, {
+      selector: 'div[placeholder="Username"]',
+      selectorPriority: 'attribute',
+      selectorRank: 3,
+      action: 'click',
+      sourceNodeId: 'node-2',
+    });
+
+    const inputResult = await resolveSelectorsForSession(makeSession([inputStep]), inputSnapshotCache, { enableLLMFallback: false });
+    const divResult = await resolveSelectorsForSession(makeSession([divStep]), divSnapshotCache, { enableLLMFallback: false });
+
+    expect(inputResult.resolutions[0]?.resolverMetadata.selectorEvaluation?.preferredRenderings?.[0]).toEqual(expect.objectContaining({
+      engine: 'placeholder',
+      locator: `getByPlaceholder("Username", { exact: true })`,
+      proofLevel: 'proven_equivalent',
+      proofSource: 'attribute-equivalence',
+    }));
+    expect(divResult.resolutions[0]?.resolverMetadata.selectorEvaluation?.preferredRenderings ?? []).toEqual([]);
+  });
+
+  it('derives exact getByText rendering only for strict text selectors, not :has-text containers', async () => {
+    const logout = makeElement({}, { tagName: 'A', text: 'Logout' });
+    const container = makeElement({}, { tagName: 'DIV', text: 'Logout' });
+    const strictSnapshotCache = makeSnapshotCache({
+      'node-1': makeDocument({
+        '*': [logout],
+      }),
+    });
+    const broadSnapshotCache = makeSnapshotCache({
+      'node-2': makeDocument({
+        'div:has-text("Logout")': [container],
+      }),
+    });
+
+    const strictStep = makeStep(1, {
+      selector: 'text=Logout',
+      selectorPriority: 'text',
+      selectorRank: 8,
+      sourceNodeId: 'node-1',
+    });
+    const broadStep = makeStep(2, {
+      selector: 'div:has-text("Logout")',
+      selectorPriority: 'text',
+      selectorRank: 8,
+      sourceNodeId: 'node-2',
+    });
+
+    const strictResult = await resolveSelectorsForSession(makeSession([strictStep]), strictSnapshotCache, { enableLLMFallback: false });
+    const broadResult = await resolveSelectorsForSession(makeSession([broadStep]), broadSnapshotCache, { enableLLMFallback: false });
+
+    expect(strictResult.resolutions[0]?.resolverMetadata.selectorEvaluation?.preferredRenderings?.[0]).toEqual(expect.objectContaining({
+      engine: 'text',
+      locator: `getByText("Logout", { exact: true })`,
+      proofLevel: 'proven_equivalent',
+      proofSource: 'text-equivalence',
+    }));
+    expect(broadResult.resolutions[0]?.resolverMetadata.selectorEvaluation?.preferredRenderings ?? []).toEqual([]);
+  });
+
   it('rejects unique href-mismatched deterministic candidate', async () => {
     const adminWrong = makeElement(
       { class: 'menu-item', href: '/web/index.php/pim/viewPimModule' },

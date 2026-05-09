@@ -93,7 +93,7 @@ export function getSourceNodeId(
 // ACTION TYPES THAT PRODUCE MEANINGFUL TEST STEPS
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-const ACTIONABLE_TYPES = new Set(['click', 'input', 'submit', 'custom-select']);
+const ACTIONABLE_TYPES = new Set(['click', 'input', 'submit', 'custom-control-open', 'custom-select', 'custom-menu-select']);
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // FIX B â€” FRAGILE SELECTOR PRIORITIES
@@ -342,7 +342,7 @@ function extractValue(payloadJson: string | null, eventType: string): string | u
   try {
     const payload = JSON.parse(payloadJson);
 
-    if (eventType === 'custom-select' && payload.selection?.label) {
+    if ((eventType === 'custom-select' || eventType === 'custom-menu-select') && payload.selection?.label) {
       return payload.selection.label;
     }
 
@@ -694,7 +694,7 @@ export class CodegenService {
     }
 
     // â”€â”€ 2. Load ordered events for this session â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    const includeTypes = ['click', 'input', 'submit', 'custom-select'];
+    const includeTypes = ['click', 'input', 'submit', 'custom-control-open', 'custom-select', 'custom-menu-select'];
     if (this.options.includeScrollSteps) includeTypes.push('scroll');
     if (this.options.includeHoverSteps)  includeTypes.push('hover');
 

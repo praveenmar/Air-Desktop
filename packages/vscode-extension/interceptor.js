@@ -10,7 +10,10 @@ const EventType = {
   INPUT: 'input',
   SCROLL: 'scroll',
   NAVIGATION: 'navigation',
-  CUSTOM: 'custom'
+  CUSTOM: 'custom',
+  CUSTOM_CONTROL_OPEN: 'custom-control-open',
+  CUSTOM_MENU_SELECT: 'custom-menu-select',
+  CUSTOM_SELECT: 'custom-select',
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -507,6 +510,15 @@ class AIRInterceptor {
     // ------------------------------------------------------------
     this._openDropdown    = null;  // { traceId, triggerEl, triggerFingerprint, openTimestamp }
     this._dropdownObserver = null; // MutationObserver instance (one at a time)
+
+    // ── MOUSEDOWN PRE-CAPTURE for DOM-detachment race ──
+    // Some frameworks (Vue/OrangeHRM) remove the dropdown option element from
+    // the DOM synchronously during the click event's capture/target phase,
+    // before AIR's bubble-level click handler can inspect ancestry. We use a
+    // capture-phase mousedown to snapshot the option data while the DOM is
+    // still live, then validate+consume it in handleClick.
+    this._pendingOptionSelection = null; // { optionData, fingerprint, timestamp, ... }
+    this._pendingOptionSelectionFallbackTimer = null;
 
     // PII Redaction
     // ⚠️ FIX (BUG): Removed /g flag. RegExp with /g maintains stateful `lastIndex`
@@ -3443,6 +3455,11 @@ class AIRInterceptor {
     document.addEventListener("blur",   this._boundHandleBlur,   true);
     document.addEventListener("change", this._boundHandleChange, true);
 
+    // Mousedown pre-capture: snapshots option data BEFORE the framework can
+    // remove the element from the DOM. Must fire before click.
+    this._boundHandleMousedownForOption = this._handleMousedownForOption.bind(this);
+    document.addEventListener("mousedown", this._boundHandleMousedownForOption, true);
+
     // Item 3.1: Hover detection — mouseenter fires when cursor enters an element.
     // We watch for DOM mutations in a 300ms window afterward; if the page
     // reacts (tooltip, dropdown, sub-menu revealed) we emit a hover action.
@@ -4376,6 +4393,8 @@ class AIRInterceptor {
       "bs-select-option",
       // PrimeNG / PrimeFaces
       "p-dropdown-item", "ui-dropdown-item",
+      // OrangeHRM
+      "oxd-select-option", "oxd-userdropdown-link", "oxd-autocomplete-option",
     ];
   }
 
@@ -4398,6 +4417,8 @@ class AIRInterceptor {
       "select2-results",
       "select__menu",
       "p-dropdown-panel",
+      // OrangeHRM
+      "oxd-select-dropdown", "oxd-userdropdown", "oxd-autocomplete-dropdown",
     ];
   }
 
@@ -4416,7 +4437,190 @@ class AIRInterceptor {
       "select2-selection",
       "select__control", "select__dropdown-indicator",
       "p-dropdown-trigger",
+      // OrangeHRM
+      "oxd-select-text", "oxd-select-wrapper", "oxd-select-text-input",
+      "oxd-userdropdown-tab", "oxd-userdropdown-name",
     ];
+  }
+
+  static get MENU_OPTION_ROLES() {
+    return new Set(["menuitem", "menuitemradio", "menuitemcheckbox"]);
+  }
+
+  static get OPTION_FALLBACK_DELAY_MS() {
+    return 100;
+  }
+
+  static get OPTION_FALLBACK_MAX_AGE_MS() {
+    return 500;
+  }
+
+  static get ORANGEHRM_TRIGGER_SELECTORS() {
+    return [
+      ".oxd-select-text",
+      ".oxd-select-wrapper",
+      ".oxd-userdropdown-tab",
+      ".oxd-userdropdown-name",
+    ];
+  }
+
+  _isElementVisible(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+    if (el.hidden) return false;
+    if (el.getAttribute?.("aria-hidden") === "true") return false;
+
+    const style = window.getComputedStyle?.(el);
+    if (style) {
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      if (style.opacity === "0") return false;
+    }
+
+    const rect = el.getBoundingClientRect?.();
+    if (!rect) return true;
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  _looksLikeOrangeHrmTrigger(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+    const cls = (el.className || "").toLowerCase();
+    const matchesKnownClass = AIRInterceptor.TRIGGER_CLASS_PATTERNS.some(p => cls.includes(p));
+    if (matchesKnownClass) return true;
+
+    if (el.matches?.(".oxd-select-text, .oxd-select-wrapper")) {
+      const hasReadonlyInput = !!el.querySelector?.('input[readonly], .oxd-select-text-input');
+      const hasChevron = !!el.querySelector?.(
+        '.oxd-select-text--after, [class*="caret"], [class*="chevron"], [class*="dropdown"], .oxd-icon'
+      );
+      return hasReadonlyInput || hasChevron;
+    }
+
+    if (el.matches?.(".oxd-userdropdown-tab, .oxd-userdropdown-name")) {
+      const userDropdownRoot = el.closest?.(".oxd-userdropdown");
+      const hasChevron = !!(userDropdownRoot || el).querySelector?.('[class*="caret"], [class*="dropdown"], .oxd-icon');
+      return hasChevron || !!userDropdownRoot;
+    }
+
+    return false;
+  }
+
+  _resolveOrangeHrmTrigger(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return null;
+
+    for (const selector of AIRInterceptor.ORANGEHRM_TRIGGER_SELECTORS) {
+      const candidate = el.matches?.(selector) ? el : el.closest?.(selector);
+      if (candidate && this._looksLikeOrangeHrmTrigger(candidate)) {
+        return candidate;
+      }
+    }
+
+    const readonlyInput = el.matches?.('input[readonly], .oxd-select-text-input')
+      ? el
+      : el.closest?.('input[readonly], .oxd-select-text-input');
+    if (readonlyInput) {
+      const wrapped = readonlyInput.closest?.('.oxd-select-text, .oxd-select-wrapper');
+      if (wrapped && this._looksLikeOrangeHrmTrigger(wrapped)) {
+        return wrapped;
+      }
+    }
+
+    return null;
+  }
+
+  _inferCustomControlFamily(triggerEl, panelEl = null) {
+    const triggerRole = (triggerEl?.getAttribute?.("role") || "").toLowerCase();
+    const triggerCls = (triggerEl?.className || "").toLowerCase();
+    const panelRole = (panelEl?.getAttribute?.("role") || "").toLowerCase();
+
+    if (panelRole === "menu" || triggerCls.includes("userdropdown")) return "menu";
+    if (triggerRole === "combobox" || panelRole === "listbox") return "combobox";
+    if (triggerCls.includes("select")) return "dropdown";
+    return "dropdown";
+  }
+
+  _collectVisibleOptionEntries(panelEl, limit = 8) {
+    if (!panelEl || panelEl.nodeType !== Node.ELEMENT_NODE) return [];
+    const optionSelector = [
+      ...Array.from(AIRInterceptor.OPTION_ROLES).map(role => `[role="${role}"]`),
+      ...AIRInterceptor.OPTION_CLASS_PATTERNS.map(pattern => `[class*="${pattern}"]`),
+    ].join(", ");
+
+    const entries = [];
+    for (const el of Array.from(panelEl.querySelectorAll(optionSelector))) {
+      if (!this._isElementVisible(el)) continue;
+      const option = this._extractOptionData(el);
+      if (!option?.label) continue;
+      entries.push({
+        label: option.label,
+        value: option.value,
+        role: (el.getAttribute("role") || "").toLowerCase() || null,
+      });
+      if (entries.length >= limit) break;
+    }
+    return entries;
+  }
+
+  _findVisibleDropdownPanel(triggerEl = null) {
+    const controlledId = triggerEl?.getAttribute?.("aria-controls");
+    if (controlledId) {
+      const directPanel = document.getElementById(controlledId);
+      if (directPanel && this._isElementVisible(directPanel)) {
+        return directPanel;
+      }
+    }
+
+    const selector = [
+      ...Array.from(AIRInterceptor.CONTAINER_ROLES).map(role => `[role="${role}"]`),
+      ...AIRInterceptor.CONTAINER_CLASS_PATTERNS.map(pattern => `[class*="${pattern}"]`),
+    ].join(", ");
+
+    const candidates = Array.from(document.querySelectorAll(selector))
+      .filter(el => this._isElementVisible(el));
+
+    if (candidates.length === 0) return null;
+
+    const triggerRect = triggerEl?.getBoundingClientRect?.() || null;
+    const scored = candidates
+      .map(panel => {
+        const optionCount = this._collectVisibleOptionEntries(panel).length;
+        const rect = panel.getBoundingClientRect?.();
+        const distance = triggerRect && rect
+          ? Math.abs(rect.top - triggerRect.bottom) + Math.abs(rect.left - triggerRect.left)
+          : 10_000;
+        return { panel, score: optionCount * 100 - distance };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    return scored[0]?.panel || null;
+  }
+
+  async _awaitCustomControlOpenEvidence(triggerEl, timeoutMs = 250) {
+    const start = Date.now();
+
+    while ((Date.now() - start) <= timeoutMs) {
+      const expanded = (triggerEl?.getAttribute?.("aria-expanded") || "").toLowerCase() === "true";
+      const panelEl = this._findVisibleDropdownPanel(triggerEl);
+      const optionPreview = panelEl ? this._collectVisibleOptionEntries(panelEl) : [];
+
+      if (expanded || panelEl || optionPreview.length > 0) {
+        return {
+          handled: true,
+          expanded,
+          panelEl,
+          optionPreview,
+          observedAfterMs: Date.now() - start,
+        };
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 40));
+    }
+
+    return {
+      handled: false,
+      expanded: false,
+      panelEl: null,
+      optionPreview: [],
+      observedAfterMs: Date.now() - start,
+    };
   }
 
   // ──────────────────────────────────────────────────────────────
@@ -4465,6 +4669,9 @@ class AIRInterceptor {
     let cursor = el;
     for (let depth = 0; depth < 5; depth++) {
       if (!cursor || cursor === document.body) break;
+
+      const orangeHrmTrigger = this._resolveOrangeHrmTrigger(cursor);
+      if (orangeHrmTrigger) return orangeHrmTrigger;
 
       const role    = (cursor.getAttribute("role")         || "").toLowerCase();
       const popup   =  cursor.getAttribute("aria-haspopup");
@@ -4547,8 +4754,10 @@ class AIRInterceptor {
    * If aria-expanded is now "true" (or a panel appeared in the DOM),
    * we open a tracking session and watch for the option panel.
    */
-  _onDropdownOpened(triggerEl, triggerFingerprint) {
+  async _onDropdownOpened(triggerEl, triggerFingerprint, nestedContext, traceId, openEvidence = null) {
     const expanded = triggerEl.getAttribute("aria-expanded");
+    const evidence = openEvidence || await this._awaitCustomControlOpenEvidence(triggerEl);
+    const controlFamily = this._inferCustomControlFamily(triggerEl, evidence?.panelEl || null);
 
     // If expanded didn't flip to "true", this wasn't really a dropdown open
     // (could be a button click that does something else). Still proceed for
@@ -4556,6 +4765,8 @@ class AIRInterceptor {
     this.log("🔽 Custom dropdown trigger activated", {
       selector:  triggerFingerprint?.selector,
       expanded,
+      handled: evidence?.handled ?? false,
+      controlFamily,
     });
 
     // Close any previously orphaned session
@@ -4567,11 +4778,11 @@ class AIRInterceptor {
       this._dropdownObserver = null;
     }
 
-    const traceId = this._createActionTraceId();
     this._openDropdown = {
       traceId,
       triggerEl,
       triggerFingerprint,
+      controlFamily,
       openTimestamp: Date.now(),
     };
 
@@ -4584,53 +4795,77 @@ class AIRInterceptor {
       }
     }, 30_000);
 
-    // Watch for option panels injected into the DOM by the framework
-    this._watchForDropdownPanel(traceId);
+    let afterOpenSnapshot = undefined;
+    if (this.config.capturePageSnapshot) {
+      try {
+        afterOpenSnapshot = await this.capturePageSnapshot(
+          this.config.snapshotDepth,
+          false,
+        );
+      } catch (err) {
+        this.log("Failed to capture custom control open snapshot", err);
+      }
+    }
+
+    const pageUrl = window.location.href;
+    const normalizedUrl = this.normalizeUrl(pageUrl);
+    const panelRole = (evidence?.panelEl?.getAttribute?.("role") || "").toLowerCase() || null;
+    const panelClass = typeof evidence?.panelEl?.className === "string"
+      ? evidence.panelEl.className.slice(0, 200)
+      : null;
+
+    this.lastActionTraceId = traceId;
+    this.lastActionTraceAt = Date.now();
+
+    this.queueEvent({
+      id: this.generateUUID(),
+      type: EventType.CUSTOM_CONTROL_OPEN,
+      trigger: "click",
+      timestamp: Date.now(),
+      traceId,
+      pageUrl,
+      normalizedUrl,
+      pageTitle: document.title,
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      sessionId: this.config.sessionId,
+      nestedContext,
+      schemaVersion: "air:v2", // custom-control-open
+      controlFamily,
+      triggerText: this.extractText(triggerEl) || undefined,
+      triggerRole: (triggerEl.getAttribute("role") || "").toLowerCase() || undefined,
+      fingerprint: triggerFingerprint,
+      triggerFingerprint,
+      pageSnapshot: afterOpenSnapshot || undefined,
+      pageState: afterOpenSnapshot || undefined,
+      meta: {
+        expanded: evidence?.expanded ?? false,
+        observedAfterMs: evidence?.observedAfterMs ?? null,
+        popupDetected: !!evidence?.panelEl,
+        popupRole: panelRole,
+        popupClass: panelClass,
+        optionPreview: evidence?.optionPreview || [],
+      },
+    });
+    this.flushQueue();
+
+    if (!evidence?.panelEl) {
+      // Watch for option panels injected after the initial open-state check.
+      this._watchForDropdownPanel(traceId);
+    }
   }
 
-  /**
-   * Attach a MutationObserver that listens for new option panels
-   * appended to the document. Fires once, then disconnects.
-   * Useful for frameworks that portal their dropdowns to <body>.
-   */
-  _watchForDropdownPanel(traceId) {
-    if (this._dropdownObserver) this._dropdownObserver.disconnect();
+  async _handlePotentialCustomControlTrigger(triggerEl, triggerFingerprint, nestedContext) {
+    if (!triggerEl || !triggerFingerprint) return false;
 
-    this._dropdownObserver = new MutationObserver((mutations) => {
-      for (const mutation of mutations) {
-        for (const node of mutation.addedNodes) {
-          if (node.nodeType !== Node.ELEMENT_NODE) continue;
-          const role = (node.getAttribute?.("role") || "").toLowerCase();
-          const cls  = (node.className              || "").toLowerCase();
-          const isPanel =
-            AIRInterceptor.CONTAINER_ROLES.has(role) ||
-            AIRInterceptor.CONTAINER_CLASS_PATTERNS.some(p => cls.includes(p));
+    const traceId = this.generateUUID();
+    const evidence = await this._awaitCustomControlOpenEvidence(triggerEl);
+    if (!evidence?.handled) {
+      return false;
+    }
 
-          if (isPanel) {
-            this.log("👁️ Dropdown panel detected in DOM", { tag: node.tagName, cls: node.className });
-            // Panel appeared — no need to watch further
-            this._dropdownObserver.disconnect();
-            this._dropdownObserver = null;
-            return;
-          }
-        }
-      }
-    });
-
-    this._dropdownObserver.observe(document.body, {
-      childList: true,
-      subtree:   true,
-    });
-
-    // Disconnect after 5 s regardless to avoid long-lived observers
-    setTimeout(() => {
-      if (this._dropdownObserver) {
-        this._dropdownObserver.disconnect();
-        this._dropdownObserver = null;
-      }
-    }, 5000);
+    await this._onDropdownOpened(triggerEl, triggerFingerprint, nestedContext, traceId, evidence);
+    return true;
   }
-
   // ──────────────────────────────────────────────────────────────
   // PHASE 2 — OPTION SELECTED
   // ──────────────────────────────────────────────────────────────
@@ -4639,10 +4874,19 @@ class AIRInterceptor {
    * Called by handleClick when we confirm the click target is an option.
    * Emits a structured "custom-select" event and closes the session.
    */
-  _handleCustomDropdownSelection(optionData, clickEvent) {
+  _handleCustomDropdownSelection(optionData, clickEvent, explicitTraceId = null, explicitControlFamily = null) {
     const { label, value, index, el } = optionData;
     const session = this._openDropdown;
     const eventId = this.generateUUID();
+    const optionRole = (el?.getAttribute?.("role") || "").toLowerCase();
+    const optionContainer = this._findDropdownContainer(el);
+    const containerRole = (optionContainer?.getAttribute?.("role") || "").toLowerCase();
+    const controlFamily = explicitControlFamily || session?.controlFamily || this._inferCustomControlFamily(session?.triggerEl || null, optionContainer);
+    const isMenuSelection =
+      AIRInterceptor.MENU_OPTION_ROLES.has(optionRole) ||
+      containerRole === "menu" ||
+      controlFamily === "menu";
+    const eventType = isMenuSelection ? EventType.CUSTOM_MENU_SELECT : EventType.CUSTOM_SELECT;
 
     this.log("✅ Custom dropdown option selected", { label, value, index });
 
@@ -4652,7 +4896,17 @@ class AIRInterceptor {
       this._dropdownObserver = null;
     }
 
-    const traceId          = session?.traceId || this._getRecentActionTrace() || this._createActionTraceId();
+    const traceId          = explicitTraceId || session?.traceId || this._getRecentActionTrace() || this._createActionTraceId();
+    const optionSelectorForLog = this.generateFingerprint(el)?.selector || null;
+    this.log("CUSTOM_SELECT_EMIT_ATTEMPT", {
+      eventType,
+      label,
+      value,
+      traceId,
+      controlFamily,
+      triggerSelector: session?.triggerFingerprint?.selector || null,
+      optionSelector: optionSelectorForLog,
+    });
     this._markActionTrace(traceId);
     const triggerFp        = session?.triggerFingerprint || null;
     const durationMs       = session ? Date.now() - session.openTimestamp : null;
@@ -4673,7 +4927,7 @@ class AIRInterceptor {
     const normalizedUrl = this.normalizeUrl(pageUrl);
     this.queueEvent({
       id:            eventId,
-      type:          "custom-select",          // distinct from native "input" / "change"
+      type:          eventType,                // distinct from native "input" / "change"
       trigger:       "option-click",
       timestamp:     Date.now(),
       traceId,
@@ -4684,12 +4938,8 @@ class AIRInterceptor {
       sessionId:     this.config.sessionId,
       nestedContext,
       schemaVersion: "air:v2",
-      // ── Selection payload ──
-      selection: {
-        label,                                 // human-readable text of chosen option
-        value,                                 // data-value / value attr (may equal label)
-        index,                                 // 0-based position in the list
-      },
+      controlFamily,
+      optionRole: optionRole || undefined,
       // ── Relationship back to the trigger element ──
       triggerFingerprint: triggerFp,
       // ── Option element identity ──
@@ -4698,19 +4948,147 @@ class AIRInterceptor {
       meta: {
         durationMs,                            // time between open and select
         hadExplicitSession: !!session,         // did we track the trigger click?
+        triggerSelector: triggerFp?.selector || null,
+        containerRole: containerRole || null,
       },
       pageSnapshot: subtreeSnapshot || undefined,
       pageState: subtreeSnapshot || undefined,
       interactionContext: undefined,
     });
 
+    this.log("CUSTOM_SELECT_EMITTED", {
+      eventType,
+      eventId,
+      traceId,
+      selector: optionFingerprint?.selector || null,
+      label,
+    });
+    this.flushQueue();
     this._closeDropdownSession();
+  }
+
+  _clearPendingOptionSelection() {
+    if (this._pendingOptionSelectionFallbackTimer) {
+      clearTimeout(this._pendingOptionSelectionFallbackTimer);
+      this._pendingOptionSelectionFallbackTimer = null;
+    }
+    this._pendingOptionSelection = null;
+  }
+
+  _schedulePendingOptionSelectionFallback() {
+    if (this._pendingOptionSelectionFallbackTimer) {
+      clearTimeout(this._pendingOptionSelectionFallbackTimer);
+    }
+
+    this._pendingOptionSelectionFallbackTimer = setTimeout(() => {
+      this._pendingOptionSelectionFallbackTimer = null;
+      this._consumePendingOptionSelectionFromFallback('timer');
+    }, AIRInterceptor.OPTION_FALLBACK_DELAY_MS);
+
+    this.log("PENDING_OPTION_FALLBACK_SCHEDULED", {
+      delayMs: AIRInterceptor.OPTION_FALLBACK_DELAY_MS,
+      traceId: this._pendingOptionSelection?.traceId || null,
+      controlFamily: this._pendingOptionSelection?.controlFamily || null,
+      optionRole: this._pendingOptionSelection?.optionRole || null,
+      containerRole: this._pendingOptionSelection?.containerRole || null,
+    });
+  }
+
+  _consumePendingOptionSelectionFromFallback(reason = 'timer') {
+    const pending = this._pendingOptionSelection;
+    if (!pending) {
+      this.log("PENDING_OPTION_FALLBACK_SKIPPED", { reason: 'already_consumed', source: reason });
+      return false;
+    }
+
+    const ageMs = Date.now() - pending.timestamp;
+    const optionData = pending.optionData;
+    const optionRole = pending.optionRole || '';
+    const containerRole = pending.containerRole || '';
+    const controlFamily = pending.controlFamily || '';
+    const listboxLike =
+      optionRole === 'option' ||
+      containerRole === 'listbox' ||
+      controlFamily === 'combobox' ||
+      controlFamily === 'autocomplete';
+    const validOption =
+      !!optionData &&
+      typeof optionData.label === 'string' &&
+      optionData.label.trim().length > 0 &&
+      typeof optionData.value === 'string' &&
+      optionData.value.trim().length > 0;
+    const hasInputContext = controlFamily === 'autocomplete' && !!pending.traceId;
+    const validContext = !!pending.hasOpenDropdown || hasInputContext;
+
+    if (AIRInterceptor.MENU_OPTION_ROLES.has(optionRole) || containerRole === 'menu' || controlFamily === 'menu') {
+      this.log("PENDING_OPTION_FALLBACK_SKIPPED", {
+        reason: 'menuitem_click_path_preferred',
+        source: reason,
+        traceId: pending.traceId || null,
+      });
+      this._clearPendingOptionSelection();
+      return false;
+    }
+
+    if (ageMs > AIRInterceptor.OPTION_FALLBACK_MAX_AGE_MS) {
+      this.log("PENDING_OPTION_FALLBACK_SKIPPED", {
+        reason: 'stale',
+        source: reason,
+        ageMs,
+      });
+      this._clearPendingOptionSelection();
+      return false;
+    }
+
+    if (!validOption) {
+      this.log("PENDING_OPTION_FALLBACK_SKIPPED", {
+        reason: 'invalid_option',
+        source: reason,
+        ageMs,
+      });
+      this._clearPendingOptionSelection();
+      return false;
+    }
+
+    if (!listboxLike || !validContext) {
+      this.log("PENDING_OPTION_FALLBACK_SKIPPED", {
+        reason: 'invalid_context',
+        source: reason,
+        ageMs,
+        optionRole,
+        containerRole,
+        controlFamily,
+        hasOpenDropdown: !!pending.hasOpenDropdown,
+        hasInputContext,
+      });
+      this._clearPendingOptionSelection();
+      return false;
+    }
+
+    this.log("PENDING_OPTION_FALLBACK_CONSUMED", {
+      label: optionData.label,
+      value: optionData.value,
+      traceId: pending.traceId || null,
+      controlFamily,
+      ageMs,
+      source: reason,
+    });
+
+    this._clearPendingOptionSelection();
+    this._handleCustomDropdownSelection(
+      optionData,
+      { target: optionData.el || null },
+      pending.traceId,
+      controlFamily
+    );
+    return true;
   }
 
   /**
    * Tear down the open dropdown session cleanly.
    */
   _closeDropdownSession() {
+    this._clearPendingOptionSelection();
     if (this._openDropdown?._expireTimer) {
       clearTimeout(this._openDropdown._expireTimer);
     }
@@ -4722,6 +5100,117 @@ class AIRInterceptor {
   }
 
   // ──────────────────────────────────────────────────────────────
+
+  // ─────────────────────────────────────────────────────────────
+  // MOUSEDOWN PRE-CAPTURE (DOM detachment race guard)
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Capture-phase mousedown handler that snapshots option data while the DOM
+   * is still live. Fires BEFORE the framework's own click handler can remove
+   * the option element from the DOM.
+   *
+   * Does NOT emit any event — only stores a pending snapshot.
+   * The actual custom-select is emitted by handleClick which validates the
+   * pending data and confirms the user actually completed the click.
+   */
+  _handleMousedownForOption(e) {
+    if (this.disabled) return;
+
+    const target = this._getComposedEventTarget(e);
+    if (!target) return;
+
+    this.log("MOUSEDOWN_OPTION_HANDLER_ENTER", {
+      hasOpenDropdown: !!this._openDropdown,
+      activeInputSessionCount: this.activeInputSessions.size,
+      targetTag: target.tagName || null,
+      targetRole: target.getAttribute?.('role') || null,
+      targetClass: typeof target.className === 'string' ? target.className : null,
+      targetText: (this.extractText(target) || '').trim().slice(0, 80) || null,
+      x: e.clientX || 0,
+      y: e.clientY || 0,
+    });
+
+    const optionData = this._detectCustomDropdownOption(target);
+    if (!optionData) {
+      let reason = 'no_option_match';
+      if (this._openDropdown) {
+        reason = 'open_dropdown_but_target_not_option';
+      } else if (this.activeInputSessions.size > 0) {
+        reason = 'input_context_but_target_not_option';
+      }
+      this.log("MOUSEDOWN_OPTION_NOT_DETECTED", {
+        targetRole: target.getAttribute?.('role') || null,
+        targetClass: typeof target.className === 'string' ? target.className : null,
+        targetText: (this.extractText(target) || '').trim().slice(0, 80) || null,
+        hasOpenDropdown: !!this._openDropdown,
+        activeInputSessionCount: this.activeInputSessions.size,
+        reason,
+      });
+      this._clearPendingOptionSelection();
+      return;
+    }
+
+    const optionFingerprint = this.generateFingerprint(optionData.el);
+    const optionContainer = this._findDropdownContainer(optionData.el);
+    const containerRole = (optionContainer?.getAttribute?.('role') || '').toLowerCase();
+    const optionRole = (optionData.el?.getAttribute?.('role') || '').toLowerCase();
+
+    let traceId = null;
+    let controlFamily = null;
+    let triggerFingerprint = null;
+    let hasOpenDropdown = false;
+
+    if (this._openDropdown) {
+      hasOpenDropdown = true;
+      traceId = this._openDropdown.traceId;
+      controlFamily = this._openDropdown.controlFamily;
+      triggerFingerprint = this._openDropdown.triggerFingerprint;
+    } else {
+      if (this.activeInputSessions.size > 0) {
+        const sessions = Array.from(this.activeInputSessions.values());
+        traceId = sessions[sessions.length - 1].traceId;
+      }
+      controlFamily = 'autocomplete';
+    }
+
+    this._clearPendingOptionSelection();
+    this._pendingOptionSelection = {
+      optionData,
+      optionFingerprint,
+      optionRole,
+      containerRole,
+      containerEl: optionContainer,
+      timestamp: Date.now(),
+      mousedownClientX: e.clientX,
+      mousedownClientY: e.clientY,
+      hasOpenDropdown,
+      traceId,
+      controlFamily,
+      triggerFingerprint,
+    };
+    this.log("MOUSEDOWN_OPTION_CAPTURED", {
+      label: optionData.label,
+      value: optionData.value,
+      optionRole,
+      optionSelector: optionFingerprint?.selector || null,
+      containerRole: containerRole || null,
+      containerClass: typeof optionContainer?.className === 'string' ? optionContainer.className : null,
+      traceId,
+      controlFamily,
+      hasOpenDropdown,
+      timestamp: this._pendingOptionSelection.timestamp,
+    });
+
+    this.log('🖱️ Mousedown pre-captured option for pending custom-select', {
+      label: optionData.label,
+      value: optionData.value,
+      selector: optionFingerprint?.selector,
+      traceId,
+      controlFamily,
+    });
+    this._schedulePendingOptionSelectionFallback();
+  }
 
   // ─────────────────────────────────────────────────────────────
   // CLICK HANDLER
@@ -4740,7 +5229,75 @@ class AIRInterceptor {
     // because option clicks are intentionally short-circuited below.
     // ══════════════════════════════════════════════════════════════
 
-    // ── Phase 2: Is this click selecting an option inside an open dropdown? ──
+    // ── Phase 2a: Consume mousedown pre-captured option (DOM detachment race guard) ──
+    // If mousedown pre-captured an option while the DOM was live, validate and
+    // consume it here. This handles frameworks that remove the dropdown from the
+    // DOM synchronously during the click target/capture phase.
+    if (this._pendingOptionSelection) {
+      const pending = this._pendingOptionSelection;
+      this._clearPendingOptionSelection(); // always consume, even if invalid
+
+      const ageMs = Date.now() - pending.timestamp;
+      const sessionValid = pending.hasOpenDropdown ? (this._openDropdown && pending.traceId === this._openDropdown.traceId) : true;
+
+      // Spatial validation: click coordinates must be near the mousedown location.
+      // Prevents ghost selections if the user pressed mousedown on an option but
+      // dragged their mouse away and released elsewhere.
+      const dx = Math.abs((e.clientX || 0) - (pending.mousedownClientX || 0));
+      const dy = Math.abs((e.clientY || 0) - (pending.mousedownClientY || 0));
+      const spatiallyValid = dx <= 30 && dy <= 30;
+      const hasOpenDropdownNow = !!this._openDropdown;
+      this.log("PENDING_OPTION_FOUND_ON_CLICK", {
+        ageMs,
+        sessionValid: !!sessionValid,
+        spatiallyValid,
+        dx,
+        dy,
+        hasOpenDropdownNow,
+        pendingHasOpenDropdown: !!pending.hasOpenDropdown,
+        pendingTraceId: pending.traceId || null,
+        openDropdownTraceId: this._openDropdown?.traceId || null,
+      });
+
+      if (ageMs <= 500 && sessionValid && spatiallyValid) {
+        this.log("PENDING_OPTION_CONSUMED", {
+          label: pending.optionData?.label || null,
+          value: pending.optionData?.value || null,
+          traceId: pending.traceId || null,
+          controlFamily: pending.controlFamily || null,
+        });
+        this.log("✅ Consuming mousedown pre-captured option as custom-select", {
+          label: pending.optionData.label,
+          ageMs,
+          dx, dy,
+        });
+        this._handleCustomDropdownSelection(pending.optionData, e, pending.traceId, pending.controlFamily);
+        return;
+      } else {
+        this.log("⚠️ Discarding stale/invalid pending option", {
+          ageMs, sessionValid, spatiallyValid, dx, dy,
+        });
+        let reason = 'invalid_option_data';
+        if (ageMs > 500) {
+          reason = 'stale';
+        } else if (!sessionValid) {
+          reason = 'session_invalid';
+        } else if (!spatiallyValid) {
+          reason = 'spatial_invalid';
+        } else if (pending.hasOpenDropdown && !hasOpenDropdownNow && this.activeInputSessions.size === 0) {
+          reason = 'missing_open_or_input_context';
+        }
+        this.log("PENDING_OPTION_DISCARDED", {
+          reason,
+          ageMs,
+          dx,
+          dy,
+        });
+        // Fall through to normal click handling
+      }
+    }
+
+    // ── Phase 2b: Direct option detection (for elements still in DOM) ──
     const optionData = this._detectCustomDropdownOption(clickTarget);
     if (optionData) {
       this._handleCustomDropdownSelection(optionData, e);
@@ -4755,7 +5312,14 @@ class AIRInterceptor {
     if (probableTrigger) {
       // Capture the trigger fingerprint NOW, before the DOM mutates
       const triggerFingerprint = this.generateFingerprint(probableTrigger);
-      requestAnimationFrame(() => this._onDropdownOpened(probableTrigger, triggerFingerprint));
+      const handledAsCustomControl = await this._handlePotentialCustomControlTrigger(
+        probableTrigger,
+        triggerFingerprint,
+        nestedContext,
+      );
+      if (handledAsCustomControl) {
+        return;
+      }
     }
     // ══════════════════════════════════════════════════════════════
     // END CUSTOM DROPDOWN INTERCEPT — continue with generic click flow

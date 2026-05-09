@@ -332,7 +332,9 @@ function inferStepControlFamily(step: CodegenStep): string {
     return type === 'password' ? 'password-input' : 'text-input';
   }
   if (
+    step.action === 'custom-control-open' ||
     step.action === 'custom-select' ||
+    step.action === 'custom-menu-select' ||
     text === '-- select --' ||
     selector.includes('select') ||
     role === 'listbox'

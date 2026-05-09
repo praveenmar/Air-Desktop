@@ -1,4 +1,5 @@
 import type {
+  EquivalentRendering,
   SelectorEngine,
   SelectorPriority,
   SelectorProofLevel,
@@ -105,6 +106,27 @@ export function isSelectorSpecRenderableAsNative(
   }
 }
 
+export function isEquivalentRenderingRenderable(
+  rendering: EquivalentRendering | undefined,
+): boolean {
+  if (!rendering) return false;
+  switch (rendering.engine) {
+    case 'testid':
+    case 'placeholder':
+    case 'text':
+    case 'playwright':
+      return (
+        rendering.proofLevel === 'proven_equivalent' ||
+        rendering.proofLevel === 'recorded' ||
+        rendering.proofLevel === 'live_smoke_validated'
+      );
+    case 'role':
+    case 'label':
+    default:
+      return false;
+  }
+}
+
 export function canRenderSelectorSpecConfidently(
   spec: SelectorSpec | undefined,
 ): boolean {
@@ -144,6 +166,13 @@ export function getSelectorSpecRenderingWarnings(
   return Array.from(warnings);
 }
 
+export function pickPreferredEquivalentRendering(
+  renderings: EquivalentRendering[] | undefined,
+): EquivalentRendering | null {
+  if (!Array.isArray(renderings) || renderings.length === 0) return null;
+  return renderings.find(rendering => isEquivalentRenderingRenderable(rendering)) ?? null;
+}
+
 export function renderLocatorExpressionFromSelectorSpec(
   spec: SelectorSpec | undefined,
 ): string | null {
@@ -152,4 +181,11 @@ export function renderLocatorExpressionFromSelectorSpec(
     return spec.selector.trim();
   }
   return `locator(${JSON.stringify(spec.selector)})`;
+}
+
+export function renderLocatorExpressionFromEquivalentRendering(
+  rendering: EquivalentRendering | undefined,
+): string | null {
+  if (!rendering || !isEquivalentRenderingRenderable(rendering)) return null;
+  return rendering.locator.trim();
 }

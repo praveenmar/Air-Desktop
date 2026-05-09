@@ -69,10 +69,16 @@ export interface SmokeReport {
   failingMethodName?: string | null;
   failureType?: SmokeFailureType | null;
   failureMessage?: string | null;
+  exactProofSelector?: string | null;
+  exactProofEngine?: string | null;
+  exactProofLevel?: string | null;
   proofLevel?: string | null;
   selector?: string | null;
   emittedLocator?: string | null;
   emittedLocatorWarnings?: string[];
+  equivalentRenderingUsed?: boolean;
+  equivalentProofSource?: string | null;
+  equivalentSourceSelector?: string | null;
   screenshotPath?: string | null;
   tracePath?: string | null;
   rawPlaywrightResultPath?: string | null;
