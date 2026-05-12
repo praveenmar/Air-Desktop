@@ -2,9 +2,13 @@ import type {
   CodegenAssertion,
   CodegenSession,
   CodegenStep,
+  LabelContextSelectorSpec,
+  TriggerContextSelectorSpec,
   LlmResponseFormat,
   ResolverMetadata,
   ResolverSnapshotSource,
+  SelectorCategory,
+  SelectorEngine,
   SelectorEvaluation,
   SelectorSpec,
   SelectorPriority,
@@ -82,7 +86,13 @@ export interface RawCandidate {
     | 'parent-scope'
     | 'other'
     | 'path'
-    | 'chained';
+    | 'chained'
+    | 'label-context'
+    | 'trigger-context';
+  engine?: SelectorEngine;
+  categoryOverride?: SelectorCategory;
+  labelContext?: LabelContextSelectorSpec;
+  triggerContext?: TriggerContextSelectorSpec;
   rank: number;
 }
 
@@ -247,13 +257,21 @@ export interface StepSignalAttributes {
   dataCy?: string;
   dataQa?: string;
   ariaLabel?: string;
+  ariaLabelledBy?: string;
+  ariaDescribedBy?: string;
   placeholder?: string;
+  autocomplete?: string;
   role?: string;
   href?: string;
   type?: string;
   title?: string;
   alt?: string;
   value?: string;
+  associatedLabelText?: string;
+  wrappedLabelText?: string;
+  labelledByText?: string;
+  describedByText?: string;
+  fieldLabelText?: string;
   class?: string;
   tagName?: string;
   parentSelector?: string | null;

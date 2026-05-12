@@ -1,11 +1,22 @@
 import type {
   EquivalentRendering,
+  LabelContextRenderStatus,
+  LabelContextSelectorSpec,
   SelectorEngine,
   SelectorPriority,
   SelectorProofLevel,
   SelectorSource,
   SelectorSpec,
+  TriggerContextSelectorSpec,
 } from './types';
+
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
+}
+
+function buildExactHasTextRegexLiteral(text: string): string {
+  return `/^${escapeRegexLiteral(text)}$/`;
+}
 
 function trimSelector(selector: string | null | undefined): string {
   return typeof selector === 'string' ? selector.trim() : '';
@@ -38,6 +49,8 @@ export function buildSelectorSpec(params: {
   engine?: SelectorEngine;
   source: SelectorSource;
   proofLevel: SelectorProofLevel;
+  labelContext?: LabelContextSelectorSpec;
+  triggerContext?: TriggerContextSelectorSpec;
   rank?: number;
   confidence?: number;
   rejectReason?: string | null;
@@ -51,11 +64,106 @@ export function buildSelectorSpec(params: {
     engine: params.engine ?? inferSelectorEngine(selector, params.selectorPriority),
     source: params.source,
     proofLevel: params.proofLevel,
+    labelContext: params.labelContext,
+    triggerContext: params.triggerContext,
     rank: typeof params.rank === 'number' ? params.rank : undefined,
     confidence: typeof params.confidence === 'number' ? params.confidence : undefined,
     rejectReason: params.rejectReason ?? undefined,
     warningCodes: warningCodes.length > 0 ? warningCodes : undefined,
   };
+}
+
+function buildStructuralTriggerContextLocator(triggerContext: TriggerContextSelectorSpec): string | null {
+  const labelRegex = buildExactHasTextRegexLiteral(triggerContext.labelText);
+  const labelTag = triggerContext.labelElementTag || 'label';
+  const childSelector = triggerContext.cleanChildSelector || triggerContext.triggerSelector;
+  if (!childSelector) return null;
+
+  switch (triggerContext.association) {
+    case 'bounded-field':
+      if (!triggerContext.containerSelector) return null;
+      return `locator(${JSON.stringify(triggerContext.containerSelector)}).filter({ has: this.page.locator(${JSON.stringify(labelTag)}).filter({ hasText: ${labelRegex} }) }).locator(${JSON.stringify(childSelector)})`;
+    default:
+      return null;
+  }
+}
+
+function buildStructuralLabelContextLocator(labelContext: LabelContextSelectorSpec): string | null {
+  const targetTag = labelContext.targetTag || 'input';
+  const labelRegex = buildExactHasTextRegexLiteral(labelContext.labelText);
+
+  switch (labelContext.association) {
+    case 'wrapped-label':
+      return `locator("label").filter({ hasText: ${labelRegex} }).locator(${JSON.stringify(targetTag)})`;
+    case 'bounded-field':
+      if (!labelContext.containerSelector) return null;
+      return `locator(${JSON.stringify(labelContext.containerSelector)}).filter({ has: this.page.locator("label").filter({ hasText: ${labelRegex} }) }).locator(${JSON.stringify(targetTag)})`;
+    case 'label-for':
+      if (labelContext.targetId) {
+        return `locator(${JSON.stringify(`[id="${labelContext.targetId.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"]`)})`;
+      }
+      return null;
+    case 'aria-labelledby':
+      if (labelContext.ariaLabelledBy) {
+        return `locator(${JSON.stringify(`${targetTag}[aria-labelledby="${labelContext.ariaLabelledBy.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"]`)})`;
+      }
+      return null;
+    default:
+      return null;
+  }
+}
+
+function classifyLabelContextRenderStatus(
+  labelContext: LabelContextSelectorSpec,
+): LabelContextRenderStatus {
+  if (labelContext.renderStatus) return labelContext.renderStatus;
+  switch (labelContext.association) {
+    case 'label-for':
+    case 'aria-labelledby':
+      return 'clean-direct-selector';
+    case 'bounded-field':
+      return labelContext.cleanParentSelector ? 'clean-scoped-locator' : 'proven-structural-fallback';
+    case 'wrapped-label':
+      return 'proven-structural-fallback';
+    default:
+      return 'proof-only-no-clean-render';
+  }
+}
+
+function renderLabelContextLocator(labelContext: LabelContextSelectorSpec): string | null {
+  const targetTag = labelContext.targetTag || 'input';
+  const renderStatus = classifyLabelContextRenderStatus(labelContext);
+
+  switch (renderStatus) {
+    case 'clean-direct-selector':
+      return buildStructuralLabelContextLocator(labelContext);
+    case 'clean-scoped-locator':
+      if (!labelContext.cleanParentSelector) return null;
+      return `locator(${JSON.stringify(labelContext.cleanParentSelector)}).locator(${JSON.stringify(labelContext.cleanChildSelector || targetTag)})`;
+    case 'proven-structural-fallback':
+      return labelContext.structuralFallbackLocator || buildStructuralLabelContextLocator(labelContext);
+    case 'proof-only-no-clean-render':
+    case 'blocked-unsafe-render':
+    default:
+      return null;
+  }
+}
+
+function renderTriggerContextLocator(triggerContext: TriggerContextSelectorSpec): string | null {
+  const renderStatus = triggerContext.renderStatus ?? 'proof-only-no-clean-render';
+
+  switch (renderStatus) {
+    case 'clean-direct-selector':
+    case 'proven-structural-fallback':
+      return triggerContext.structuralFallbackLocator || buildStructuralTriggerContextLocator(triggerContext);
+    case 'clean-scoped-locator':
+      if (!triggerContext.cleanParentSelector) return null;
+      return `locator(${JSON.stringify(triggerContext.cleanParentSelector)}).locator(${JSON.stringify(triggerContext.cleanChildSelector || triggerContext.triggerSelector)})`;
+    case 'proof-only-no-clean-render':
+    case 'blocked-unsafe-render':
+    default:
+      return null;
+  }
 }
 
 export function isSelectorSpecExactProofLevel(
@@ -131,6 +239,22 @@ export function canRenderSelectorSpecConfidently(
   spec: SelectorSpec | undefined,
 ): boolean {
   if (!spec) return false;
+  if (
+    spec.engine === 'label-context' &&
+    spec.labelContext &&
+    (classifyLabelContextRenderStatus(spec.labelContext) === 'proof-only-no-clean-render' ||
+      classifyLabelContextRenderStatus(spec.labelContext) === 'blocked-unsafe-render')
+  ) {
+    return false;
+  }
+  if (
+    spec.engine === 'trigger-context' &&
+    spec.triggerContext &&
+    ((spec.triggerContext.renderStatus ?? 'proof-only-no-clean-render') === 'proof-only-no-clean-render' ||
+      (spec.triggerContext.renderStatus ?? 'proof-only-no-clean-render') === 'blocked-unsafe-render')
+  ) {
+    return false;
+  }
   return !(
     spec.proofLevel === 'blocked' ||
     spec.proofLevel === 'unvalidated' ||
@@ -144,6 +268,12 @@ export function getSelectorSpecRenderingWarnings(
   if (!spec) return [];
 
   const warnings = new Set(spec.warningCodes ?? []);
+  if (spec.labelContext?.warningCodes) {
+    for (const code of spec.labelContext.warningCodes) warnings.add(code);
+  }
+  if (spec.triggerContext?.warningCodes) {
+    for (const code of spec.triggerContext.warningCodes) warnings.add(code);
+  }
   switch (spec.proofLevel) {
     case 'recorded':
       warnings.add('recorded-not-revalidated');
@@ -163,6 +293,18 @@ export function getSelectorSpecRenderingWarnings(
     default:
       break;
   }
+  if (spec.engine === 'label-context' && spec.labelContext) {
+    const renderStatus = classifyLabelContextRenderStatus(spec.labelContext);
+    if (renderStatus === 'proven-structural-fallback') warnings.add('label-context-structural-fallback');
+    if (renderStatus === 'proof-only-no-clean-render') warnings.add('label-context-proof-only');
+    if (renderStatus === 'blocked-unsafe-render') warnings.add('label-context-blocked-unsafe-render');
+  }
+  if (spec.engine === 'trigger-context' && spec.triggerContext) {
+    const renderStatus = spec.triggerContext.renderStatus ?? 'proof-only-no-clean-render';
+    if (renderStatus === 'proven-structural-fallback') warnings.add('custom-control-trigger-structural-fallback');
+    if (renderStatus === 'proof-only-no-clean-render') warnings.add('custom-control-trigger-proof-only');
+    if (renderStatus === 'blocked-unsafe-render') warnings.add('custom-control-trigger-blocked-unsafe-render');
+  }
   return Array.from(warnings);
 }
 
@@ -177,6 +319,12 @@ export function renderLocatorExpressionFromSelectorSpec(
   spec: SelectorSpec | undefined,
 ): string | null {
   if (!spec) return null;
+  if (spec.engine === 'label-context' && spec.labelContext) {
+    return renderLabelContextLocator(spec.labelContext);
+  }
+  if (spec.engine === 'trigger-context' && spec.triggerContext) {
+    return renderTriggerContextLocator(spec.triggerContext);
+  }
   if (isSelectorSpecRenderableAsNative(spec)) {
     return spec.selector.trim();
   }

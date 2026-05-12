@@ -118,6 +118,192 @@ function makeHarness(): CustomControlHarness {
   return interceptor;
 }
 
+function makeSelectorProbe(): Record<string, unknown> {
+  const interceptor = Object.create(AIRInterceptor.prototype) as Record<string, unknown>;
+  interceptor.config = {
+    debugMode: false,
+    maxTextLength: 200,
+  };
+  return interceptor;
+}
+
+describe('selector generation dynamic class alignment', () => {
+  it('prefers an exact placeholder over a focused state class', () => {
+    return withBrowserGlobals(`
+      <input class="field field--focus" placeholder="Type for hints..." />
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      const selector = (interceptor as any).generateOptimalSelector(target);
+      const fingerprint = (interceptor as any).generateFingerprint(target);
+
+      expect(selector.selector).toBe('input[placeholder="Type for hints..."]');
+      expect(selector.priority).toBe('attribute');
+      expect(fingerprint.attributes.class).toContain('field--focus');
+      expect(fingerprint.attributes.classList).toContain('field--focus');
+    });
+  });
+
+  it('prefers a stable name over an is-focused state class', () => {
+    return withBrowserGlobals(`
+      <input class="is-focused login-field" name="username" />
+    `, 'https://example.test/login', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      const selector = (interceptor as any).generateOptimalSelector(target);
+
+      expect(selector.selector).toBe('input[name="username"]');
+      expect(selector.priority).toBe('attribute');
+    });
+  });
+
+  it('penalizes active/open/selected state classes before stable button text', () => {
+    return withBrowserGlobals(`
+      <a class="selected is-active">Continue Shopping</a>
+    `, 'https://example.test/cart', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('a') as HTMLAnchorElement;
+
+      const selector = (interceptor as any).generateOptimalSelector(target);
+
+      expect(selector.selector).toBe('text=Continue Shopping');
+      expect(selector.priority).toBe('text');
+    });
+  });
+
+  it('still allows a stable semantic product class when no stronger evidence exists', () => {
+    return withBrowserGlobals(`
+      <div class="product-card">Featured Product</div>
+    `, 'https://example.test/shop', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('.product-card') as HTMLDivElement;
+
+      const selector = (interceptor as any).generateOptimalSelector(target);
+
+      expect(selector.selector).toBe('.product-card');
+      expect(selector.priority).toBe('class');
+    });
+  });
+
+  it('treats test-style data attributes as stronger than dynamic classes', () => {
+    return withBrowserGlobals(`
+      <button class="open focus:ring-2" data-cy="save-user">Save</button>
+    `, 'https://example.test/form', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('button') as HTMLButtonElement;
+
+      const selector = (interceptor as any).generateOptimalSelector(target);
+
+      expect(selector.selector).toBe('button[data-cy="save-user"]');
+      expect(selector.priority).toBe('attribute');
+    });
+  });
+
+  it('keeps utility and generated classes penalized while preserving a semantic class fallback', () => {
+    return withBrowserGlobals(`
+      <div class="css-abc123 mt-4 user-row">Record</div>
+    `, 'https://example.test/users', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('div') as HTMLDivElement;
+
+      const selector = (interceptor as any).generateOptimalSelector(target);
+
+      expect(selector.selector).toBe('.user-row');
+      expect(selector.priority).toBe('class');
+    });
+  });
+});
+
+describe('input field semantic context enrichment', () => {
+  it('prefers aria-label over a generic class fallback for inputs', () => {
+    return withBrowserGlobals(`
+      <input class="generic-input" aria-label="Employee ID" />
+    `, 'https://example.test/form', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      const selector = (interceptor as any).generateOptimalSelector(target);
+
+      expect(selector.selector).toBe('input[aria-label="Employee ID"]');
+      expect(selector.priority).toBe('attribute');
+    });
+  });
+
+  it('prefers autocomplete when it is the strongest bounded field semantic available', () => {
+    return withBrowserGlobals(`
+      <input class="generic-input" autocomplete="email" />
+    `, 'https://example.test/form', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      const selector = (interceptor as any).generateOptimalSelector(target);
+
+      expect(selector.selector).toBe('input[autocomplete="email"]');
+      expect(selector.priority).toBe('attribute');
+    });
+  });
+
+  it('preserves explicit label-for text as bounded field context', () => {
+    return withBrowserGlobals(`
+      <div class="field">
+        <label for="employee-id">Employee ID</label>
+        <input id="employee-id" class="generic-input" type="text" />
+      </div>
+    `, 'https://example.test/form', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target);
+
+      expect(fingerprint.attributes.associatedLabelText).toBe('Employee ID');
+      expect(fingerprint.attributes.fieldLabelText).toBe('Employee ID');
+      expect(fingerprint.attributes.class).toContain('generic-input');
+    });
+  });
+
+  it('preserves wrapped label text as bounded field context', () => {
+    return withBrowserGlobals(`
+      <label>
+        Work Email
+        <input class="generic-input" type="email" />
+      </label>
+    `, 'https://example.test/form', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target);
+
+      expect(fingerprint.attributes.wrappedLabelText).toContain('Work Email');
+      expect(fingerprint.attributes.fieldLabelText).toContain('Work Email');
+    });
+  });
+
+  it('does not scrape broad nearby container text into field label context', () => {
+    return withBrowserGlobals(`
+      <section>
+        <h1>Employee Search Dashboard</h1>
+        <div class="panel">
+          <div class="field-row">
+            <input class="generic-input" type="text" />
+          </div>
+        </div>
+      </section>
+    `, 'https://example.test/form', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target);
+
+      expect(fingerprint.attributes.associatedLabelText).toBeUndefined();
+      expect(fingerprint.attributes.wrappedLabelText).toBeUndefined();
+      expect(fingerprint.attributes.labelledByText).toBeUndefined();
+      expect(fingerprint.attributes.fieldLabelText).toBeUndefined();
+    });
+  });
+});
+
 describe('custom-control capture heuristics', () => {
   it('promotes an OrangeHRM select shell click to the semantic trigger ancestor', () => {
     return withBrowserGlobals(`

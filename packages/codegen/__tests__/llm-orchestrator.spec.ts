@@ -5,6 +5,7 @@ import { JSDOM } from 'jsdom';
 import { describe, expect, it, vi } from 'vitest';
 import { LlmOrchestrator } from '../src/llm-orchestrator';
 import { CodegenSession, CodegenStep } from '../src/types';
+import * as selectorResolverModule from '../src/selector-resolver';
 
 const createStep = (overrides: Partial<CodegenStep> = {}): CodegenStep => ({
   step: 1,
@@ -298,6 +299,336 @@ describe('LlmOrchestrator - emission safety', () => {
     expect(openEmitted.methodCode).toContain(`await target.click();`);
     expect(menuEmitted.fallbackReason).toBe('llm-action-invalid-or-noop');
     expect(menuEmitted.methodCode).toContain(`await target.click();`);
+  });
+
+  it('emits trigger click and option click for compressed custom-select steps', () => {
+    const step = createStep({
+      action: 'custom-select',
+      intent: 'select_admin',
+      selector: '[role="option"]',
+      selectorPriority: 'attribute',
+      selectorRank: 3,
+      controlFamily: 'combobox',
+      triggerSelector: '.oxd-select-text',
+      triggerSelectorPriority: 'class',
+      triggerSelectorSpec: {
+        selector: '.oxd-select-text',
+        engine: 'css',
+        source: 'interceptor',
+        proofLevel: 'recorded',
+        rank: 7,
+      },
+      optionSelector: '[role="option"]',
+      optionText: 'Admin',
+      optionValue: 'Admin',
+      optionSelectorSpec: {
+        selector: '[role="option"]',
+        engine: 'css',
+        source: 'interceptor',
+        proofLevel: 'recorded',
+        rank: 3,
+      },
+      absorbedOpenEventId: 'ev-open',
+      absorbedOpenTraceId: 'trace-1',
+      compressedFromEvents: ['ev-open', 'ev-select'],
+      value: 'Admin',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'selectAdmin',
+      `locator('[role="option"]').selectOption('Admin')`,
+      step.selector,
+      step.optionSelectorSpec,
+    );
+
+    expect(emitted.fallbackReason).toBe('compressed-custom-control-select');
+    expect(emitted.methodCode).toContain('const triggerTarget = this.page.locator(".oxd-select-text");');
+    expect(emitted.methodCode).toContain('await triggerTarget.click();');
+    expect(emitted.methodCode).toContain('const optionTarget = this.page.locator("[role=\\"option\\"]");');
+    expect(emitted.methodCode).toContain('await optionTarget.click();');
+  });
+
+  it('emits bounded trigger fallback for compressed custom-select steps with an AIR warning', () => {
+    const step = createStep({
+      action: 'custom-select',
+      intent: 'select_admin',
+      selector: '[role="option"]',
+      selectorPriority: 'attribute',
+      selectorRank: 3,
+      controlFamily: 'combobox',
+      triggerSelector: '.select-trigger',
+      triggerResolvedSelector: 'trigger-context("User Role" within div.field-row -> .select-trigger)',
+      triggerSelectorPriority: 'class',
+      triggerSelectorSpec: {
+        selector: 'trigger-context("User Role" within div.field-row -> .select-trigger)',
+        engine: 'trigger-context',
+        source: 'resolver',
+        proofLevel: 'semantic_validated',
+        triggerContext: {
+          source: 'snapshot-trigger-context',
+          association: 'bounded-field',
+          labelText: 'User Role',
+          controlFamily: 'combobox',
+          triggerSelector: '.select-trigger',
+          containerSelector: 'div.field-row',
+          labelElementTag: 'div',
+          boundedContainerSummary: 'div.field-row',
+          renderStatus: 'proven-structural-fallback',
+          renderReason: 'no_clean_parent_selector',
+          cleanChildSelector: '.select-trigger',
+          warningCodes: ['custom-control-trigger-structural-fallback'],
+          recoveredFromSelector: '.select-trigger',
+        },
+      },
+      optionSelector: '[role="option"]',
+      optionText: 'Admin',
+      optionValue: 'Admin',
+      optionSelectorSpec: {
+        selector: '[role="option"]',
+        engine: 'css',
+        source: 'interceptor',
+        proofLevel: 'recorded',
+        rank: 3,
+      },
+      absorbedOpenEventId: 'ev-open',
+      absorbedOpenTraceId: 'trace-1',
+      compressedFromEvents: ['ev-open', 'ev-select'],
+      value: 'Admin',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'selectAdmin',
+      `locator('[role="option"]').click()`,
+      step.selector,
+      step.optionSelectorSpec,
+    );
+
+    expect(emitted.methodCode).toContain('this.page.locator("div.field-row").filter({ has: this.page.locator("div").filter({ hasText: /^User Role$/ }) }).locator(".select-trigger")');
+    expect(emitted.methodCode).toContain('// AIR WARNING: Structural custom-control trigger fallback.');
+    expect(emitted.fallbackReason).toBe('compressed-custom-control-select');
+    expect(emitted.triggerContextRenderStatus).toBe('proven-structural-fallback');
+  });
+
+  it('does not emit a raw ambiguous trigger click when trigger render status is blocked', () => {
+    const step = createStep({
+      action: 'custom-select',
+      intent: 'select_admin',
+      selector: '[role="option"]',
+      selectorPriority: 'attribute',
+      selectorRank: 3,
+      controlFamily: 'combobox',
+      triggerSelector: '.select-trigger',
+      triggerSelectorPriority: 'class',
+      triggerSelectorSpec: {
+        selector: '.select-trigger',
+        engine: 'css',
+        source: 'interceptor',
+        proofLevel: 'recorded',
+        rank: 7,
+      },
+      optionSelector: '[role="option"]',
+      optionText: 'Admin',
+      optionValue: 'Admin',
+      optionSelectorSpec: {
+        selector: '[role="option"]',
+        engine: 'css',
+        source: 'interceptor',
+        proofLevel: 'recorded',
+        rank: 3,
+      },
+      absorbedOpenEventId: 'ev-open',
+      absorbedOpenTraceId: 'trace-1',
+      compressedFromEvents: ['ev-open', 'ev-select'],
+      value: 'Admin',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'selectAdmin',
+      `locator('[role="option"]').click()`,
+      step.selector,
+      step.optionSelectorSpec,
+      {
+        resolvedSelector: '[role="option"]',
+        resolvedBy: 'kept-original',
+        bestScore: 0.9,
+        effectiveMatchCount: 1,
+        snapshotSource: 'event-local-pageState',
+        validationMethod: 'css-query-static-visibility-element-ranking-v1',
+        llmAttempted: false,
+        llmAccepted: false,
+        llmAlternative: null,
+        rejectReason: null,
+        warningCodes: [],
+        resolverVersion: 1,
+        triggerContextRenderStatus: 'blocked-unsafe-render',
+        triggerContextRenderReason: 'target_missing',
+        triggerWarningCodes: ['custom-control-trigger-target-binding-ambiguous'],
+      },
+    );
+
+    expect(emitted.methodCode).toContain('// TODO[AIR]: Cannot safely open custom control for "Admin".');
+    expect(emitted.methodCode).toContain('custom-control-trigger-target-binding-ambiguous');
+    expect(emitted.methodCode).toContain('throw new Error(');
+    expect(emitted.methodCode).not.toContain('locator(".select-trigger").click()');
+    expect(emitted.fallbackReason).toBe('custom-control-trigger-blocked-unsafe-render');
+    expect(emitted.emittedLocator).toBeNull();
+    expect(emitted.triggerContextRenderStatus).toBe('blocked-unsafe-render');
+  });
+
+  it('renders wrapped label-context proof as a safe chained locator instead of getByLabel', () => {
+    const step = createStep({
+      action: 'input',
+      selector: '.generic-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'input_username',
+      value: 'Admin',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'fillUsername',
+      `locator('.generic-input').fill('Admin')`,
+      'label-context("Username" -> input)',
+      {
+        selector: 'label-context("Username" -> input)',
+        engine: 'label-context',
+        source: 'resolver',
+        proofLevel: 'semantic_validated',
+        labelContext: {
+          source: 'snapshot-label-context',
+          association: 'wrapped-label',
+          labelText: 'Username',
+          targetTag: 'input',
+          recoveredFromSelector: '.generic-input',
+        },
+      },
+    );
+
+    expect(emitted.methodCode).toContain('this.page.locator("label").filter({ hasText: /^Username$/ }).locator("input")');
+    expect(emitted.methodCode).not.toContain('getByLabel');
+    expect(emitted.fallbackReason).toBe('selector-spec-exact-render');
+    expect(emitted.methodCode).toContain('// AIR WARNING: Structural label-context fallback.');
+    expect(emitted.emittedLocatorWarnings).toContain('label-context-structural-fallback');
+    expect(emitted.labelContextRenderStatus).toBe('proven-structural-fallback');
+  });
+
+  it('renders bounded label-context proof as a safe chained locator', () => {
+    const step = createStep({
+      action: 'input',
+      selector: '.generic-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'input_employee_id',
+      value: '1234',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'fillEmployeeId',
+      `locator('.generic-input').fill('1234')`,
+      'label-context("Employee Id" within div.field-row -> input)',
+      {
+        selector: 'label-context("Employee Id" within div.field-row -> input)',
+        engine: 'label-context',
+        source: 'resolver',
+        proofLevel: 'semantic_validated',
+        labelContext: {
+          source: 'snapshot-label-context',
+          association: 'bounded-field',
+          labelText: 'Employee Id',
+          targetTag: 'input',
+          containerSelector: 'div.field-row',
+          boundedContainerSummary: 'div.field-row',
+          recoveredFromSelector: '.generic-input',
+        },
+      },
+    );
+
+    expect(emitted.methodCode).toContain('this.page.locator("div.field-row").filter({ has: this.page.locator("label").filter({ hasText: /^Employee Id$/ }) }).locator("input")');
+    expect(emitted.methodCode).not.toContain('getByLabel');
+    expect(emitted.methodCode).toContain('// AIR WARNING: Structural label-context fallback.');
+    expect(emitted.labelContextRenderStatus).toBe('proven-structural-fallback');
+  });
+
+  it('renders clean scoped bounded-field proof without structural warning when parent selector is independently safe', () => {
+    const step = createStep({
+      action: 'input',
+      selector: '.generic-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'input_username',
+      value: 'Admin',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'fillUsername',
+      `locator('.generic-input').fill('Admin')`,
+      'label-context("Username" within [data-testid=\\"username-field\\"] -> input)',
+      {
+        selector: 'label-context("Username" within [data-testid=\\"username-field\\"] -> input)',
+        engine: 'label-context',
+        source: 'resolver',
+        proofLevel: 'semantic_validated',
+        labelContext: {
+          source: 'snapshot-label-context',
+          association: 'bounded-field',
+          labelText: 'Username',
+          targetTag: 'input',
+          containerSelector: '[data-testid="username-field"]',
+          boundedContainerSummary: 'div.username-field',
+          cleanParentSelector: '[data-testid="username-field"]',
+          cleanChildSelector: 'input',
+          renderStatus: 'clean-scoped-locator',
+          renderReason: 'clean_parent_unique_visible',
+          recoveredFromSelector: '.generic-input',
+        },
+      },
+    );
+
+    expect(emitted.methodCode).toContain('this.page.locator("[data-testid=\\"username-field\\"]").locator("input")');
+    expect(emitted.methodCode).not.toContain('Structural label-context fallback');
+    expect(emitted.labelContextRenderStatus).toBe('clean-scoped-locator');
+  });
+
+  it('escapes exact label regex safely for structural fallback rendering', () => {
+    const step = createStep({
+      action: 'input',
+      selector: '.generic-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'input_user_admin',
+      value: 'Admin',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'fillUserAdmin',
+      `locator('.generic-input').fill('Admin')`,
+      'label-context("User (Admin)" -> input)',
+      {
+        selector: 'label-context("User (Admin)" -> input)',
+        engine: 'label-context',
+        source: 'resolver',
+        proofLevel: 'semantic_validated',
+        labelContext: {
+          source: 'snapshot-label-context',
+          association: 'wrapped-label',
+          labelText: 'User (Admin)',
+          targetTag: 'input',
+          renderStatus: 'proven-structural-fallback',
+          renderReason: 'wrapped_label_exact',
+          warningCodes: ['label-context-structural-fallback'],
+          recoveredFromSelector: '.generic-input',
+        },
+      },
+    );
+
+    expect(emitted.methodCode).toContain('/^User \\(Admin\\)$/');
   });
 
   it('emits getByPlaceholder exact only when resolver provides a placeholder equivalent rendering', () => {
@@ -1298,6 +1629,519 @@ describe('LlmOrchestrator - sidecar resolver metadata', () => {
         }),
       ],
     }));
+
+    callSpy.mockRestore();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('persists bounded custom-control compression metadata in the sidecar', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'air-custom-control-sidecar-'));
+    const outputDir = path.join(tempRoot, 'out');
+    const projectRoot = path.join(tempRoot, 'project');
+    fs.mkdirSync(outputDir, { recursive: true });
+    fs.mkdirSync(projectRoot, { recursive: true });
+
+    const session = createSession([
+      createStep({
+        step: 1,
+        action: 'custom-select',
+        intent: 'select_admin',
+        selector: '[role="option"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        pageUrl: 'https://example.test/admin',
+        normalizedUrl: 'https://example.test/admin',
+        controlFamily: 'combobox',
+        triggerSelector: '.oxd-select-text',
+        triggerSelectorPriority: 'class',
+        triggerSelectorSpec: {
+          selector: '.oxd-select-text',
+          engine: 'css',
+          source: 'interceptor',
+          proofLevel: 'recorded',
+          rank: 7,
+        },
+        optionSelector: '[role="option"]',
+        optionText: 'Admin',
+        optionValue: 'Admin',
+        optionSelectorSpec: {
+          selector: '[role="option"]',
+          engine: 'css',
+          source: 'interceptor',
+          proofLevel: 'recorded',
+          rank: 3,
+        },
+        absorbedOpenEventId: 'ev-open',
+        absorbedOpenTraceId: 'trace-1',
+        compressedFromEvents: ['ev-open', 'ev-select'],
+        value: 'Admin',
+      }),
+    ], {
+      url: 'https://example.test/admin',
+      stepCount: 1,
+    });
+
+    const callSpy = vi.spyOn(LlmOrchestrator as any, 'callGeminiApi')
+      .mockResolvedValueOnce(JSON.stringify({
+        className: 'AdminPage',
+        methods: [
+          {
+            stepNumber: 1,
+            intent: 'select_admin',
+            methodName: 'selectAdmin',
+            playwrightAction: `locator('[role="option"]').click()`,
+          },
+        ],
+      }));
+
+    await LlmOrchestrator.generatePageObjects(
+      session,
+      outputDir,
+      projectRoot,
+      {
+        resolverConfig: {
+          enableLLMFallback: false,
+        },
+        snapshotCache: {
+          get() {
+            return null;
+          },
+          getSource() {
+            return 'unavailable';
+          },
+        },
+      },
+    );
+
+    const sidecar = JSON.parse(
+      fs.readFileSync(path.join(outputDir, 'AdminPage.air.json'), 'utf-8'),
+    );
+
+    expect(sidecar.methods.selectAdmin).toEqual(expect.objectContaining({
+      controlFamily: 'combobox',
+      triggerSelector: '.oxd-select-text',
+      optionSelector: '[role="option"]',
+      optionText: 'Admin',
+      optionValue: 'Admin',
+      absorbedOpenEventId: 'ev-open',
+      absorbedOpenTraceId: 'trace-1',
+      compressedFromEvents: ['ev-open', 'ev-select'],
+    }));
+    expect(sidecar.methods.selectAdmin.triggerSelectorSpec).toEqual(expect.objectContaining({
+      selector: '.oxd-select-text',
+      proofLevel: 'recorded',
+    }));
+    expect(sidecar.methods.selectAdmin.optionSelectorSpec).toEqual(expect.objectContaining({
+      selector: '[role="option"]',
+      proofLevel: 'recorded',
+    }));
+
+    callSpy.mockRestore();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('persists trigger-context proof metadata in the sidecar for ambiguous custom-control triggers', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'air-trigger-context-sidecar-'));
+    const outputDir = path.join(tempRoot, 'out');
+    const projectRoot = path.join(tempRoot, 'project');
+    fs.mkdirSync(outputDir, { recursive: true });
+    fs.mkdirSync(projectRoot, { recursive: true });
+
+    const session = createSession([
+      createStep({
+        step: 1,
+        action: 'custom-select',
+        intent: 'select_admin',
+        selector: '[role="option"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        sourceNodeId: 'node-1',
+        pageUrl: 'https://example.test/admin',
+        normalizedUrl: 'https://example.test/admin',
+        controlFamily: 'combobox',
+        triggerSelector: '.select-trigger',
+        triggerSelectorPriority: 'class',
+        triggerFingerprint: {
+          selector: '.select-trigger',
+          selectorPriority: 'class',
+          selectorRank: 7,
+          tagName: 'div',
+          textExcerpt: 'User Role',
+          attributes: {
+            class: 'select-trigger',
+            role: 'combobox',
+            fieldLabelText: 'User Role',
+          },
+        },
+        triggerSelectorSpec: {
+          selector: '.select-trigger',
+          engine: 'css',
+          source: 'interceptor',
+          proofLevel: 'recorded',
+          rank: 7,
+        },
+        optionSelector: '[role="option"]',
+        optionText: 'Admin',
+        optionValue: 'Admin',
+        optionSelectorSpec: {
+          selector: '[role="option"]',
+          engine: 'css',
+          source: 'interceptor',
+          proofLevel: 'recorded',
+          rank: 3,
+        },
+        absorbedOpenEventId: 'ev-open',
+        absorbedOpenTraceId: 'trace-1',
+        compressedFromEvents: ['ev-open', 'ev-select'],
+        value: 'Admin',
+      }),
+    ], {
+      url: 'https://example.test/admin',
+      stepCount: 1,
+    });
+
+    const snapshot = new JSDOM(`
+      <html><body>
+        <div class="field-row">
+          <div>User Role</div>
+          <div class="select-trigger" role="combobox" aria-haspopup="listbox">-- Select --</div>
+        </div>
+        <div class="field-row">
+          <div>Status</div>
+          <div class="select-trigger" role="combobox" aria-haspopup="listbox">-- Select --</div>
+        </div>
+        <div role="option">Admin</div>
+      </body></html>
+    `).window.document;
+    for (const element of [snapshot.documentElement, ...Array.from(snapshot.querySelectorAll('*'))] as Array<any>) {
+      Object.defineProperty(element, 'offsetParent', {
+        configurable: true,
+        get() {
+          return {};
+        },
+      });
+      element.getBoundingClientRect = () => ({ width: 10, height: 10, top: 0, left: 0, right: 10, bottom: 10, x: 0, y: 0, toJSON() { return this; } });
+    }
+
+    const callSpy = vi.spyOn(LlmOrchestrator as any, 'callGeminiApi')
+      .mockResolvedValueOnce(JSON.stringify({
+        className: 'AdminPage',
+        methods: [
+          {
+            stepNumber: 1,
+            intent: 'select_admin',
+            methodName: 'selectAdmin',
+            playwrightAction: `locator('[role="option"]').click()`,
+          },
+        ],
+      }));
+
+    await LlmOrchestrator.generatePageObjects(
+      session,
+      outputDir,
+      projectRoot,
+      {
+        resolverConfig: {
+          enableLLMFallback: false,
+        },
+        snapshotCache: {
+          get() {
+            return snapshot;
+          },
+          getSource() {
+            return 'source-node-snapshot';
+          },
+          selectForStep() {
+            return {
+              snapshot,
+              provenance: {
+                source: 'source-node-snapshot',
+                temporalClass: 'pre_action',
+                reason: 'test_trigger_context_snapshot',
+                snapshotTargetEvidence: true,
+                snapshotTargetEvidenceReason: 'selector_match',
+              },
+              evaluatedCandidates: [],
+            };
+          },
+        },
+      },
+    );
+
+    const sidecar = JSON.parse(
+      fs.readFileSync(path.join(outputDir, 'AdminPage.air.json'), 'utf-8'),
+    );
+
+    expect(sidecar.methods.selectAdmin).toEqual(expect.objectContaining({
+      triggerOriginalSelector: '.select-trigger',
+      triggerResolvedSelector: expect.stringContaining('trigger-context("User Role"'),
+      triggerContextLabel: 'User Role',
+      triggerContextRenderStatus: 'proven-structural-fallback',
+    }));
+    expect(sidecar.methods.selectAdmin.triggerContextProof).toEqual(expect.objectContaining({
+      labelText: 'User Role',
+      association: 'bounded-field',
+      warningCodes: expect.arrayContaining(['custom-control-trigger-structural-fallback']),
+    }));
+
+    callSpy.mockRestore();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('persists blocked trigger-context warnings in the sidecar and avoids silent trigger emission', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'air-trigger-context-blocked-sidecar-'));
+    const outputDir = path.join(tempRoot, 'out');
+    const projectRoot = path.join(tempRoot, 'project');
+    fs.mkdirSync(outputDir, { recursive: true });
+    fs.mkdirSync(projectRoot, { recursive: true });
+
+    const session = createSession([
+      createStep({
+        step: 1,
+        action: 'custom-select',
+        intent: 'select_admin',
+        selector: '[role="option"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        pageUrl: 'https://example.test/admin',
+        normalizedUrl: 'https://example.test/admin',
+        controlFamily: 'combobox',
+        triggerSelector: '.select-trigger',
+        triggerSelectorPriority: 'class',
+        triggerSelectorSpec: {
+          selector: '.select-trigger',
+          engine: 'css',
+          source: 'interceptor',
+          proofLevel: 'recorded',
+          rank: 7,
+        },
+        optionSelector: '[role="option"]',
+        optionText: 'Admin',
+        optionValue: 'Admin',
+        optionSelectorSpec: {
+          selector: '[role="option"]',
+          engine: 'css',
+          source: 'interceptor',
+          proofLevel: 'recorded',
+          rank: 3,
+        },
+        absorbedOpenEventId: 'ev-open',
+        absorbedOpenTraceId: 'trace-1',
+        compressedFromEvents: ['ev-open', 'ev-select'],
+        value: 'Admin',
+      }),
+    ], {
+      url: 'https://example.test/admin',
+      stepCount: 1,
+    });
+
+    const callSpy = vi.spyOn(LlmOrchestrator as any, 'callGeminiApi')
+      .mockResolvedValueOnce(JSON.stringify({
+        className: 'AdminPage',
+        methods: [
+          {
+            stepNumber: 1,
+            intent: 'select_admin',
+            methodName: 'selectAdmin',
+            playwrightAction: `locator('[role="option"]').click()`,
+          },
+        ],
+      }));
+
+    const resolveSpy = vi.spyOn(selectorResolverModule, 'resolveSelectorsForSession')
+      .mockResolvedValueOnce({
+        resolutions: [
+          {
+            stepNumber: 1,
+            originalSelector: '[role="option"]',
+            resolvedSelector: '[role="option"]',
+            selectorSpec: {
+              selector: '[role="option"]',
+              engine: 'css',
+              source: 'interceptor',
+              proofLevel: 'recorded',
+              rank: 3,
+            },
+            resolvedSelectorSpec: {
+              selector: '[role="option"]',
+              engine: 'css',
+              source: 'interceptor',
+              proofLevel: 'snapshot_validated',
+              rank: 3,
+              confidence: 1,
+            },
+            resolverMetadata: {
+              resolvedSelector: '[role="option"]',
+              resolvedBy: 'kept-original',
+              bestScore: 0.9,
+              effectiveMatchCount: 1,
+              snapshotSource: 'event-local-pageState',
+              validationMethod: 'css-query-static-visibility-element-ranking-v1',
+              llmAttempted: false,
+              llmAccepted: false,
+              llmAlternative: null,
+              rejectReason: null,
+              warningCodes: [],
+              resolverVersion: 1,
+              triggerContextRenderStatus: 'blocked-unsafe-render',
+              triggerContextRenderReason: 'target_missing',
+              triggerWarningCodes: ['custom-control-trigger-target-binding-ambiguous'],
+            },
+          },
+        ],
+        unresolvedStepNumbers: [],
+        llmAttemptedStepNumbers: [],
+        llmAcceptedStepNumbers: [],
+      } as any);
+
+    await LlmOrchestrator.generatePageObjects(
+      session,
+      outputDir,
+      projectRoot,
+      {
+        resolverConfig: {
+          enableLLMFallback: false,
+        },
+        snapshotCache: {
+          get() {
+            return null;
+          },
+          getSource() {
+            return 'unavailable';
+          },
+        },
+      },
+    );
+
+    const code = fs.readFileSync(path.join(outputDir, 'AdminPage.ts'), 'utf-8');
+    const sidecar = JSON.parse(
+      fs.readFileSync(path.join(outputDir, 'AdminPage.air.json'), 'utf-8'),
+    );
+
+    expect(code).toContain('// TODO[AIR]: Cannot safely open custom control for "Admin".');
+    expect(code).not.toContain('locator(".select-trigger").click()');
+    expect(sidecar.methods.selectAdmin).toEqual(expect.objectContaining({
+      triggerContextRenderStatus: 'blocked-unsafe-render',
+      triggerContextRenderReason: 'target_missing',
+      triggerWarningCodes: ['custom-control-trigger-target-binding-ambiguous'],
+    }));
+    expect(sidecar.methods.selectAdmin.warningCodes).toContain('custom-control-trigger-target-binding-ambiguous');
+
+    resolveSpy.mockRestore();
+    callSpy.mockRestore();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('persists label-context proof metadata in the sidecar', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'air-label-context-sidecar-'));
+    const outputDir = path.join(tempRoot, 'out');
+    const projectRoot = path.join(tempRoot, 'project');
+    fs.mkdirSync(outputDir, { recursive: true });
+    fs.mkdirSync(projectRoot, { recursive: true });
+
+    const session = createSession([
+      createStep({
+        step: 1,
+        action: 'input',
+        intent: 'input_username',
+        selector: '.generic-input',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        value: 'Admin',
+        sourceNodeId: 'node-1',
+        fingerprint: {
+          selector: '.generic-input',
+          tagName: 'input',
+          attributes: {
+            class: 'generic-input',
+            type: 'text',
+            fieldLabelText: 'Username',
+          },
+        },
+      }),
+    ], {
+      url: 'https://example.test/profile',
+      stepCount: 1,
+    });
+
+    const callSpy = vi.spyOn(LlmOrchestrator as any, 'callGeminiApi')
+      .mockResolvedValueOnce(JSON.stringify({
+        className: 'ProfilePage',
+        methods: [
+          {
+            stepNumber: 1,
+            intent: 'input_username',
+            methodName: 'fillUsername',
+            playwrightAction: `locator('.generic-input').fill('Admin')`,
+          },
+        ],
+      }));
+
+    const snapshot = new JSDOM(`<!doctype html><html><body>
+      <label>Username<input class="generic-input" type="text" /></label>
+    </body></html>`).window.document;
+
+    await LlmOrchestrator.generatePageObjects(
+      session,
+      outputDir,
+      projectRoot,
+      {
+        resolverConfig: {
+          enableLLMFallback: false,
+        },
+        snapshotCache: {
+          get(nodeId: string) {
+            return nodeId === 'node-1' ? snapshot : null;
+          },
+          getSource() {
+            return 'source-node-snapshot';
+          },
+          selectForStep() {
+            return {
+              snapshot,
+              provenance: {
+                source: 'source-node-snapshot',
+                temporalClass: 'pre_action',
+                reason: 'test_label_context_snapshot',
+                snapshotTargetEvidence: true,
+                snapshotTargetEvidenceReason: 'selector_match',
+                labelStructureEvidence: true,
+                labelStructureEvidenceReason: 'exact_label_association',
+                labelContextSnapshotSource: 'source-node-snapshot',
+                labelContextBlockedReason: null,
+              },
+              evaluatedCandidates: [],
+            };
+          },
+        },
+      },
+    );
+
+    const sidecar = JSON.parse(
+      fs.readFileSync(path.join(outputDir, 'ProfilePage.air.json'), 'utf-8'),
+    );
+
+    expect(sidecar.methods.fillUsername.labelContextProof).toEqual(expect.objectContaining({
+      association: 'wrapped-label',
+      labelText: 'Username',
+      targetTag: 'input',
+      recoveredFromSelector: '.generic-input',
+      labelStructureEvidenceReason: 'exact_label_association',
+      snapshotSource: 'source-node-snapshot',
+      renderStatus: 'proven-structural-fallback',
+      renderReason: 'wrapped_label_exact',
+    }));
+    expect(sidecar.methods.fillUsername.resolvedSelectorSpec).toEqual(expect.objectContaining({
+      engine: 'label-context',
+    }));
+    expect(sidecar.methods.fillUsername).toEqual(expect.objectContaining({
+      labelContextRenderStatus: 'proven-structural-fallback',
+      labelContextRenderReason: 'wrapped_label_exact',
+      labelText: 'Username',
+      relationType: 'wrapped-label',
+      recoveredFromSelector: '.generic-input',
+    }));
+    expect(sidecar.methods.fillUsername.warningCodes).toContain('label-context-structural-fallback');
 
     callSpy.mockRestore();
     fs.rmSync(tempRoot, { recursive: true, force: true });

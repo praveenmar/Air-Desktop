@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { parseHTML } from 'linkedom';
 import {
   generateCandidates,
   resolveSelectorsForSession,
@@ -89,6 +90,32 @@ function makeDocument(
   return document as unknown as TestDocument;
 }
 
+function makeHtmlDocument(html: string): Document {
+  const { document } = parseHTML(html);
+  const elements = [document.documentElement, ...Array.from(document.querySelectorAll('*'))] as Array<Element & {
+    offsetParent?: unknown;
+    getBoundingClientRect?: () => DOMRect;
+  }>;
+  for (const element of elements) {
+    if (!element) continue;
+    element.offsetParent = {};
+    element.getBoundingClientRect = () => ({
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+      top: 0,
+      right: 10,
+      bottom: 10,
+      left: 0,
+      toJSON() {
+        return this;
+      },
+    } as DOMRect);
+  }
+  return document as unknown as Document;
+}
+
 function makeSnapshotCache(
   entries: Record<string, Document | null>,
   snapshotEngineAvailable = true
@@ -174,7 +201,7 @@ function scoreExplicitCandidate(
   step: CodegenStep,
   snapshot: Document,
   selector: string,
-  source: 'class' | 'path' | 'text' | 'parent-scope' | 'id' | 'name' | 'testid' | 'data-cy' | 'data-qa' | 'aria' | 'placeholder' | 'href' | 'role+name' | 'original',
+  source: 'class' | 'path' | 'text' | 'parent-scope' | 'id' | 'name' | 'testid' | 'data-cy' | 'data-qa' | 'aria' | 'placeholder' | 'href' | 'role+name' | 'original' | 'other',
   rank: number,
 ): number {
   const validation = selector.startsWith('text=')
@@ -218,6 +245,36 @@ describe('selector-resolver', () => {
     expect(attrs.placeholder).toBe('Search');
     expect(attrs.dataCy).toBe('employee-search');
     expect(attrs.dataQa).toBe('employee-search');
+  });
+
+  it('preserves enriched field semantics from fingerprint attributes', () => {
+    const step = makeStep(1, {
+      selector: '.generic-input',
+      action: 'input',
+      fingerprint: {
+        selector: '.generic-input',
+        tagName: 'input',
+        attributes: {
+          autocomplete: 'email',
+          'aria-labelledby': 'employee-email-label',
+          associatedLabelText: 'Employee Email',
+          wrappedLabelText: 'Wrapped Email Label',
+          labelledByText: 'Email address',
+          describedByText: 'Used for notifications',
+          fieldLabelText: 'Employee Email',
+          class: 'generic-input',
+        },
+      },
+    });
+
+    const attrs = inferStepSignalAttributes(step);
+    expect(attrs.autocomplete).toBe('email');
+    expect(attrs.ariaLabelledBy).toBe('employee-email-label');
+    expect(attrs.associatedLabelText).toBe('Employee Email');
+    expect(attrs.wrappedLabelText).toBe('Wrapped Email Label');
+    expect(attrs.labelledByText).toBe('Email address');
+    expect(attrs.describedByText).toBe('Used for notifications');
+    expect(attrs.fieldLabelText).toBe('Employee Email');
   });
 
   it('falls back to selector-string inference when recorded fingerprint field is missing', () => {
@@ -322,6 +379,82 @@ describe('selector-resolver', () => {
 
     expect(nameScore).toBeGreaterThan(structuralScore);
     expect(scopedScore).toBeGreaterThan(structuralScore);
+  });
+
+  it('prefers enriched autocomplete candidates over weak class fallback for generic inputs', () => {
+    const field = makeElement(
+      { autocomplete: 'email', class: 'generic-input' },
+      { tagName: 'INPUT', className: 'generic-input' },
+    );
+    const snapshot = makeDocument({
+      '[autocomplete="email"]': [field],
+      'input[autocomplete="email"]': [field],
+      '.generic-input': [field],
+    });
+    const step = makeStep(1, {
+      action: 'input',
+      selector: '.generic-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.generic-input',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'input',
+        attributes: {
+          autocomplete: 'email',
+          class: 'generic-input',
+        },
+      },
+    });
+
+    const autocompleteScore = scoreExplicitCandidate(step, snapshot, 'input[autocomplete="email"]', 'other', 4);
+    const classScore = scoreExplicitCandidate(step, snapshot, '.generic-input', 'class', 7);
+
+    expect(autocompleteScore).toBeGreaterThan(classScore);
+  });
+
+  it('does not invoke LLM fallback for a first-observation placeholder selector when deterministic proof is strong', async () => {
+    const field = makeElement(
+      { placeholder: 'Employee name' },
+      { tagName: 'INPUT' },
+    );
+    const snapshot = makeDocument({
+      '[placeholder="Employee name"]': [field],
+      'input[placeholder="Employee name"]': [field],
+      '*': [field],
+    });
+    const snapshotCache = makeSnapshotCache({ 'node-1': snapshot });
+    const fallbackProvider = vi.fn(async (_request: SelectorFallbackRequest) => []);
+    const step = makeStep(1, {
+      action: 'input',
+      selector: '.generic-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      sampleSize: 1,
+      confidence: 1,
+      fingerprint: {
+        selector: '.generic-input',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'input',
+        attributes: {
+          placeholder: 'Employee name',
+          class: 'generic-input',
+        },
+      },
+    });
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      { enableLLMFallback: true },
+      fallbackProvider,
+    );
+
+    expect(result.resolutions[0]?.resolvedSelector).toBe('input[placeholder="Employee name"]');
+    expect(result.llmAttemptedStepNumbers).toEqual([]);
+    expect(fallbackProvider).not.toHaveBeenCalled();
   });
 
   it('persists selector evaluation summary for deterministic winners', async () => {
@@ -3528,5 +3661,592 @@ describe('selector-resolver', () => {
       .toBe('from-node');
     expect(getSourceNodeId({ nodeId: null }, { fromNodeId: null, toNodeId: 'to-node' }))
       .toBe('to-node');
+  });
+
+  it('recovers a stable id selector from label[for] association', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <div class="field-row">
+          <label for="username-field">Username</label>
+          <input id="username-field" class="generic-input" type="text" />
+        </div>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      action: 'input',
+      intent: 'input_username',
+      selector: '.generic-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.generic-input',
+        tagName: 'input',
+        attributes: {
+          class: 'generic-input',
+          type: 'text',
+          fieldLabelText: 'Username',
+        },
+      },
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'test_label_context_snapshot',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+          labelStructureEvidence: true,
+          labelStructureEvidenceReason: 'exact_label_association',
+          labelContextSnapshotSource: 'source-node-snapshot',
+          labelContextBlockedReason: null,
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(['#username-field', '[id="username-field"]']).toContain(resolution.resolvedSelector);
+    expect(resolution.resolvedSelectorSpec).toEqual(expect.objectContaining({
+      engine: 'css',
+      proofLevel: 'semantic_validated',
+      labelContext: expect.objectContaining({
+        association: 'label-for',
+        labelText: 'Username',
+        targetId: 'username-field',
+      }),
+    }));
+  });
+
+  it('recovers a wrapped-label selector as structured label-context proof', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <label>Username<input class="generic-input" type="text" /></label>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      action: 'input',
+      intent: 'input_username',
+      selector: '.generic-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.generic-input',
+        tagName: 'input',
+        attributes: {
+          class: 'generic-input',
+          type: 'text',
+          fieldLabelText: 'Username',
+        },
+      },
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'test_label_context_snapshot',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+          labelStructureEvidence: true,
+          labelStructureEvidenceReason: 'exact_label_association',
+          labelContextSnapshotSource: 'source-node-snapshot',
+          labelContextBlockedReason: null,
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelectorSpec).toEqual(expect.objectContaining({
+      engine: 'label-context',
+      labelContext: expect.objectContaining({
+        association: 'wrapped-label',
+        labelText: 'Username',
+        targetTag: 'input',
+      }),
+    }));
+    expect(resolution.resolvedSelector).toContain('label-context("Username"');
+  });
+
+  it('recovers a bounded field container with exact label structure', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <div class="field-row">
+          <label>Employee Id</label>
+          <input class="generic-input" type="text" />
+        </div>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      action: 'input',
+      intent: 'input_employee_id',
+      selector: '.generic-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.generic-input',
+        tagName: 'input',
+        attributes: {
+          class: 'generic-input',
+          type: 'text',
+          fieldLabelText: 'Employee Id',
+        },
+      },
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'test_label_context_snapshot',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+          labelStructureEvidence: true,
+          labelStructureEvidenceReason: 'bounded_label_structure',
+          labelContextSnapshotSource: 'source-node-snapshot',
+          labelContextBlockedReason: null,
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelectorSpec).toEqual(expect.objectContaining({
+      engine: 'label-context',
+      labelContext: expect.objectContaining({
+        association: 'bounded-field',
+        containerSelector: 'div.field-row',
+        boundedContainerSummary: 'div.field-row',
+      }),
+    }));
+  });
+
+  it('blocks label-context recovery when duplicate labels exist', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <div><label>Username</label><input class="generic-input" type="text" /></div>
+        <div><label>Username</label><input class="other-input" type="text" /></div>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      action: 'input',
+      intent: 'input_username',
+      selector: '.generic-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.generic-input',
+        tagName: 'input',
+        attributes: {
+          class: 'generic-input',
+          type: 'text',
+          fieldLabelText: 'Username',
+        },
+      },
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'test_label_context_snapshot',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+          labelStructureEvidence: true,
+          labelStructureEvidenceReason: 'label_text_match',
+          labelContextSnapshotSource: 'source-node-snapshot',
+          labelContextBlockedReason: null,
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+
+    expect(result.resolutions[0].resolvedSelector).toBe('input.generic-input');
+    expect(result.resolutions[0].resolvedSelectorSpec?.labelContext).toBeUndefined();
+  });
+
+  it('does not invoke llm fallback when deterministic label-context recovery succeeds', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <label>Username<input class="generic-input" type="text" /></label>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      action: 'input',
+      intent: 'input_username',
+      selector: '.generic-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.generic-input',
+        tagName: 'input',
+        attributes: {
+          class: 'generic-input',
+          type: 'text',
+          fieldLabelText: 'Username',
+        },
+      },
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'test_label_context_snapshot',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+          labelStructureEvidence: true,
+          labelStructureEvidenceReason: 'exact_label_association',
+          labelContextSnapshotSource: 'source-node-snapshot',
+          labelContextBlockedReason: null,
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+    const fallbackProvider = vi.fn(async (_request: SelectorFallbackRequest) => []);
+
+    const result = await resolveSelectorsForSession(
+      makeSession([step]),
+      snapshotCache,
+      { enableLLMFallback: true },
+      fallbackProvider,
+    );
+
+    expect(result.resolutions[0].resolverMetadata.resolvedBy).toBe('deterministic-override');
+    expect(fallbackProvider).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      title: 'data-testid',
+      selector: '[data-testid="username"]',
+      priority: 'data-testid',
+      attributes: { dataTestId: 'username', fieldLabelText: 'Username', type: 'text' },
+    },
+    {
+      title: 'name',
+      selector: 'input[name="username"]',
+      priority: 'attribute',
+      attributes: { name: 'username', fieldLabelText: 'Username', type: 'text' },
+    },
+    {
+      title: 'placeholder',
+      selector: 'input[placeholder="Username"]',
+      priority: 'attribute',
+      attributes: { placeholder: 'Username', fieldLabelText: 'Username', type: 'text' },
+    },
+    {
+      title: 'aria-label',
+      selector: 'input[aria-label="Username"]',
+      priority: 'attribute',
+      attributes: { ariaLabel: 'Username', fieldLabelText: 'Username', type: 'text' },
+    },
+  ])('bypasses label-context recovery when strong direct selector exists: $title', async ({ selector, priority, attributes }) => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <div class="field-row">
+          <label>Username</label>
+          <input data-testid="username" name="username" placeholder="Username" aria-label="Username" />
+        </div>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      action: 'input',
+      intent: 'input_username',
+      selector,
+      selectorPriority: priority as any,
+      selectorRank: 3,
+      fingerprint: {
+        selector,
+        tagName: 'input',
+        attributes,
+      },
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'strong_direct_selector',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+          labelStructureEvidence: true,
+          labelStructureEvidenceReason: 'exact_label_association',
+          labelContextSnapshotSource: 'source-node-snapshot',
+          labelContextBlockedReason: null,
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    expect(result.resolutions[0].resolvedSelector).toBe(selector);
+    expect(result.resolutions[0].resolvedSelectorSpec?.engine).not.toBe('label-context');
+  });
+
+  it('blocks bounded label-context recovery when a custom combobox trigger competes inside the same container', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <div class="field-row">
+          <label>Username</label>
+          <input class="generic-input" type="text" />
+          <div role="combobox" aria-haspopup="listbox">Open</div>
+        </div>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      action: 'input',
+      intent: 'input_username',
+      selector: '.generic-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.generic-input',
+        tagName: 'input',
+        attributes: {
+          class: 'generic-input',
+          type: 'text',
+          fieldLabelText: 'Username',
+        },
+      },
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'custom_competitor',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+          labelStructureEvidence: true,
+          labelStructureEvidenceReason: 'bounded_label_structure',
+          labelContextSnapshotSource: 'source-node-snapshot',
+          labelContextBlockedReason: null,
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    expect(result.resolutions[0].resolvedSelector).toBe('input.generic-input');
+    expect(result.resolutions[0].resolvedSelectorSpec?.labelContext).toBeUndefined();
+  });
+
+  it('recovers an ambiguous custom-control trigger using bounded field context for User Role', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <div class="field-row">
+          <div>User Role</div>
+          <div class="select-trigger" role="combobox" aria-haspopup="listbox">-- Select --</div>
+        </div>
+        <div class="field-row">
+          <div>Status</div>
+          <div class="select-trigger" role="combobox" aria-haspopup="listbox">-- Select --</div>
+        </div>
+        <div role="option">Admin</div>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      action: 'custom-select',
+      intent: 'select_user_role_admin',
+      selector: '[role="option"]',
+      selectorPriority: 'attribute',
+      selectorRank: 3,
+      value: 'Admin',
+      controlFamily: 'combobox',
+      triggerSelector: '.select-trigger',
+      triggerSelectorPriority: 'class',
+      triggerFingerprint: {
+        selector: '.select-trigger',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        textExcerpt: 'User Role',
+        attributes: {
+          class: 'select-trigger',
+          role: 'combobox',
+          fieldLabelText: 'User Role',
+        },
+      },
+      optionSelector: '[role="option"]',
+      optionText: 'Admin',
+      optionValue: 'Admin',
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'test_trigger_context_snapshot',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolverMetadata.triggerResolvedSelectorSpec).toEqual(expect.objectContaining({
+      engine: 'trigger-context',
+      triggerContext: expect.objectContaining({
+        labelText: 'User Role',
+        association: 'bounded-field',
+        containerSelector: 'div.field-row',
+        renderStatus: 'proven-structural-fallback',
+      }),
+    }));
+    expect(resolution.resolverMetadata.triggerResolvedSelector).toContain('trigger-context("User Role"');
+    expect(resolution.resolverMetadata.triggerWarningCodes).toContain('custom-control-trigger-structural-fallback');
+  });
+
+  it('recovers an ambiguous custom-control trigger using bounded field context for Status', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <div class="field-row">
+          <div>User Role</div>
+          <div class="select-trigger" role="combobox" aria-haspopup="listbox">-- Select --</div>
+        </div>
+        <div class="field-row">
+          <div>Status</div>
+          <div class="select-trigger" role="combobox" aria-haspopup="listbox">-- Select --</div>
+        </div>
+        <div role="option">Enabled</div>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      action: 'custom-select',
+      intent: 'select_status_enabled',
+      selector: '[role="option"]',
+      selectorPriority: 'attribute',
+      selectorRank: 3,
+      value: 'Enabled',
+      controlFamily: 'combobox',
+      triggerSelector: '.select-trigger',
+      triggerSelectorPriority: 'class',
+      triggerFingerprint: {
+        selector: '.select-trigger',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        textExcerpt: 'Status',
+        attributes: {
+          class: 'select-trigger',
+          role: 'combobox',
+          fieldLabelText: 'Status',
+        },
+      },
+      optionSelector: '[role="option"]',
+      optionText: 'Enabled',
+      optionValue: 'Enabled',
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'test_trigger_context_snapshot',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolverMetadata.triggerResolvedSelectorSpec?.triggerContext).toEqual(expect.objectContaining({
+      labelText: 'Status',
+      association: 'bounded-field',
+    }));
+    expect(resolution.resolverMetadata.triggerResolvedSelector).toContain('trigger-context("Status"');
+  });
+
+  it('blocks trigger-context recovery when the bounded container has two visible triggers', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <div class="field-row">
+          <div>User Role</div>
+          <div class="select-trigger" role="combobox" aria-haspopup="listbox">-- Select --</div>
+          <div class="select-trigger" role="combobox" aria-haspopup="listbox">-- Select --</div>
+        </div>
+        <div role="option">Admin</div>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      action: 'custom-select',
+      intent: 'select_user_role_admin',
+      selector: '[role="option"]',
+      selectorPriority: 'attribute',
+      selectorRank: 3,
+      value: 'Admin',
+      controlFamily: 'combobox',
+      triggerSelector: '.select-trigger',
+      triggerSelectorPriority: 'class',
+      triggerFingerprint: {
+        selector: '.select-trigger',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        textExcerpt: 'User Role',
+        attributes: {
+          class: 'select-trigger',
+          role: 'combobox',
+          fieldLabelText: 'User Role',
+        },
+      },
+      optionSelector: '[role="option"]',
+      optionText: 'Admin',
+      optionValue: 'Admin',
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'test_trigger_context_snapshot',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolverMetadata.triggerResolvedSelectorSpec).toBeUndefined();
+    expect(resolution.resolverMetadata.triggerContextRenderStatus).toBe('blocked-unsafe-render');
   });
 });

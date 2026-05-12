@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { CodegenSession, CodegenStep } from './types';
+import type { LabelContextRenderStatus, LabelContextSelectorSpec, TriggerContextSelectorSpec } from './types';
 import { AirMetadata, AirMethodMeta } from './sidecar.types';
 import { computeActionChecksum } from './checksum.utils';
 import { GoogleGenerativeAI } from '@google/generative-ai';
@@ -60,6 +61,22 @@ interface EmittedMethod {
   equivalentProofSource: AirMethodMeta['equivalentProofSource'];
   equivalentSourceSelector: string | null;
   preferredRenderings: AirMethodMeta['preferredRenderings'];
+  labelContextRenderStatus?: LabelContextRenderStatus;
+  labelContextRenderReason?: string | null;
+  labelText?: string | null;
+  relationType?: AirMethodMeta['relationType'];
+  boundedContainerSummary?: string | null;
+  cleanParentSelector?: string | null;
+  cleanChildSelector?: string | null;
+  structuralFallbackLocator?: string | null;
+  recoveredFromSelector?: string | null;
+  triggerContextRenderStatus?: LabelContextRenderStatus;
+  triggerContextRenderReason?: string | null;
+  triggerContextLabel?: string | null;
+  triggerBoundedContainerSummary?: string | null;
+  triggerStructuralFallbackLocator?: string | null;
+  extraWarningComments?: string[];
+  extraWarningCodes?: string[];
 }
 
 interface AssertionHelperSeed {
@@ -176,8 +193,11 @@ export class LlmOrchestrator {
         resolvedSelector: resolution?.resolvedSelector ?? step.selector,
         resolvedSelectorSpec: resolution?.resolvedSelectorSpec,
         resolverMetadata: resolution?.resolverMetadata,
+        triggerResolvedSelector: resolution?.resolverMetadata.triggerResolvedSelector ?? step.triggerResolvedSelector,
+        triggerSelectorSpec: resolution?.resolverMetadata.triggerResolvedSelectorSpec ?? step.triggerSelectorSpec,
       };
     });
+    const generationStepMap = new Map(generationSteps.map(step => [step.step, step]));
 
     if (debugTrace) {
       console.log('--- FINAL SELECTORS USED ---');
@@ -214,6 +234,7 @@ export class LlmOrchestrator {
 
     for (const generatedMethod of parsedResponse.methods) {
       const originalStep = originalStepMap.get(generatedMethod.stepNumber);
+      const generationStep = generationStepMap.get(generatedMethod.stepNumber);
       if (!originalStep) {
         console.error('[AIR] Invalid LLM output (Unknown step):', generatedMethod);
         continue;
@@ -228,7 +249,7 @@ export class LlmOrchestrator {
       const methodName = this.ensureUniqueMethodName(generatedMethod.methodName, originalStep.step, usedMethodNames);
       const resolution = resolutionMap.get(originalStep.step);
       const emittedMethod = this.buildMethodCode(
-        originalStep,
+        generationStep ?? originalStep,
         methodName,
         actionStr,
         resolution?.resolvedSelector,
@@ -277,6 +298,9 @@ export class LlmOrchestrator {
         resolvedSelectorSpec: resolution?.resolvedSelectorSpec,
         selectorType: originalStep.selectorPriority,
         actionType: originalStep.action,
+        fieldLabelText: typeof originalStep.fingerprint?.attributes?.fieldLabelText === 'string'
+          ? originalStep.fingerprint.attributes.fieldLabelText
+          : undefined,
         locatorFlavor: this.detectLocatorFlavor(emittedMethod.selectorUsed, originalStep.selectorPriority),
         emittedLocator: emittedMethod.emittedLocator ?? undefined,
         emittedLocatorEngine: emittedMethod.emittedLocatorEngine,
@@ -284,6 +308,33 @@ export class LlmOrchestrator {
         emittedLocatorSource: emittedMethod.emittedLocatorSource,
         emittedLocatorWarnings: emittedMethod.emittedLocatorWarnings,
         usedSelectorSpec: emittedMethod.usedSelectorSpec,
+        controlFamily: originalStep.controlFamily,
+        triggerOriginalSelector: originalStep.triggerSelector,
+        triggerFieldLabelText: typeof originalStep.triggerFingerprint?.attributes?.fieldLabelText === 'string'
+          ? originalStep.triggerFingerprint.attributes.fieldLabelText
+          : (typeof originalStep.fingerprint?.attributes?.fieldLabelText === 'string'
+              ? originalStep.fingerprint.attributes.fieldLabelText
+              : undefined),
+        triggerSelector: originalStep.triggerSelector,
+        triggerSelectorPriority: originalStep.triggerSelectorPriority,
+        triggerResolvedSelector: (generationStep ?? originalStep).triggerResolvedSelector,
+        triggerSelectorSpec: (generationStep ?? originalStep).triggerSelectorSpec,
+        triggerContextProof: (generationStep ?? originalStep).triggerSelectorSpec?.triggerContext,
+        triggerContextLabel: emittedMethod.triggerContextLabel ?? undefined,
+        triggerContextRenderStatus: emittedMethod.triggerContextRenderStatus,
+        triggerContextRenderReason: emittedMethod.triggerContextRenderReason ?? undefined,
+        triggerBoundedContainerSummary: emittedMethod.triggerBoundedContainerSummary ?? undefined,
+        triggerStructuralFallbackLocator: emittedMethod.triggerStructuralFallbackLocator ?? undefined,
+        triggerWarningCodes: (generationStep ?? originalStep).triggerSelectorSpec?.triggerContext?.warningCodes
+          ?? resolverForSidecar?.triggerWarningCodes,
+        optionSelector: originalStep.optionSelector,
+        optionText: originalStep.optionText,
+        optionValue: originalStep.optionValue,
+        optionResolvedSelector: originalStep.optionResolvedSelector,
+        optionSelectorSpec: originalStep.optionSelectorSpec,
+        absorbedOpenEventId: originalStep.absorbedOpenEventId,
+        absorbedOpenTraceId: originalStep.absorbedOpenTraceId,
+        compressedFromEvents: originalStep.compressedFromEvents,
         equivalentRenderingUsed: emittedMethod.equivalentRenderingUsed,
         equivalentLocator: emittedMethod.equivalentLocator ?? undefined,
         equivalentLocatorEngine: emittedMethod.equivalentLocatorEngine,
@@ -291,6 +342,23 @@ export class LlmOrchestrator {
         equivalentProofSource: emittedMethod.equivalentProofSource,
         equivalentSourceSelector: emittedMethod.equivalentSourceSelector ?? undefined,
         preferredRenderings: emittedMethod.preferredRenderings,
+        labelContextProof: resolution?.resolvedSelectorSpec?.labelContext,
+        labelContextRenderStatus: emittedMethod.labelContextRenderStatus,
+        labelContextRenderReason: emittedMethod.labelContextRenderReason ?? undefined,
+        labelText: emittedMethod.labelText ?? undefined,
+        relationType: emittedMethod.relationType,
+        boundedContainerSummary: emittedMethod.boundedContainerSummary ?? undefined,
+        cleanParentSelector: emittedMethod.cleanParentSelector ?? undefined,
+        cleanChildSelector: emittedMethod.cleanChildSelector ?? undefined,
+        structuralFallbackLocator: emittedMethod.structuralFallbackLocator ?? undefined,
+        recoveredFromSelector: emittedMethod.recoveredFromSelector ?? undefined,
+        warningCodes: Array.from(new Set([
+          ...(emittedMethod.emittedLocatorWarnings ?? []),
+          ...(emittedMethod.extraWarningCodes ?? []),
+          ...((resolution?.resolvedSelectorSpec?.labelContext?.warningCodes) ?? []),
+          ...(((generationStep ?? originalStep).triggerSelectorSpec?.triggerContext?.warningCodes) ?? []),
+          ...(resolverForSidecar?.triggerWarningCodes ?? []),
+        ])),
       };
     }
 
@@ -312,6 +380,47 @@ import { Page, TestInfo } from '@playwright/test';
 export class ${parsedResponse.className} extends AirBasePage {
   constructor(page: Page, testInfo: TestInfo) {
     super(page, testInfo, metadata as any);
+  }
+
+  private async __airCaptureRepairEvidence(methodName: string, error: unknown) {
+    try {
+      const methods = (metadata as any)?.methods ?? {};
+      const meta = methods[methodName] ?? {};
+      const payload = {
+        capturedAt: new Date().toISOString(),
+        methodName,
+        errorMessage: error instanceof Error ? error.message : String(error ?? ''),
+        currentUrl: typeof this.page?.url === 'function' ? this.page.url() : null,
+        pageTitle: await this.page.title().catch(() => null),
+        html: await this.page.content().catch(() => null),
+        methodMeta: {
+          step: meta.step ?? null,
+          intent: meta.intent ?? null,
+          originalSelector: meta.originalSelector ?? null,
+          selectorUsed: meta.selectorUsed ?? null,
+          actionType: meta.actionType ?? null,
+          fieldLabelText: meta.fieldLabelText ?? meta.labelText ?? null,
+          triggerOriginalSelector: meta.triggerOriginalSelector ?? meta.triggerSelector ?? null,
+          triggerFieldLabelText: meta.triggerFieldLabelText ?? meta.triggerContextLabel ?? null,
+          optionText: meta.optionText ?? null,
+          optionValue: meta.optionValue ?? null,
+          warningCodes: meta.warningCodes ?? [],
+          triggerWarningCodes: meta.triggerWarningCodes ?? [],
+          emittedLocator: meta.emittedLocator ?? null,
+          emittedLocatorWarnings: meta.emittedLocatorWarnings ?? [],
+          labelContextRenderStatus: meta.labelContextRenderStatus ?? null,
+          labelContextRenderReason: meta.labelContextRenderReason ?? null,
+          triggerContextRenderStatus: meta.triggerContextRenderStatus ?? null,
+          triggerContextRenderReason: meta.triggerContextRenderReason ?? null,
+        },
+      };
+      await this.testInfo.attach('air-repair-' + String(meta.step ?? methodName) + '.json', {
+        body: Buffer.from(JSON.stringify(payload, null, 2), 'utf8'),
+        contentType: 'application/json',
+      });
+    } catch {
+      // Never hide the original action failure because of AIR repair evidence capture.
+    }
   }
 
 ${methodsContent.join('\n\n')}
@@ -636,7 +745,7 @@ ${methodsContent.join('\n\n')}
     if (!value) return 'unknown';
     if (selectorPriority === 'text' || value.startsWith('text=')) return 'text';
     if (selectorPriority === 'xpath' || value.startsWith('//') || value.startsWith('xpath=')) return 'xpath';
-    if (value.includes('getBy')) return 'playwright';
+    if (value.includes('getBy') || value.startsWith('label-context(')) return 'playwright';
     return 'css';
   }
 
@@ -791,6 +900,71 @@ ${methodsContent.join('\n\n')}
     }
   }
 
+  private static buildRecordedLocatorExpr(
+    selector?: string | null,
+    selectorSpec?: CodegenStep['selectorSpec'],
+  ): string | null {
+    const exact = renderLocatorExpressionFromSelectorSpec(selectorSpec);
+    if (exact) return exact;
+    if (selectorSpec?.engine === 'label-context' || selectorSpec?.engine === 'trigger-context') {
+      return null;
+    }
+    const normalized = (selector || '').trim();
+    return normalized ? `locator(${JSON.stringify(normalized)})` : null;
+  }
+
+  private static buildStructuralFallbackWarningComments(
+    labelContext?: LabelContextSelectorSpec,
+  ): string[] {
+    if (!labelContext) return [];
+    const renderStatus = this.classifyLabelContextRenderStatus(labelContext);
+    if (renderStatus !== 'proven-structural-fallback') return [];
+    return [
+      `// AIR WARNING: Structural label-context fallback.`,
+      `// Reason: ${labelContext.renderReason || `no stable direct selector was available for field "${labelContext.labelText}".`}`,
+      `// Proof: exact label + one visible ${labelContext.targetTag} inside bounded field container.`,
+      `// Consider adding data-testid/name/aria-label for a cleaner locator.`,
+    ];
+  }
+
+  private static buildTriggerStructuralFallbackWarningComments(
+    triggerContext?: TriggerContextSelectorSpec,
+  ): string[] {
+    if (!triggerContext) return [];
+    if ((triggerContext.renderStatus ?? 'proof-only-no-clean-render') !== 'proven-structural-fallback') return [];
+    return [
+      `// AIR WARNING: Structural custom-control trigger fallback.`,
+      `// Reason: ${triggerContext.renderReason || `no stable direct trigger selector was available for field "${triggerContext.labelText}".`}`,
+      `// Proof: exact field label + one visible trigger inside bounded field container.`,
+      `// Consider adding data-testid/id/aria-label on the trigger wrapper for a cleaner locator.`,
+    ];
+  }
+
+  private static buildWeakTriggerFallbackWarningComments(
+    triggerSelector: string,
+  ): string[] {
+    return [
+      `// AIR WARNING: Weak custom-control trigger fallback.`,
+      `// Reason: no bounded trigger-context proof was available, so AIR is using the recorded trigger selector.`,
+      `// Trigger selector: ${this.cleanForComment(triggerSelector)}`,
+      `// Consider adding data-testid/id/aria-label on the trigger wrapper for a cleaner locator.`,
+    ];
+  }
+
+  private static classifyLabelContextRenderStatus(
+    labelContext?: LabelContextSelectorSpec | null,
+  ): LabelContextRenderStatus | undefined {
+    if (!labelContext) return undefined;
+    if (labelContext.renderStatus) return labelContext.renderStatus;
+    if (labelContext.association === 'label-for' || labelContext.association === 'aria-labelledby') {
+      return 'clean-direct-selector';
+    }
+    if (labelContext.cleanParentSelector) {
+      return 'clean-scoped-locator';
+    }
+    return 'proven-structural-fallback';
+  }
+
   private static buildMethodCode(
     step: CodegenStep,
     methodName: string,
@@ -832,6 +1006,68 @@ ${methodsContent.join('\n\n')}
       ? `locator(${JSON.stringify(selectorUsed)})`
       : null;
     const preferredLocatorExpr = preferredEquivalentLocatorExpr ?? exactLocatorExpr ?? legacyLocatorExpr;
+    const triggerLocatorExpr = this.buildRecordedLocatorExpr(
+      step.triggerResolvedSelector ?? step.triggerSelector,
+      step.triggerSelectorSpec,
+    );
+    const triggerContext = step.triggerSelectorSpec?.triggerContext;
+    const labelContext = resolvedSelectorSpec?.labelContext;
+    const labelContextRenderStatus = this.classifyLabelContextRenderStatus(labelContext) ?? undefined;
+    const labelContextRenderReason = labelContext?.renderReason ?? null;
+    const labelText = labelContext?.labelText ?? null;
+    const relationType = labelContext?.association;
+    const boundedContainerSummary = labelContext?.boundedContainerSummary ?? null;
+    const cleanParentSelector = labelContext?.cleanParentSelector ?? null;
+    const cleanChildSelector = labelContext?.cleanChildSelector ?? null;
+    const structuralFallbackLocator = labelContext?.structuralFallbackLocator ?? exactLocatorExpr ?? null;
+    const recoveredFromSelector = labelContext?.recoveredFromSelector ?? null;
+    const triggerWarningCodes = Array.from(new Set([
+      ...(triggerContext?.warningCodes ?? []),
+      ...(resolverMetadata?.triggerWarningCodes ?? []),
+    ]));
+    const triggerContextRenderStatus = triggerContext?.renderStatus
+      ?? resolverMetadata?.triggerContextRenderStatus
+      ?? undefined;
+    const triggerContextRenderReason = triggerContext?.renderReason
+      ?? resolverMetadata?.triggerContextRenderReason
+      ?? null;
+    const triggerContextLabel = triggerContext?.labelText
+      ?? resolverMetadata?.triggerContextLabel
+      ?? null;
+    const triggerBoundedContainerSummary = triggerContext?.boundedContainerSummary
+      ?? resolverMetadata?.triggerBoundedContainerSummary
+      ?? null;
+    const triggerStructuralFallbackLocator = triggerContext?.structuralFallbackLocator
+      ?? resolverMetadata?.triggerStructuralFallbackLocator
+      ?? triggerLocatorExpr
+      ?? null;
+    const optionLocatorExpr = preferredLocatorExpr ?? this.buildRecordedLocatorExpr(
+      step.optionResolvedSelector ?? step.optionSelector ?? selectorUsed,
+      step.optionSelectorSpec ?? resolvedSelectorSpec ?? step.selectorSpec,
+    );
+    const triggerRenderBlocked =
+      triggerContextRenderStatus === 'blocked-unsafe-render' ||
+      triggerWarningCodes.includes('custom-control-trigger-target-binding-ambiguous');
+    const isCompressedCustomSelect =
+      step.action === 'custom-select' &&
+      Array.isArray(step.compressedFromEvents) &&
+      step.compressedFromEvents.length >= 2 &&
+      !!triggerLocatorExpr &&
+      !!optionLocatorExpr;
+    const blockedCompressedCustomSelect =
+      step.action === 'custom-select' &&
+      Array.isArray(step.compressedFromEvents) &&
+      step.compressedFromEvents.length >= 2 &&
+      (
+        triggerRenderBlocked ||
+        (!!step.triggerSelectorSpec && !triggerLocatorExpr)
+      );
+    const weakCompressedCustomSelect =
+      isCompressedCustomSelect &&
+      !blockedCompressedCustomSelect &&
+      !triggerContextRenderStatus &&
+      !!step.triggerSelector &&
+      (step.triggerSelectorPriority === 'class' || step.triggerSelectorPriority === 'path' || step.triggerSelectorPriority === 'other' || step.triggerSelectorPriority === 'unknown');
 
     const parsed = this.parseLocatorAction(trimmedAction);
     let fallbackReason: string | null = null;
@@ -881,7 +1117,31 @@ ${methodsContent.join('\n\n')}
     let fullAction = `this.page.${trimmedAction}`;
     let methodParams = '';
 
-    if (effective && renderConfidently) {
+    if (blockedCompressedCustomSelect) {
+      fallbackReason = 'custom-control-trigger-blocked-unsafe-render';
+      const optionLabel = step.optionText || step.optionValue || step.intent || `step ${step.step}`;
+      const blockedReason = triggerWarningCodes[0] || triggerContextRenderReason || 'custom-control-trigger-blocked';
+      const originalTriggerSelector = step.triggerSelector || step.triggerResolvedSelector || '';
+      const blockedMessage = `AIR could not prove a safe trigger selector for custom-select ${optionLabel}`;
+      fullAction = `throw new Error(${JSON.stringify(blockedMessage)})`;
+      lines = [
+        `// TODO[AIR]: Cannot safely open custom control for "${this.cleanForComment(optionLabel)}".`,
+        `// Reason: ${this.cleanForComment(blockedReason)}.`,
+        `// Original trigger selector "${this.cleanForComment(originalTriggerSelector)}" was blocked because it may match multiple controls.`,
+        `throw new Error(${JSON.stringify(blockedMessage)});`,
+      ];
+    } else if (isCompressedCustomSelect && renderConfidently) {
+      fullAction = `this.page.${triggerLocatorExpr}.click(); this.page.${optionLocatorExpr}.click()`;
+      lines = [
+        `const triggerTarget = this.page.${triggerLocatorExpr};`,
+        `await triggerTarget.waitFor({ state: 'visible' });`,
+        `await triggerTarget.click();`,
+        `const optionTarget = this.page.${optionLocatorExpr};`,
+        `await optionTarget.waitFor({ state: 'visible' });`,
+        `await optionTarget.click();`,
+      ];
+      fallbackReason = 'compressed-custom-control-select';
+    } else if (effective && renderConfidently) {
       const scopedLocator = this.withCardinalityScope(effective.locatorExpr);
       let invocationArgs = effective.args;
       if (
@@ -937,6 +1197,18 @@ ${methodsContent.join('\n\n')}
     }
 
     const inlineWarningLines = renderingWarnings.map(code => `  // WARNING: ${code}`);
+    for (const line of this.buildStructuralFallbackWarningComments(labelContext)) {
+      inlineWarningLines.push(`  ${line}`);
+    }
+    for (const line of this.buildTriggerStructuralFallbackWarningComments(triggerContext)) {
+      inlineWarningLines.push(`  ${line}`);
+    }
+    if (weakCompressedCustomSelect) {
+      inlineWarningLines.push(`  // WARNING: custom-control-trigger-weak-fallback`);
+      for (const line of this.buildWeakTriggerFallbackWarningComments(step.triggerSelector || '')) {
+        inlineWarningLines.push(`  ${line}`);
+      }
+    }
     if (resolvedSelectorSpec && !renderConfidently && resolvedSelectorSpec.rejectReason) {
       inlineWarningLines.push(`  // WARNING: reject-reason=${this.cleanForComment(resolvedSelectorSpec.rejectReason)}`);
     }
@@ -946,7 +1218,12 @@ ${methodsContent.join('\n\n')}
       `  // selector: ${this.cleanForComment(selectorUsed)} | warnings: ${this.cleanForComment(warnings)}`,
       `  async ${methodName}(${methodParams}) {`,
       ...inlineWarningLines,
-      ...lines.map(line => `    ${line}`),
+      `    try {`,
+      ...lines.map(line => `      ${line}`),
+      `    } catch (error) {`,
+      `      await this.__airCaptureRepairEvidence(${JSON.stringify(methodName)}, error);`,
+      `      throw error;`,
+      `    }`,
       `  }`,
     ];
 
@@ -955,7 +1232,7 @@ ${methodsContent.join('\n\n')}
       fullAction,
       fallbackReason,
       selectorUsed,
-      emittedLocator: renderConfidently ? preferredLocatorExpr : null,
+      emittedLocator: blockedCompressedCustomSelect ? null : (renderConfidently ? preferredLocatorExpr : null),
       emittedLocatorEngine,
       emittedLocatorProofLevel,
       emittedLocatorSource,
@@ -968,6 +1245,22 @@ ${methodsContent.join('\n\n')}
       equivalentProofSource: preferredRendering?.proofSource ?? 'unknown',
       equivalentSourceSelector: preferredRendering?.sourceSelector ?? null,
       preferredRenderings: resolverMetadata?.selectorEvaluation?.preferredRenderings?.slice(0, 3),
+      labelContextRenderStatus,
+      labelContextRenderReason,
+      labelText,
+      relationType,
+      boundedContainerSummary,
+      cleanParentSelector,
+      cleanChildSelector,
+      structuralFallbackLocator,
+      recoveredFromSelector,
+      triggerContextRenderStatus,
+      triggerContextRenderReason,
+      triggerContextLabel,
+      triggerBoundedContainerSummary,
+      triggerStructuralFallbackLocator,
+      extraWarningComments: this.buildStructuralFallbackWarningComments(labelContext),
+      extraWarningCodes: weakCompressedCustomSelect ? ['custom-control-trigger-weak-fallback'] : [],
     };
   }
 
@@ -1106,6 +1399,19 @@ ${methodsContent.join('\n\n')}
       pageUrl: step.pageUrl,
       normalizedUrl: step.normalizedUrl,
       sourceNodeId: step.sourceNodeId,
+      controlFamily: step.controlFamily,
+      triggerSelector: step.triggerSelector,
+      triggerSelectorPriority: step.triggerSelectorPriority,
+      triggerResolvedSelector: step.triggerResolvedSelector,
+      triggerSelectorSpec: step.triggerSelectorSpec,
+      optionSelector: step.optionSelector,
+      optionText: step.optionText,
+      optionValue: step.optionValue,
+      optionResolvedSelector: step.optionResolvedSelector,
+      optionSelectorSpec: step.optionSelectorSpec,
+      absorbedOpenEventId: step.absorbedOpenEventId,
+      absorbedOpenTraceId: step.absorbedOpenTraceId,
+      compressedFromEvents: step.compressedFromEvents,
     }));
   }
 

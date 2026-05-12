@@ -2,12 +2,17 @@ import type {
   CodegenSession,
   CodegenStep,
   EquivalentRendering,
+  LabelContextRenderStatus,
+  LabelContextSelectorSpec,
+  TriggerContextSelectorSpec,
   LlmResponseFormat,
   ResolverMetadata,
   SelectorCategory,
   SelectorEvaluation,
   SelectorPriority,
   ResolverSnapshotSource,
+  SelectorSpec,
+  SnapshotSelectionProvenance,
 } from './types';
 import {
   attachAssertionOutcomeSelections,
@@ -242,16 +247,27 @@ function isUtilityClassToken(token: string): boolean {
     /^(?:text|bg|border|rounded)-/i.test(token) ||
     /^(?:w|h|min|max)-/i.test(token) ||
     /^(?:gap|space-[xy]|inset|top|left|right|bottom)-/i.test(token) ||
-    /^(?:hover|focus|active|disabled):/i.test(token)
+    /^(?:hover|focus|active|disabled|group-hover|focus-within|focus-visible):/i.test(token)
   );
 }
 
 function isStateClassToken(token: string): boolean {
-  return /^(?:active|selected|open|disabled|expanded|collapsed|checked|focused)$/i.test(token);
+  const normalized = token.trim().toLowerCase();
+  if (!normalized) return false;
+  if (/^(?:is|has)-[a-z0-9:_-]+$/i.test(normalized)) return true;
+  if (/--(?:focus|focused|active|selected|open|disabled|hover|loading|expanded|collapsed|current|checked|invalid|valid|dirty|touched|visited|state)$/i.test(normalized)) {
+    return true;
+  }
+  if (normalized.includes('data-state') || normalized.includes('headlessui-state')) return true;
+  const parts = tokenizeSemanticParts(normalized);
+  if (parts.length === 0) return false;
+  return parts.some(part =>
+    /^(?:focus|focused|active|selected|open|disabled|hover|loading|expanded|collapsed|current|checked|invalid|valid|dirty|touched|visited|state)$/.test(part),
+  );
 }
 
 function isFrameworkClassToken(token: string): boolean {
-  return /^(?:oxd-|mui|ant-|chakra-)/i.test(token);
+  return /^(?:oxd-|mui|ant-|chakra-|radix-|headlessui-)/i.test(token);
 }
 
 function isGenericShellClassToken(token: string): boolean {
@@ -488,7 +504,721 @@ function getSelectorRank(
   return 10;
 }
 
-function validateCandidate(selector: string, snapshot: Document, step?: CodegenStep): CandidateValidation {
+function normalizeLabelContextText(value: string | null | undefined): string {
+  return normalizeTextForMatch(typeof value === 'string' ? value : '');
+}
+
+function getFieldLabelText(step: CodegenStep): string | null {
+  const value = inferStepSignalAttributes(step).fieldLabelText;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function hasStrongDirectSelectorEvidence(step: CodegenStep): boolean {
+  const priority = step.selectorPriority;
+  if (
+    priority === 'data-testid' ||
+    priority === 'id' ||
+    priority === 'attribute' ||
+    priority === 'text'
+  ) {
+    return true;
+  }
+
+  const attrs = inferStepSignalAttributes(step);
+  return !!(
+    attrs.dataTestId ||
+    attrs.dataCy ||
+    attrs.dataQa ||
+    attrs.id ||
+    attrs.name ||
+    attrs.placeholder ||
+    attrs.ariaLabel ||
+    attrs.href
+  );
+}
+
+function isStructuredContextSource(source: RawCandidate['source']): boolean {
+  return source === 'label-context' || source === 'trigger-context';
+}
+
+function buildTriggerResolutionStep(step: CodegenStep): CodegenStep {
+  return {
+    ...step,
+    selector: step.triggerSelector ?? step.selector,
+    selectorPriority: step.triggerSelectorPriority ?? step.selectorPriority,
+    fingerprint: step.triggerFingerprint ?? step.fingerprint,
+  };
+}
+
+function getTriggerContextLabel(step: CodegenStep): string | null {
+  const triggerStep = buildTriggerResolutionStep(step);
+  const attrs = inferStepSignalAttributes(triggerStep);
+  const candidates = [
+    attrs.fieldLabelText,
+    attrs.associatedLabelText,
+    attrs.wrappedLabelText,
+    attrs.labelledByText,
+    step.triggerFingerprint?.textExcerpt ?? undefined,
+    step.fingerprint?.attributes?.fieldLabelText ?? undefined,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue;
+    const trimmed = candidate.trim();
+    if (!trimmed) continue;
+    if (trimmed === '-- Select --' || trimmed === 'Select') continue;
+    if (step.optionText && normalizeLabelContextText(trimmed) === normalizeLabelContextText(step.optionText)) continue;
+    if (step.optionValue && normalizeLabelContextText(trimmed) === normalizeLabelContextText(step.optionValue)) continue;
+    return trimmed;
+  }
+
+  return null;
+}
+
+function isSelectLikeTriggerStep(step: CodegenStep): boolean {
+  const family = (step.controlFamily || '').toLowerCase();
+  return (
+    step.action === 'custom-control-open' ||
+    (step.action === 'custom-select' && ['combobox', 'listbox', 'select', 'dropdown'].includes(family))
+  );
+}
+
+function isTriggerSelectorDirectAndStrong(step: CodegenStep): boolean {
+  const triggerStep = buildTriggerResolutionStep(step);
+  return hasStrongDirectSelectorEvidence(triggerStep);
+}
+
+function isWeakLabelContextFallbackCandidate(
+  step: CodegenStep,
+  snapshotSelection?: SnapshotSelectionProvenance,
+): boolean {
+  if (step.action !== 'input') return false;
+  if (hasStrongDirectSelectorEvidence(step)) return false;
+  if (!getFieldLabelText(step)) return false;
+  if (snapshotSelection?.labelStructureEvidence !== true) return false;
+  const priority = step.selectorPriority ?? 'unknown';
+  return priority === 'class' || priority === 'path' || priority === 'unknown' || priority === 'other';
+}
+
+function getVisibleInputLikeControls(root: ParentNode): Element[] {
+  try {
+    return Array.from(
+      root.querySelectorAll(
+        'input,textarea,select,[role="textbox"],[role="combobox"],[role="searchbox"],[role="spinbutton"],[contenteditable="true"],[aria-haspopup="listbox"],[aria-haspopup="combobox"]',
+      ),
+    ).filter(isVisibleElement);
+  } catch {
+    return [];
+  }
+}
+
+function getVisibleTriggerLikeControls(root: ParentNode): Element[] {
+  try {
+    return Array.from(
+      root.querySelectorAll(
+        'select,[role="combobox"],[role="button"][aria-haspopup],[aria-haspopup="listbox"],[aria-haspopup="combobox"],button[aria-haspopup],input[role="combobox"],[contenteditable="true"]',
+      ),
+    ).filter(isVisibleElement);
+  } catch {
+    return [];
+  }
+}
+
+function findExactVisibleLabelLikeDescendants(root: Element, labelText: string): Element[] {
+  const normalizedLabel = normalizeLabelContextText(labelText);
+  try {
+    const candidates = Array.from(root.querySelectorAll('label,legend,span,div,p')).filter(element =>
+      isVisibleElement(element) &&
+      normalizeLabelContextText(element.textContent || '') === normalizedLabel,
+    );
+    return candidates.filter(element =>
+      !candidates.some(other => other !== element && element.contains(other)),
+    );
+  } catch {
+    return [];
+  }
+}
+
+function findTightFieldContainer(label: Element, target: Element): { container: Element | null; blockedReason?: string } {
+  let current: Element | null = label;
+  let depth = 0;
+  while (current && depth < 5) {
+    const tagName = current.tagName?.toLowerCase() || '';
+    if (['body', 'html', 'main', 'section', 'article', 'table', 'tbody', 'thead', 'form'].includes(tagName)) {
+      break;
+    }
+
+    const controls = getVisibleInputLikeControls(current);
+    if (controls.length === 1 && controls[0] === target) {
+      return { container: current };
+    }
+
+    if (controls.length > 1 && controls.includes(target)) {
+      return { container: null, blockedReason: 'multiple_input_like_targets' };
+    }
+
+    current = current.parentElement;
+    depth += 1;
+  }
+
+  return { container: null, blockedReason: 'broad_container_only' };
+}
+
+function findTightTriggerContainer(
+  target: Element,
+  labelText: string,
+): { container: Element | null; labelElement?: Element | null; blockedReason?: string } {
+  let current: Element | null = target;
+  let depth = 0;
+  while (current && depth < 5) {
+    const tagName = current.tagName?.toLowerCase() || '';
+    if (['body', 'html', 'main', 'section', 'article', 'table', 'tbody', 'thead', 'form'].includes(tagName)) {
+      break;
+    }
+
+    const labels = findExactVisibleLabelLikeDescendants(current, labelText);
+    if (labels.length > 1) {
+      return { container: null, labelElement: null, blockedReason: 'duplicate_label_text' };
+    }
+
+    const controls = getVisibleTriggerLikeControls(current);
+    if (labels.length === 1 && controls.length === 1 && controls[0] === target) {
+      return { container: current, labelElement: labels[0] };
+    }
+
+    if (labels.length === 1 && controls.length > 1 && controls.includes(target)) {
+      return { container: null, labelElement: labels[0], blockedReason: 'multiple_input_like_targets' };
+    }
+
+    current = current.parentElement;
+    depth += 1;
+  }
+
+  return { container: null, labelElement: null, blockedReason: 'broad_container_only' };
+}
+
+function findVisibleTargetForOriginalSelectorWithReason(
+  step: CodegenStep,
+  snapshot: Document,
+): { target: Element | null; blockedReason?: string } {
+  if (!step.selector || !isLikelyCssSelector(step.selector)) {
+    return { target: null, blockedReason: 'label_structure_missing' };
+  }
+  try {
+    const matches = Array.from(snapshot.querySelectorAll(step.selector)).filter(isVisibleElement);
+    if (matches.length === 1) return { target: matches[0] ?? null };
+    if (matches.length > 1) return { target: null, blockedReason: 'target_selector_ambiguous' };
+    return { target: null, blockedReason: 'target_missing' };
+  } catch {
+    return { target: null, blockedReason: 'target_selector_ambiguous' };
+  }
+}
+
+function findVisibleElementsForSelector(
+  selector: string | null | undefined,
+  snapshot: Document,
+): { matches: Element[]; blockedReason?: string } {
+  const normalized = (selector || '').trim();
+  if (!normalized || !isLikelyCssSelector(normalized)) {
+    return { matches: [], blockedReason: 'label_structure_missing' };
+  }
+  try {
+    const matches = Array.from(snapshot.querySelectorAll(normalized)).filter(isVisibleElement);
+    if (matches.length === 0) return { matches: [], blockedReason: 'target_missing' };
+    return { matches };
+  } catch {
+    return { matches: [], blockedReason: 'target_selector_ambiguous' };
+  }
+}
+
+function isStableRecoverableId(id: string | null | undefined): id is string {
+  if (typeof id !== 'string') return false;
+  const trimmed = id.trim();
+  if (!trimmed) return false;
+  return !isVeryOpaqueMixedId(trimmed) && !hasOpaqueHyphenatedSegments(trimmed);
+}
+
+type ContainerSelectorKind = 'data-testid' | 'data-cy' | 'data-qa' | 'id' | 'semantic-class' | 'framework-class' | 'unsafe';
+
+function classifySemanticContainerClass(stableClass: string | null | undefined): boolean {
+  if (!stableClass) return false;
+  return !(
+    isUtilityClassToken(stableClass) ||
+    isCssInJsClassToken(stableClass) ||
+    isHashedRandomClassToken(stableClass) ||
+    isStateClassToken(stableClass) ||
+    isFrameworkClassToken(stableClass) ||
+    isGenericShellClassToken(stableClass)
+  );
+}
+
+function deriveSafeContainerSelector(container: Element): { selector: string | null; kind: ContainerSelectorKind } {
+  const attrs = {
+    id: container.getAttribute('id') || (container as HTMLElement).id || undefined,
+    dataTestId: container.getAttribute('data-testid') || undefined,
+    dataCy: container.getAttribute('data-cy') || undefined,
+    dataQa: container.getAttribute('data-qa') || undefined,
+    class: container.getAttribute('class') || undefined,
+  };
+  const tagName = container.tagName?.toLowerCase() || 'div';
+  if (attrs.dataTestId) return { selector: `[data-testid="${cssEscape(attrs.dataTestId)}"]`, kind: 'data-testid' };
+  if (attrs.dataCy) return { selector: `[data-cy="${cssEscape(attrs.dataCy)}"]`, kind: 'data-cy' };
+  if (attrs.dataQa) return { selector: `[data-qa="${cssEscape(attrs.dataQa)}"]`, kind: 'data-qa' };
+  if (isStableRecoverableId(attrs.id)) return { selector: buildIdSelectors(attrs.id)[0] ?? null, kind: 'id' };
+  const stableClass = findStableClassFromAttributes(attrs.class);
+  if (stableClass) {
+    return {
+      selector: `${tagName}.${cssEscape(stableClass)}`,
+      kind: classifySemanticContainerClass(stableClass) ? 'semantic-class' : 'framework-class',
+    };
+  }
+  return { selector: null, kind: 'unsafe' };
+}
+
+function summarizeContainer(container: Element): string {
+  const tagName = container.tagName?.toLowerCase() || 'div';
+  const className = (container.getAttribute('class') || '').trim().split(/\s+/).filter(Boolean)[0];
+  if (className) return `${tagName}.${className}`;
+  const role = container.getAttribute('role');
+  if (role) return `${tagName}[role="${role}"]`;
+  return tagName;
+}
+
+function buildLabelContextSyntheticSelector(labelContext: LabelContextSelectorSpec): string {
+  const containerHint = labelContext.containerSelector || labelContext.boundedContainerSummary;
+  if (containerHint) {
+    return `label-context("${labelContext.labelText}" within ${containerHint} -> ${labelContext.targetTag})`;
+  }
+  return `label-context("${labelContext.labelText}" -> ${labelContext.targetTag})`;
+}
+
+function buildTriggerContextSyntheticSelector(triggerContext: TriggerContextSelectorSpec): string {
+  const containerHint = triggerContext.containerSelector || triggerContext.boundedContainerSummary;
+  if (containerHint) {
+    return `trigger-context("${triggerContext.labelText}" within ${containerHint} -> ${triggerContext.triggerSelector})`;
+  }
+  return `trigger-context("${triggerContext.labelText}" -> ${triggerContext.triggerSelector})`;
+}
+
+function deriveSafeTriggerChildSelector(
+  target: Element,
+  triggerSelector: string,
+  container: Element,
+): string | null {
+  const normalizedTrigger = (triggerSelector || '').trim();
+  if (normalizedTrigger) {
+    try {
+      const matches = Array.from(container.querySelectorAll(normalizedTrigger)).filter(isVisibleElement);
+      if (matches.length === 1 && matches[0] === target) return normalizedTrigger;
+    } catch {
+      // Ignore invalid selector fragments and continue to safer fallbacks.
+    }
+  }
+
+  const tagName = target.tagName?.toLowerCase() || 'div';
+  const role = (target.getAttribute('role') || '').toLowerCase();
+  const hasPopup = (target.getAttribute('aria-haspopup') || '').toLowerCase();
+  if (role === 'combobox') return '[role="combobox"]';
+  if (role === 'button' && hasPopup) return `[role="button"][aria-haspopup="${cssEscape(hasPopup)}"]`;
+  if (hasPopup === 'listbox' || hasPopup === 'combobox') return `[aria-haspopup="${cssEscape(hasPopup)}"]`;
+  if (tagName === 'select') return 'select';
+
+  const stableClass = findStableClassFromAttributes(target.getAttribute('class') || undefined);
+  if (stableClass && classifySemanticContainerClass(stableClass)) {
+    return `${tagName}.${cssEscape(stableClass)}`;
+  }
+
+  return null;
+}
+
+function findVisibleTargetForOriginalSelector(step: CodegenStep, snapshot: Document): Element | null {
+  return findVisibleTargetForOriginalSelectorWithReason(step, snapshot).target;
+}
+
+function buildLabelContextCandidates(
+  step: CodegenStep,
+  snapshot: Document,
+  snapshotSelection?: SnapshotSelectionProvenance,
+): RawCandidate[] {
+  if (!isWeakLabelContextFallbackCandidate(step, snapshotSelection)) return [];
+  const fieldLabelText = getFieldLabelText(step);
+  if (!fieldLabelText) return [];
+  const targetResolution = findVisibleTargetForOriginalSelectorWithReason(step, snapshot);
+  const target = targetResolution.target;
+  if (!target) return [];
+
+  const normalizedFieldLabel = normalizeLabelContextText(fieldLabelText);
+  let labels: Element[] = [];
+  try {
+    labels = Array.from(snapshot.querySelectorAll('label')).filter(label =>
+      normalizeLabelContextText(label.textContent || '') === normalizedFieldLabel,
+    );
+  } catch {
+    labels = [];
+  }
+  if (labels.length !== 1) return [];
+
+  const label = labels[0];
+  const tagName = (target.tagName?.toLowerCase() || step.fingerprint?.tagName?.toLowerCase() || 'input') as LabelContextSelectorSpec['targetTag'];
+  const baseLabelContext: Omit<LabelContextSelectorSpec, 'association'> = {
+    source: 'snapshot-label-context',
+    labelText: fieldLabelText,
+    targetTag: tagName === 'textarea' || tagName === 'select' ? tagName : 'input',
+    snapshotSource: snapshotSelection?.labelContextSnapshotSource ?? snapshotSelection?.source ?? 'unavailable',
+    labelStructureEvidenceReason: snapshotSelection?.labelStructureEvidenceReason ?? null,
+    recoveredFromSelector: step.selector,
+  };
+
+  const labelFor = label.getAttribute('for');
+  const targetId = target.getAttribute('id') || (target as HTMLElement).id || null;
+  if (labelFor && targetId && labelFor === targetId && isStableRecoverableId(targetId)) {
+    const labelContext: LabelContextSelectorSpec = {
+      ...baseLabelContext,
+      association: 'label-for',
+      targetId,
+      renderStatus: 'clean-direct-selector',
+      renderReason: 'label_for_stable_id',
+      cleanChildSelector: buildIdSelectors(targetId)[0] ?? undefined,
+    };
+    return buildIdSelectors(targetId).map(selector => ({
+      selector,
+      source: 'label-context' as const,
+      engine: 'css' as const,
+      categoryOverride: 'id' as const,
+      labelContext,
+      rank: 2,
+    }));
+  }
+
+  const ariaLabelledBy = target.getAttribute('aria-labelledby');
+  if (ariaLabelledBy) {
+    const ids = ariaLabelledBy.split(/\s+/).filter(Boolean);
+    const referencedExact = ids.some(id => {
+      const referenced = snapshot.getElementById?.(id) ?? null;
+      return !!referenced && normalizeLabelContextText(referenced.textContent || '') === normalizedFieldLabel;
+    });
+    if (referencedExact) {
+      const selector = `${baseLabelContext.targetTag}[aria-labelledby="${cssEscape(ariaLabelledBy)}"]`;
+      return [{
+        selector,
+        source: 'label-context',
+        engine: 'css',
+        categoryOverride: 'aria-label',
+        labelContext: {
+          ...baseLabelContext,
+          association: 'aria-labelledby',
+          ariaLabelledBy,
+          renderStatus: 'clean-direct-selector',
+          renderReason: 'aria_labelledby_exact',
+          cleanChildSelector: selector,
+        },
+        rank: 3,
+      }];
+    }
+  }
+
+  if (label.contains(target) && getVisibleInputLikeControls(label).length === 1) {
+    const labelContext: LabelContextSelectorSpec = {
+      ...baseLabelContext,
+      association: 'wrapped-label',
+      renderStatus: 'proven-structural-fallback',
+      renderReason: 'wrapped_label_exact',
+      warningCodes: ['label-context-structural-fallback'],
+    };
+    return [{
+      selector: buildLabelContextSyntheticSelector(labelContext),
+      source: 'label-context',
+      engine: 'label-context',
+      categoryOverride: 'label-context',
+      labelContext,
+      rank: 5,
+    }];
+  }
+
+  const boundedContainer = findTightFieldContainer(label, target);
+  if (!boundedContainer.container) return [];
+  const visibleControls = getVisibleInputLikeControls(boundedContainer.container);
+  if (visibleControls.length !== 1 || visibleControls[0] !== target) return [];
+  const containerDescriptor = deriveSafeContainerSelector(boundedContainer.container);
+  const containerSelector = containerDescriptor.selector;
+  if (!containerSelector) return [];
+  const matchingVisibleContainers = Array.from(snapshot.querySelectorAll(containerSelector)).filter(isVisibleElement);
+  const cleanParentSelector =
+    matchingVisibleContainers.length === 1 &&
+    ['data-testid', 'data-cy', 'data-qa', 'id', 'semantic-class'].includes(containerDescriptor.kind)
+      ? containerSelector
+      : undefined;
+
+  const labelContext: LabelContextSelectorSpec = {
+    ...baseLabelContext,
+    association: 'bounded-field',
+    containerSelector,
+    boundedContainerSummary: summarizeContainer(boundedContainer.container),
+    renderStatus: cleanParentSelector ? 'clean-scoped-locator' : 'proven-structural-fallback',
+    renderReason: cleanParentSelector ? 'clean_parent_unique_visible' : 'no_clean_parent_selector',
+    cleanParentSelector,
+    cleanChildSelector: tagName === 'textarea' || tagName === 'select' ? tagName : 'input',
+    warningCodes: cleanParentSelector ? [] : ['label-context-structural-fallback', 'label-context-no-clean-parent'],
+  };
+  return [{
+    selector: buildLabelContextSyntheticSelector(labelContext),
+    source: 'label-context',
+    engine: 'label-context',
+    categoryOverride: 'label-context',
+    labelContext,
+    rank: 5,
+  }];
+}
+
+function buildTriggerContextCandidates(
+  step: CodegenStep,
+  snapshot: Document,
+  snapshotSelection?: SnapshotSelectionProvenance,
+): RawCandidate[] {
+  if (!isSelectLikeTriggerStep(step)) return [];
+  const triggerSelector = (step.triggerSelector || '').trim();
+  if (!triggerSelector || !isLikelyCssSelector(triggerSelector)) return [];
+  if (isTriggerSelectorDirectAndStrong(step)) return [];
+
+  const labelText = getTriggerContextLabel(step);
+  if (!labelText) return [];
+
+  const triggerMatches = findVisibleElementsForSelector(triggerSelector, snapshot);
+  if (triggerMatches.matches.length <= 1) return [];
+
+  const proofs: Array<{
+    target: Element;
+    container: Element;
+    labelElement: Element;
+  }> = [];
+  for (const match of triggerMatches.matches) {
+    const bounded = findTightTriggerContainer(match, labelText);
+    if (bounded.container && bounded.labelElement) {
+      proofs.push({
+        target: match,
+        container: bounded.container,
+        labelElement: bounded.labelElement,
+      });
+      continue;
+    }
+  }
+
+  if (proofs.length !== 1) return [];
+
+  const proof = proofs[0];
+  const containerDescriptor = deriveSafeContainerSelector(proof.container);
+  const containerSelector = containerDescriptor.selector;
+  if (!containerSelector) return [];
+
+  const matchingVisibleContainers = Array.from(snapshot.querySelectorAll(containerSelector)).filter(isVisibleElement);
+  const cleanParentSelector =
+    matchingVisibleContainers.length === 1 &&
+    ['data-testid', 'data-cy', 'data-qa', 'id', 'semantic-class'].includes(containerDescriptor.kind)
+      ? containerSelector
+      : undefined;
+
+  const cleanChildSelector = deriveSafeTriggerChildSelector(proof.target, triggerSelector, proof.container);
+  if (!cleanChildSelector) return [];
+
+  const renderStatus: LabelContextRenderStatus = cleanParentSelector
+    ? 'clean-scoped-locator'
+    : 'proven-structural-fallback';
+  const warningCodes = cleanParentSelector
+    ? []
+    : ['custom-control-trigger-structural-fallback'];
+
+  const triggerContext: TriggerContextSelectorSpec = {
+    source: 'snapshot-trigger-context',
+    labelText,
+    controlFamily: step.controlFamily,
+    association: 'bounded-field',
+    triggerSelector: cleanChildSelector,
+    containerSelector,
+    labelElementTag: proof.labelElement.tagName?.toLowerCase() || 'label',
+    boundedContainerSummary: summarizeContainer(proof.container),
+    snapshotSource: snapshotSelection?.source ?? 'unavailable',
+    recoveredFromSelector: step.triggerSelector,
+    renderStatus,
+    renderReason: cleanParentSelector
+      ? 'clean_parent_unique_visible'
+      : 'no_clean_parent_selector',
+    cleanParentSelector,
+    cleanChildSelector,
+    warningCodes,
+  };
+
+  return [{
+    selector: buildTriggerContextSyntheticSelector(triggerContext),
+    source: 'trigger-context',
+    engine: 'trigger-context',
+    categoryOverride: 'label-context',
+    triggerContext,
+    rank: 5,
+  }];
+}
+
+function validateLabelContextCandidate(
+  candidate: RawCandidate,
+  snapshot: Document,
+  step?: CodegenStep,
+): CandidateValidation {
+  const labelContext = candidate.labelContext;
+  if (!labelContext) {
+    return {
+      totalMatchCount: 0,
+      visibleMatchCount: 0,
+      effectiveMatchCount: 0,
+      reason: 'invalid-selector',
+      confidenceScore: 0,
+    };
+  }
+
+  const matches: Element[] = [];
+  if (labelContext.association === 'wrapped-label') {
+    try {
+      const labels = Array.from(snapshot.querySelectorAll('label')).filter(label =>
+        normalizeLabelContextText(label.textContent || '') === normalizeLabelContextText(labelContext.labelText),
+      );
+      for (const label of labels) {
+        const controls = getVisibleInputLikeControls(label).filter(control =>
+          control.tagName?.toLowerCase() === labelContext.targetTag,
+        );
+        if (controls.length === 1) {
+          matches.push(controls[0]);
+        }
+      }
+    } catch {
+      return {
+        totalMatchCount: 0,
+        visibleMatchCount: 0,
+        effectiveMatchCount: 0,
+        reason: 'invalid-selector',
+        confidenceScore: 0,
+      };
+    }
+  } else if (labelContext.association === 'bounded-field' && labelContext.containerSelector) {
+    try {
+      const containers = Array.from(snapshot.querySelectorAll(labelContext.containerSelector)).filter(isVisibleElement);
+      for (const container of containers) {
+        const labels = Array.from(container.querySelectorAll('label')).filter(label =>
+          normalizeLabelContextText(label.textContent || '') === normalizeLabelContextText(labelContext.labelText),
+        );
+        if (labels.length !== 1) continue;
+        const controls = getVisibleInputLikeControls(container).filter(control =>
+          control.tagName?.toLowerCase() === labelContext.targetTag,
+        );
+        if (controls.length === 1) {
+          matches.push(controls[0]);
+        }
+      }
+    } catch {
+      return {
+        totalMatchCount: 0,
+        visibleMatchCount: 0,
+        effectiveMatchCount: 0,
+        reason: 'invalid-selector',
+        confidenceScore: 0,
+      };
+    }
+  } else {
+    return validateCSSCandidate(candidate.selector, snapshot, step);
+  }
+
+  const visibleMatches = matches.filter(isVisibleElement);
+  const resolvedElement = visibleMatches.length === 1 ? visibleMatches[0] : null;
+  return {
+    totalMatchCount: matches.length,
+    visibleMatchCount: visibleMatches.length,
+    effectiveMatchCount: visibleMatches.length === 1 ? 1 : visibleMatches.length > 1 ? 2 : 0,
+    reason:
+      visibleMatches.length === 1
+        ? 'unique-visible'
+        : visibleMatches.length > 1
+          ? 'non-unique'
+          : 'no-visible-match',
+    confidenceScore: visibleMatches.length === 1 ? 0.88 : visibleMatches.length > 1 ? 0.3 : 0.05,
+    resolvedElement,
+  };
+}
+
+function validateTriggerContextCandidate(
+  candidate: RawCandidate,
+  snapshot: Document,
+): CandidateValidation {
+  const triggerContext = candidate.triggerContext;
+  if (!triggerContext || triggerContext.association !== 'bounded-field' || !triggerContext.containerSelector) {
+    return {
+      totalMatchCount: 0,
+      visibleMatchCount: 0,
+      effectiveMatchCount: 0,
+      reason: 'invalid-selector',
+      confidenceScore: 0,
+    };
+  }
+
+  const matches: Element[] = [];
+  try {
+    const containers = Array.from(snapshot.querySelectorAll(triggerContext.containerSelector)).filter(isVisibleElement);
+    for (const container of containers) {
+      const labelMatches = findExactVisibleLabelLikeDescendants(container, triggerContext.labelText)
+        .filter(element => (element.tagName?.toLowerCase() || '') === (triggerContext.labelElementTag || 'label'));
+      if (labelMatches.length !== 1) continue;
+      const controls = getVisibleTriggerLikeControls(container).filter(control => {
+        const childSelector = triggerContext.cleanChildSelector || triggerContext.triggerSelector;
+        if (!childSelector) return false;
+        try {
+          return Array.from(container.querySelectorAll(childSelector)).includes(control);
+        } catch {
+          return false;
+        }
+      });
+      if (controls.length === 1) {
+        matches.push(controls[0]);
+      }
+    }
+  } catch {
+    return {
+      totalMatchCount: 0,
+      visibleMatchCount: 0,
+      effectiveMatchCount: 0,
+      reason: 'invalid-selector',
+      confidenceScore: 0,
+    };
+  }
+
+  const visibleMatches = matches.filter(isVisibleElement);
+  const resolvedElement = visibleMatches.length === 1 ? visibleMatches[0] : null;
+  return {
+    totalMatchCount: matches.length,
+    visibleMatchCount: visibleMatches.length,
+    effectiveMatchCount: visibleMatches.length === 1 ? 1 : visibleMatches.length > 1 ? 2 : 0,
+    reason:
+      visibleMatches.length === 1
+        ? 'unique-visible'
+        : visibleMatches.length > 1
+          ? 'non-unique'
+          : 'no-visible-match',
+    confidenceScore: visibleMatches.length === 1 ? 0.88 : visibleMatches.length > 1 ? 0.3 : 0.05,
+    resolvedElement,
+  };
+}
+
+function validateCandidate(
+  selectorOrCandidate: string | RawCandidate,
+  snapshot: Document,
+  step?: CodegenStep,
+): CandidateValidation {
+  const selector = typeof selectorOrCandidate === 'string'
+    ? selectorOrCandidate
+    : selectorOrCandidate.selector;
+  if (typeof selectorOrCandidate !== 'string' && selectorOrCandidate.engine === 'label-context') {
+    return validateLabelContextCandidate(selectorOrCandidate, snapshot, step);
+  }
+  if (typeof selectorOrCandidate !== 'string' && selectorOrCandidate.engine === 'trigger-context') {
+    return validateTriggerContextCandidate(selectorOrCandidate, snapshot);
+  }
   return isTextSelector(selector)
     ? validateTextCandidate(selector, snapshot, step)
     : validateCSSCandidate(selector, snapshot, step);
@@ -571,8 +1301,14 @@ function shouldTrustOriginalOnSnapshotMiss(
   return false;
 }
 
-export function shouldKeepOriginal(step: CodegenStep, snapshot: Document, config: ResolverConfig): boolean {
+export function shouldKeepOriginal(
+  step: CodegenStep,
+  snapshot: Document,
+  config: ResolverConfig,
+  snapshotSelection?: SnapshotSelectionProvenance,
+): boolean {
   if (!step.selector) return false;
+  if (isWeakLabelContextFallbackCandidate(step, snapshotSelection)) return false;
   const validation = validateCandidate(step.selector, snapshot, step);
   if (validation.reason !== 'unique-visible') return false;
   const rank = getSelectorRank(step.selector, step.selectorPriority, step.selectorRank);
@@ -598,15 +1334,20 @@ function pushCandidate(
   selector: string | null | undefined,
   source: RawCandidate['source'],
   rank: number,
+  extras: Partial<Pick<RawCandidate, 'engine' | 'categoryOverride' | 'labelContext'>> = {},
 ): void {
   const normalized = (selector || '').trim();
   if (!normalized) return;
   if (seen.has(normalized)) return;
   seen.add(normalized);
-  candidates.push({ selector: normalized, source, rank });
+  candidates.push({ selector: normalized, source, rank, ...extras });
 }
 
-export function generateCandidates(step: CodegenStep, snapshot: Document): RawCandidate[] {
+export function generateCandidates(
+  step: CodegenStep,
+  snapshot: Document,
+  snapshotSelection?: SnapshotSelectionProvenance,
+): RawCandidate[] {
   const candidates: RawCandidate[] = [];
   const seen = new Set<string>();
   const attrs = inferStepSignalAttributes(step);
@@ -630,6 +1371,21 @@ export function generateCandidates(step: CodegenStep, snapshot: Document): RawCa
   }
 
   const tagName = attrs.tagName || step.fingerprint?.tagName?.toLowerCase();
+
+  for (const candidate of buildLabelContextCandidates(step, snapshot, snapshotSelection)) {
+    pushCandidate(
+      candidates,
+      seen,
+      candidate.selector,
+      candidate.source,
+      candidate.rank,
+      {
+        engine: candidate.engine,
+        categoryOverride: candidate.categoryOverride,
+        labelContext: candidate.labelContext,
+      },
+    );
+  }
 
   if (attrs.dataTestId) {
     pushCandidate(candidates, seen, `[data-testid="${cssEscape(attrs.dataTestId)}"]`, 'testid', 1);
@@ -672,6 +1428,13 @@ export function generateCandidates(step: CodegenStep, snapshot: Document): RawCa
     }
   }
 
+  if (attrs.ariaLabelledBy) {
+    pushCandidate(candidates, seen, `[aria-labelledby="${cssEscape(attrs.ariaLabelledBy)}"]`, 'other', 4);
+    if (tagName) {
+      pushCandidate(candidates, seen, `${tagName}[aria-labelledby="${cssEscape(attrs.ariaLabelledBy)}"]`, 'other', 4);
+    }
+  }
+
   if (attrs.placeholder) {
     pushCandidate(candidates, seen, `[placeholder="${cssEscape(attrs.placeholder)}"]`, 'placeholder', 4);
     if (tagName) {
@@ -679,6 +1442,20 @@ export function generateCandidates(step: CodegenStep, snapshot: Document): RawCa
     }
     if (/yyyy/i.test(attrs.placeholder)) {
       pushCandidate(candidates, seen, 'input[placeholder*="yyyy"]', 'placeholder', 4);
+    }
+  }
+
+  if (attrs.autocomplete) {
+    pushCandidate(candidates, seen, `[autocomplete="${cssEscape(attrs.autocomplete)}"]`, 'other', 4);
+    if (tagName) {
+      pushCandidate(candidates, seen, `${tagName}[autocomplete="${cssEscape(attrs.autocomplete)}"]`, 'other', 4);
+    }
+  }
+
+  if (attrs.title) {
+    pushCandidate(candidates, seen, `[title="${cssEscape(attrs.title)}"]`, 'other', 4);
+    if (tagName) {
+      pushCandidate(candidates, seen, `${tagName}[title="${cssEscape(attrs.title)}"]`, 'other', 4);
     }
   }
 
@@ -731,6 +1508,10 @@ export function generateCandidates(step: CodegenStep, snapshot: Document): RawCa
     if (attrs.name) pushCandidate(candidates, seen, `${scopedBase} [name="${cssEscape(attrs.name)}"]`, 'parent-scope', 4);
     if (attrs.href) pushCandidate(candidates, seen, `${scopedBase} [href="${cssEscape(attrs.href)}"]`, 'parent-scope', 4);
     if (attrs.ariaLabel) pushCandidate(candidates, seen, `${scopedBase} [aria-label="${cssEscape(attrs.ariaLabel)}"]`, 'parent-scope', 4);
+    if (attrs.ariaLabelledBy) pushCandidate(candidates, seen, `${scopedBase} [aria-labelledby="${cssEscape(attrs.ariaLabelledBy)}"]`, 'parent-scope', 4);
+    if (attrs.placeholder) pushCandidate(candidates, seen, `${scopedBase} [placeholder="${cssEscape(attrs.placeholder)}"]`, 'parent-scope', 4);
+    if (attrs.autocomplete) pushCandidate(candidates, seen, `${scopedBase} [autocomplete="${cssEscape(attrs.autocomplete)}"]`, 'parent-scope', 4);
+    if (attrs.title) pushCandidate(candidates, seen, `${scopedBase} [title="${cssEscape(attrs.title)}"]`, 'parent-scope', 4);
     if (tagName) pushCandidate(candidates, seen, `${scopedBase} ${tagName}`, 'parent-scope', 6);
     if (step.selector && isLikelyCssSelector(step.selector)) {
       pushCandidate(candidates, seen, `${scopedBase} ${step.selector}`, 'parent-scope', Math.min(getSelectorRank(step.selector, step.selectorPriority, step.selectorRank), 6));
@@ -869,9 +1650,15 @@ function collectStepPrimarySemanticSignals(step: CodegenStep): SemanticTextSigna
 
   push(step.fingerprint?.textExcerpt || undefined, 'fingerprint_text');
   push(attrs.ariaLabel, 'fingerprint_aria_label');
+  push(attrs.labelledByText, 'fingerprint_labelledby_text');
+  push(attrs.associatedLabelText, 'fingerprint_associated_label');
+  push(attrs.wrappedLabelText, 'fingerprint_wrapped_label');
+  push(attrs.fieldLabelText, 'fingerprint_field_label');
   push(attrs.placeholder, 'fingerprint_placeholder');
+  push(attrs.autocomplete, 'fingerprint_autocomplete');
   push(attrs.title, 'fingerprint_title');
   push(attrs.alt, 'fingerprint_alt');
+  push(attrs.describedByText, 'fingerprint_describedby_text');
 
   return signals;
 }
@@ -1191,6 +1978,9 @@ function selectorDepth(selector: string): number {
 }
 
 function computeBrittlenessPenalty(selector: string, category: SelectorCategory): { penalty: number; reasons: string[] } {
+  if (category === 'label-context') {
+    return { penalty: 0.02, reasons: ['snapshot-label-context'] };
+  }
   let penalty = 0;
   const reasons: string[] = [];
   const addPenalty = (amount: number, reason: string): void => {
@@ -1348,12 +2138,16 @@ function buildCandidateSelectorEvaluation(params: {
   classPenaltyReason?: string[];
   warningCodes?: string[];
 }): SelectorEvaluation {
-  const category = classifySelectorCategory(params.candidate.selector, params.source ?? params.candidate.source);
+  const category = params.candidate.categoryOverride
+    ?? classifySelectorCategory(params.candidate.selector, params.source ?? params.candidate.source);
   const proofLevel = params.proofLevel ?? (params.validation.effectiveMatchCount === 1 ? 'snapshot_validated' : 'unvalidated');
   const selectorSpec = buildSelectorSpec({
     selector: params.candidate.selector,
+    engine: params.candidate.engine,
     source: params.source ?? 'resolver',
     proofLevel,
+    labelContext: params.candidate.labelContext,
+    triggerContext: params.candidate.triggerContext,
     rank: params.candidate.rank,
     confidence: params.validation.confidenceScore ?? params.baselineScore,
     warningCodes: params.warningCodes,
@@ -1436,10 +2230,13 @@ function computeBaselineCandidateScore(
   if (tagName && candidate.selector.toLowerCase().startsWith(tagName)) score += 0.06;
   if (candidate.source === 'parent-scope') score += 0.04;
   if (candidate.source === 'text') score += 0.02;
+  if (isStructuredContextSource(candidate.source)) score += 0.16;
 
   score += (validation.confidenceScore ?? 0) * 0.25;
-  score -= complexityPenalty(candidate.selector);
-  score -= volatilityPenalty(candidate.selector);
+  if (!isStructuredContextSource(candidate.source)) {
+    score -= complexityPenalty(candidate.selector);
+    score -= volatilityPenalty(candidate.selector);
+  }
 
   if (validation.reason === 'resolved-multi-match') score -= 0.08;
   if (validation.reason === 'too-broad') score -= 0.12;
@@ -1463,6 +2260,9 @@ function computeBaselineCandidateScore(
   }
   if (candidateUsesClassSelector(candidate)) {
     score = Math.max(score, 0.44);
+  }
+  if (isStructuredContextSource(candidate.source)) {
+    score = Math.max(score, 0.86);
   }
 
   return Math.max(0, Math.min(1.5, score));
@@ -1542,6 +2342,9 @@ function buildResolvedSelectorSpec(params: {
   selector: string;
   source: 'interceptor' | 'resolver' | 'llm';
   proofLevel: 'recorded' | 'snapshot_validated' | 'semantic_validated' | 'blocked' | 'unvalidated';
+  engine?: 'css' | 'xpath' | 'text' | 'testid' | 'role' | 'label' | 'label-context' | 'trigger-context' | 'placeholder' | 'playwright';
+  labelContext?: LabelContextSelectorSpec;
+  triggerContext?: TriggerContextSelectorSpec;
   rank?: number;
   confidence?: number;
   rejectReason?: string | null;
@@ -1550,8 +2353,11 @@ function buildResolvedSelectorSpec(params: {
   return buildSelectorSpec({
     selector: params.selector,
     selectorPriority: params.source === 'interceptor' ? params.step.selectorPriority : undefined,
+    engine: params.engine,
     source: params.source,
     proofLevel: params.proofLevel,
+    labelContext: params.labelContext,
+    triggerContext: params.triggerContext,
     rank: params.rank,
     confidence: params.confidence,
     rejectReason: params.rejectReason,
@@ -1575,6 +2381,8 @@ function buildResolutionSelectorEvaluation(params: {
         engine: params.selectorSpec.engine,
         source: params.selectorSpec.source,
         proofLevel: params.selectorSpec.proofLevel,
+        labelContext: params.selectorSpec.labelContext,
+        triggerContext: params.selectorSpec.triggerContext,
         rank: params.selectorSpec.rank,
         confidence: params.selectorSpec.confidence,
         rejectReason: params.selectorSpec.rejectReason,
@@ -1602,7 +2410,9 @@ function buildResolutionSelectorEvaluation(params: {
     );
   }
 
-  const category = classifySelectorCategory(params.selectorSpec.selector, params.selectorSpec.source);
+  const category = params.selectorSpec.engine === 'label-context' || params.selectorSpec.engine === 'trigger-context'
+    ? 'label-context'
+    : classifySelectorCategory(params.selectorSpec.selector, params.selectorSpec.source);
   const proofSource = mapSelectorProofSource({
     source: params.selectorSpec.source,
     proofLevel: params.selectorSpec.proofLevel,
@@ -1650,6 +2460,133 @@ function buildResolutionSelectorEvaluation(params: {
     rejectReason: params.metadata.rejectReason,
     preferredRenderings,
   });
+}
+
+function getOriginalTriggerSelectorSpec(step: CodegenStep): SelectorSpec | undefined {
+  if (step.triggerSelectorSpec) return step.triggerSelectorSpec;
+  const selector = (step.triggerSelector || '').trim();
+  if (!selector) return undefined;
+  return buildSelectorSpec({
+    selector,
+    selectorPriority: step.triggerSelectorPriority,
+    source: 'interceptor',
+    proofLevel: 'recorded',
+  });
+}
+
+function resolveTriggerContextForStep(
+  step: CodegenStep,
+  snapshot: Document | null,
+  snapshotSelection?: ResolverMetadata['snapshotSelection'],
+): Pick<
+  ResolverMetadata,
+  | 'triggerResolvedSelector'
+  | 'triggerResolvedSelectorSpec'
+  | 'triggerContextLabel'
+  | 'triggerContextRenderStatus'
+  | 'triggerContextRenderReason'
+  | 'triggerBoundedContainerSummary'
+  | 'triggerStructuralFallbackLocator'
+  | 'triggerWarningCodes'
+> {
+  if (!snapshot || !isSelectLikeTriggerStep(step)) return {};
+
+  const triggerSelector = (step.triggerSelector || '').trim();
+  if (!triggerSelector) return {};
+
+  const labelText = getTriggerContextLabel(step);
+  const originalSpec = getOriginalTriggerSelectorSpec(step);
+  const triggerMatches = findVisibleElementsForSelector(triggerSelector, snapshot);
+
+  if (triggerMatches.matches.length === 1) {
+    return {
+      triggerResolvedSelector: triggerSelector,
+      triggerResolvedSelectorSpec: originalSpec,
+      triggerContextLabel: labelText,
+      triggerWarningCodes: [],
+    };
+  }
+
+  const warningCodes = new Set<string>();
+  const blockedReason =
+    triggerMatches.matches.length > 1
+      ? 'target_selector_ambiguous'
+      : (triggerMatches.blockedReason ?? 'label_structure_missing');
+
+  if (!labelText) {
+    warningCodes.add('custom-control-trigger-target-binding-ambiguous');
+    return {
+      triggerContextRenderStatus: 'blocked-unsafe-render',
+      triggerContextRenderReason: blockedReason,
+      triggerWarningCodes: Array.from(warningCodes),
+    };
+  }
+
+  const candidates = buildTriggerContextCandidates(step, snapshot, snapshotSelection);
+  const candidate = candidates[0];
+  if (!candidate) {
+    warningCodes.add('custom-control-trigger-target-binding-ambiguous');
+    return {
+      triggerContextLabel: labelText,
+      triggerContextRenderStatus: 'blocked-unsafe-render',
+      triggerContextRenderReason: blockedReason,
+      triggerWarningCodes: Array.from(warningCodes),
+    };
+  }
+
+  const validation = validateCandidate(candidate, snapshot, buildTriggerResolutionStep(step));
+  if (validation.reason !== 'unique-visible' || validation.effectiveMatchCount !== 1 || !candidate.triggerContext) {
+    warningCodes.add('custom-control-trigger-target-binding-ambiguous');
+    return {
+      triggerContextLabel: labelText,
+      triggerContextRenderStatus: 'blocked-unsafe-render',
+      triggerContextRenderReason:
+        validation.reason === 'non-unique'
+          ? 'multiple_input_like_targets'
+          : 'target_not_bound_to_label_container',
+      triggerWarningCodes: Array.from(warningCodes),
+    };
+  }
+
+  const renderStatus = candidate.triggerContext.renderStatus ?? 'proof-only-no-clean-render';
+  if (renderStatus === 'proven-structural-fallback') {
+    warningCodes.add('custom-control-trigger-structural-fallback');
+  }
+  if (renderStatus === 'proof-only-no-clean-render') {
+    warningCodes.add('custom-control-trigger-proof-only');
+  }
+
+  const resolvedSelectorSpec = buildResolvedSelectorSpec({
+    step,
+    selector: candidate.selector,
+    source: 'resolver',
+    proofLevel: 'semantic_validated',
+    engine: 'trigger-context',
+    triggerContext: {
+      ...candidate.triggerContext,
+      warningCodes: Array.from(new Set([
+        ...(candidate.triggerContext.warningCodes ?? []),
+        ...Array.from(warningCodes),
+      ])),
+    },
+    rank: candidate.rank,
+    confidence: validation.confidenceScore ?? 0.88,
+    warningCodes: Array.from(warningCodes),
+  });
+
+  return {
+    triggerResolvedSelector: candidate.selector,
+    triggerResolvedSelectorSpec: resolvedSelectorSpec,
+    triggerContextLabel: labelText,
+    triggerContextRenderStatus: renderStatus,
+    triggerContextRenderReason: candidate.triggerContext.renderReason ?? null,
+    triggerBoundedContainerSummary: candidate.triggerContext.boundedContainerSummary ?? null,
+    triggerStructuralFallbackLocator: candidate.triggerContext.structuralFallbackLocator ?? null,
+    triggerWarningCodes: Array.from(new Set([
+      ...Array.from(warningCodes),
+      ...(candidate.triggerContext.warningCodes ?? []),
+    ])),
+  };
 }
 
 function deriveDeterministicResolution(
@@ -1766,6 +2703,7 @@ function deriveDeterministicResolution(
     };
   }
 
+  const triggerResolution = resolveTriggerContextForStep(step, snapshot, snapshotSelection);
   const originalValidation = validateCandidate(step.selector, snapshot, step);
   if (shouldTrustOriginalOnSnapshotMiss(step, originalValidation)) {
     const rank = getSelectorRank(step.selector, step.selectorPriority, step.selectorRank);
@@ -1781,6 +2719,7 @@ function deriveDeterministicResolution(
     });
     const metadata: ResolverMetadata = {
       ...baseMetadata,
+      ...triggerResolution,
       resolvedSelector: step.selector,
       resolvedBy: 'kept-original',
       bestScore: score,
@@ -1808,7 +2747,7 @@ function deriveDeterministicResolution(
     };
   }
 
-  if (shouldKeepOriginal(step, snapshot, config)) {
+  if (shouldKeepOriginal(step, snapshot, config, snapshotSelection)) {
     const rank = getSelectorRank(step.selector, step.selectorPriority, step.selectorRank);
     const score = rankScore(rank) + 0.3;
     const resolvedSelectorSpec = buildResolvedSelectorSpec({
@@ -1821,6 +2760,7 @@ function deriveDeterministicResolution(
     });
     const metadata: ResolverMetadata = {
       ...baseMetadata,
+      ...triggerResolution,
       resolvedSelector: step.selector,
       resolvedBy: 'kept-original',
       bestScore: score,
@@ -1863,6 +2803,7 @@ function deriveDeterministicResolution(
     });
     const metadata: ResolverMetadata = {
       ...baseMetadata,
+      ...triggerResolution,
       resolvedSelector: step.selector,
       resolvedBy: 'blocked-snapshot-target-missing',
       effectiveMatchCount: originalValidation.effectiveMatchCount,
@@ -1892,8 +2833,8 @@ function deriveDeterministicResolution(
     };
   }
 
-  const candidateScores: CandidateScore[] = generateCandidates(step, snapshot).map(candidate => {
-    const validation = validateCandidate(candidate.selector, snapshot, step);
+  const candidateScores: CandidateScore[] = generateCandidates(step, snapshot, snapshotSelection).map(candidate => {
+    const validation = validateCandidate(candidate, snapshot, step);
     const idEntropy = computeIdEntropy(step, candidate, validation, snapshot);
     const usesId = candidateUsesIdSelector(candidate);
     const classEntropy = computeClassEntropy(step, candidate, validation, snapshot);
@@ -1993,6 +2934,7 @@ function deriveDeterministicResolution(
     });
     const metadata: ResolverMetadata = {
       ...baseMetadata,
+      ...triggerResolution,
       resolvedSelector: step.selector,
       effectiveMatchCount: originalValidation.effectiveMatchCount,
       matchCount: originalValidation.matchCount ?? originalValidation.visibleMatchCount,
@@ -2066,6 +3008,7 @@ function deriveDeterministicResolution(
     });
     const metadata: ResolverMetadata = {
       ...baseMetadata,
+      ...triggerResolution,
       effectiveMatchCount: originalValidation.effectiveMatchCount,
       matchCount: originalValidation.matchCount ?? originalValidation.visibleMatchCount,
       confidenceScore: originalValidation.confidenceScore ?? 0,
@@ -2103,16 +3046,21 @@ function deriveDeterministicResolution(
     selector: winner.candidate.candidate.selector,
     source: 'resolver',
     proofLevel: 'semantic_validated',
+    engine: winner.candidate.candidate.engine,
+    labelContext: winner.candidate.candidate.labelContext,
     rank: winner.candidate.candidate.rank,
     confidence: winner.candidate.validation.confidenceScore ?? winner.candidate.score,
     warningCodes: [
       ...baseMetadata.warningCodes,
       'deterministic-override',
+      ...(winner.candidate.candidate.source === 'label-context' ? ['label-context-recovery'] : []),
+      ...(winner.candidate.candidate.source === 'trigger-context' ? ['custom-control-trigger-bounded-context-recovery'] : []),
       ...(winner.candidate.validation.ambiguityReason ? ['deterministic-dom-order-tiebreaker'] : []),
     ],
   });
   const metadata: ResolverMetadata = {
     ...baseMetadata,
+    ...triggerResolution,
     resolvedSelector: winner.candidate.candidate.selector,
     resolvedBy: 'deterministic-override',
     bestScore: winner.candidate.score,
@@ -2130,6 +3078,8 @@ function deriveDeterministicResolution(
     warningCodes: [
       ...baseMetadata.warningCodes,
       'deterministic-override',
+      ...(winner.candidate.candidate.source === 'label-context' ? ['label-context-recovery'] : []),
+      ...(winner.candidate.candidate.source === 'trigger-context' ? ['custom-control-trigger-bounded-context-recovery'] : []),
       ...(winner.candidate.validation.ambiguityReason ? ['deterministic-dom-order-tiebreaker'] : []),
     ],
   };

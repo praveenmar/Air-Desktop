@@ -33,6 +33,7 @@ export function classifySelectorCategory(
 ): SelectorCategory {
   const normalized = selector.trim();
   if (!normalized) return source === 'llm' ? 'llm' : 'unknown';
+  if (source === 'label-context' || source === 'trigger-context') return 'label-context';
   if (isXPathSelector(normalized)) return 'xpath';
   if (source === 'parent-scope') return 'parent-scoped';
   if (/\[data-testid=(?:"[^"]+"|'[^']+')\]/i.test(normalized)) return 'testid';
@@ -103,6 +104,8 @@ export function stabilityBaseScoreForCategory(category: SelectorCategory): numbe
       return 0.67;
     case 'role-attr':
       return 0.66;
+    case 'label-context':
+      return 0.64;
     case 'semantic-css':
       return 0.65;
     case 'text':

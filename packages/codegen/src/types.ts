@@ -56,6 +56,8 @@ export type SelectorEngine =
   | 'testid'
   | 'role'
   | 'label'
+  | 'label-context'
+  | 'trigger-context'
   | 'placeholder'
   | 'playwright';
 
@@ -78,11 +80,59 @@ export type SelectorProofLevel =
   | 'blocked'
   | 'unvalidated';
 
+export type LabelContextRenderStatus =
+  | 'clean-direct-selector'
+  | 'clean-scoped-locator'
+  | 'proven-structural-fallback'
+  | 'proof-only-no-clean-render'
+  | 'blocked-unsafe-render';
+
+export interface LabelContextSelectorSpec {
+  source: 'snapshot-label-context';
+  labelText: string;
+  targetTag: 'input' | 'textarea' | 'select';
+  association: 'label-for' | 'wrapped-label' | 'aria-labelledby' | 'bounded-field';
+  targetId?: string;
+  ariaLabelledBy?: string;
+  containerSelector?: string;
+  boundedContainerSummary?: string;
+  snapshotSource?: ResolverSnapshotSource | null;
+  labelStructureEvidenceReason?: string | null;
+  recoveredFromSelector?: string;
+  renderStatus?: LabelContextRenderStatus;
+  renderReason?: string | null;
+  cleanParentSelector?: string;
+  cleanChildSelector?: string;
+  structuralFallbackLocator?: string;
+  warningCodes?: string[];
+}
+
+export interface TriggerContextSelectorSpec {
+  source: 'snapshot-trigger-context';
+  labelText: string;
+  controlFamily?: string;
+  association: 'bounded-field';
+  triggerSelector: string;
+  containerSelector?: string;
+  labelElementTag?: string;
+  boundedContainerSummary?: string;
+  snapshotSource?: ResolverSnapshotSource | null;
+  recoveredFromSelector?: string;
+  renderStatus?: LabelContextRenderStatus;
+  renderReason?: string | null;
+  cleanParentSelector?: string;
+  cleanChildSelector?: string;
+  structuralFallbackLocator?: string;
+  warningCodes?: string[];
+}
+
 export interface SelectorSpec {
   selector: string;
   engine: SelectorEngine;
   source: SelectorSource;
   proofLevel: SelectorProofLevel;
+  labelContext?: LabelContextSelectorSpec;
+  triggerContext?: TriggerContextSelectorSpec;
   rank?: number;
   confidence?: number;
   rejectReason?: string;
@@ -100,6 +150,7 @@ export type SelectorCategory =
   | 'aria-label'
   | 'role-attr'
   | 'text'
+  | 'label-context'
   | 'class'
   | 'semantic-css'
   | 'parent-scoped'
@@ -242,6 +293,10 @@ export interface SnapshotSelectionProvenance {
   confidenceScore?: number;
   snapshotTargetEvidence?: boolean;
   snapshotTargetEvidenceReason?: string | null;
+  labelStructureEvidence?: boolean;
+  labelStructureEvidenceReason?: string | null;
+  labelContextSnapshotSource?: ResolverSnapshotSource | null;
+  labelContextBlockedReason?: string | null;
 }
 
 export interface SnapshotCandidateTraceEntry {
@@ -257,6 +312,8 @@ export interface SnapshotCandidateTraceEntry {
   targetPresent?: boolean;
   snapshotTargetEvidenceReason?: string | null;
   shadowDegraded?: boolean;
+  labelStructureEvidence?: boolean;
+  labelStructureEvidenceReason?: string | null;
 }
 
 export interface ResolverMetadata {
@@ -301,6 +358,14 @@ export interface ResolverMetadata {
   classPenaltyReason?: string[];
   selectorEvaluation?: SelectorEvaluation;
   preferredRenderings?: EquivalentRendering[];
+  triggerResolvedSelector?: string;
+  triggerResolvedSelectorSpec?: SelectorSpec;
+  triggerContextLabel?: string | null;
+  triggerContextRenderStatus?: LabelContextRenderStatus;
+  triggerContextRenderReason?: string | null;
+  triggerBoundedContainerSummary?: string | null;
+  triggerStructuralFallbackLocator?: string | null;
+  triggerWarningCodes?: string[];
   warningCodes: string[];
   resolverVersion: 1;
   temporalClass?: TemporalClass;
@@ -409,6 +474,28 @@ export interface CodegenStep {
 
   /** Optional control signature tied to the captured UI state for IC snapshot lookup. */
   controlSignature?: string;
+
+  /** Additive custom-control family for semantic open/select modeling. */
+  controlFamily?: string;
+
+  /** Additive trigger evidence preserved for compressed custom-control select steps. */
+  triggerSelector?: string;
+  triggerSelectorPriority?: SelectorPriority;
+  triggerFingerprint?: FingerprintData;
+  triggerResolvedSelector?: string;
+  triggerSelectorSpec?: SelectorSpec;
+
+  /** Additive option evidence preserved for compressed custom-control select steps. */
+  optionSelector?: string;
+  optionText?: string;
+  optionValue?: string;
+  optionResolvedSelector?: string;
+  optionSelectorSpec?: SelectorSpec;
+
+  /** Additive provenance for compressed custom-control open+select pairs. */
+  absorbedOpenEventId?: string;
+  absorbedOpenTraceId?: string;
+  compressedFromEvents?: string[];
 
   /**
    * Input value for 'input' and 'custom-select' actions.

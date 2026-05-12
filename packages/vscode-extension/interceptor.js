@@ -199,6 +199,100 @@ const safeCssEscape = (typeof CSS !== 'undefined' && CSS.escape)
   ? CSS.escape
   : (str) => String(str).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
 
+function tokenizeClassSemanticParts(token) {
+  return String(token || '')
+    .toLowerCase()
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .split(/[^a-z0-9]+/)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 2);
+}
+
+function isUtilityClassToken(token) {
+  return (
+    /^(?:flex|grid|block|hidden)$/i.test(token) ||
+    /^(?:items|justify|content|self|place)-/i.test(token) ||
+    /^(?:p|m)(?:[trblxy])?-\d+/i.test(token) ||
+    /^(?:text|bg|border|rounded)-/i.test(token) ||
+    /^(?:w|h|min|max)-/i.test(token) ||
+    /^(?:gap|space-[xy]|inset|top|left|right|bottom)-/i.test(token) ||
+    /^(?:hover|focus|active|disabled|group-hover|focus-within|focus-visible):/i.test(token)
+  );
+}
+
+function isStateClassToken(token) {
+  const normalized = String(token || '').toLowerCase();
+  if (!normalized) return false;
+  if (/^(?:is|has)-[a-z0-9:_-]+$/i.test(normalized)) return true;
+  if (/--(?:focus|focused|active|selected|open|disabled|hover|loading|expanded|collapsed|current|checked|invalid|valid|dirty|touched|visited|state)$/i.test(normalized)) {
+    return true;
+  }
+  if (normalized.includes('data-state') || normalized.includes('headlessui-state')) return true;
+  const parts = tokenizeClassSemanticParts(normalized);
+  if (parts.length === 0) return false;
+  return parts.some((part) => (
+    /^(?:focus|focused|active|selected|open|disabled|hover|loading|expanded|collapsed|current|checked|invalid|valid|dirty|touched|visited|state)$/.test(part)
+  ));
+}
+
+function isFrameworkClassToken(token) {
+  return /^(?:oxd-|mui|ant-|chakra-|radix-|headlessui-)/i.test(token);
+}
+
+function isGenericShellClassToken(token) {
+  return /^(?:container|wrapper|row|item|content|layout|shell|panel|section|body|header|footer)$/i.test(token);
+}
+
+function isCssInJsClassToken(token) {
+  return /^(?:css-|sc-)/i.test(token);
+}
+
+function isHashedRandomClassToken(token) {
+  if (isCssInJsClassToken(token)) return true;
+  if (token.length < 8) return false;
+  if (!/[a-z]/i.test(token)) return false;
+  if (/^(?:oxd-|mui|ant-|chakra-|radix-|headlessui-)/i.test(token)) return false;
+  if (/^[a-z0-9:_-]+$/i.test(token) && /\d/.test(token)) {
+    const parts = token.split(/[-_]/).filter(Boolean);
+    if (parts.length <= 1) {
+      return /[a-z]{2,}\d{2,}[a-z0-9]{4,}/i.test(token);
+    }
+    return parts.every((part) => part.length >= 3 && (/\d/.test(part) || /^[a-z]{6,}$/i.test(part)));
+  }
+  return false;
+}
+
+function isStableHref(href) {
+  if (!href) return false;
+  const normalized = String(href).trim();
+  if (!normalized) return false;
+  if (/^(?:#|javascript:|mailto:|tel:)/i.test(normalized)) return false;
+  return true;
+}
+
+function scoreClassCandidate(token) {
+  let penalty = 0;
+  let bonus = 0;
+  if (isUtilityClassToken(token)) penalty += 5;
+  if (isCssInJsClassToken(token)) penalty += 5;
+  if (isHashedRandomClassToken(token)) penalty += 4;
+  if (isStateClassToken(token)) penalty += 6;
+  if (isFrameworkClassToken(token)) penalty += 3;
+  if (isGenericShellClassToken(token)) penalty += 3;
+
+  const parts = tokenizeClassSemanticParts(token);
+  if (/(?:__|--)/.test(token) && !isStateClassToken(token)) bonus += 1;
+  if (parts.length >= 2 && !parts.every((part) => isGenericShellClassToken(part))) bonus += 2;
+  else if (parts.length === 1 && parts[0].length >= 4 && !isGenericShellClassToken(parts[0])) bonus += 1;
+
+  return {
+    token,
+    score: bonus - penalty,
+    penalty,
+    bonus,
+  };
+}
+
 // Cache for DOM indexing
 const _rootIndexCache = new WeakMap();
 
@@ -5987,8 +6081,114 @@ class AIRInterceptor {
     };
   }
 
+  _isFieldLikeTag(tagName) {
+    return ["input", "textarea", "select"].includes((tagName || "").toLowerCase());
+  }
+
+  _normalizeFieldSemanticText(value, maxLength = 80) {
+    if (typeof value !== "string") return null;
+    const normalized = value.trim().replace(/\s+/g, " ");
+    if (!normalized) return null;
+    return normalized.slice(0, maxLength);
+  }
+
+  _extractReferencedText(documentRef, idList) {
+    if (!documentRef || typeof idList !== "string") return null;
+    const parts = [];
+    for (const refId of idList.split(/\s+/).filter(Boolean)) {
+      try {
+        const ref = documentRef.getElementById(refId);
+        const text = this._normalizeFieldSemanticText(ref?.textContent || "");
+        if (!text) continue;
+        if (!parts.includes(text)) parts.push(text);
+      } catch {
+        // Ignore invalid IDs or synthetic DOM limitations.
+      }
+    }
+    if (parts.length === 0) return null;
+    return this._normalizeFieldSemanticText(parts.join(" "));
+  }
+
+  _extractBoundedFieldGroupLabel(element) {
+    let current = element?.parentElement || null;
+    let depth = 0;
+    while (current && depth < 3) {
+      const tagName = (current.tagName || "").toLowerCase();
+      if (["html", "body", "form", "main", "section", "article", "table", "tbody", "thead"].includes(tagName)) {
+        break;
+      }
+
+      let controls = [];
+      let labels = [];
+      try {
+        controls = Array.from(current.querySelectorAll("input, textarea, select"));
+        labels = Array.from(current.querySelectorAll("label"));
+      } catch {
+        controls = [];
+        labels = [];
+      }
+
+      if (controls.length === 1 && labels.length === 1) {
+        const text = this._normalizeFieldSemanticText(labels[0]?.textContent || "");
+        if (text) return text;
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    return null;
+  }
+
+  _collectFieldSemantics(element) {
+    const tagName = (element?.tagName || "").toLowerCase();
+    if (!this._isFieldLikeTag(tagName)) return {};
+
+    const documentRef = element?.ownerDocument || document;
+    const associatedLabelText =
+      element?.id
+        ? this._normalizeFieldSemanticText(
+            documentRef?.querySelector?.(`label[for="${safeCssEscape(element.id)}"]`)?.textContent || "",
+          )
+        : null;
+    const wrappedLabelText = this._normalizeFieldSemanticText(
+      element?.closest?.("label")?.textContent || "",
+    );
+    const labelledByText = this._extractReferencedText(
+      documentRef,
+      element?.getAttribute?.("aria-labelledby") || "",
+    );
+    const describedByText = this._extractReferencedText(
+      documentRef,
+      element?.getAttribute?.("aria-describedby") || "",
+    );
+    const fieldLabelText =
+      associatedLabelText ||
+      wrappedLabelText ||
+      labelledByText ||
+      this._extractBoundedFieldGroupLabel(element);
+
+    return {
+      name: element.getAttribute("name") || element.name || null,
+      placeholder: element.getAttribute("placeholder") || element.placeholder || null,
+      ariaLabel: element.getAttribute("aria-label") || null,
+      ariaLabelledBy: element.getAttribute("aria-labelledby") || null,
+      ariaDescribedBy: element.getAttribute("aria-describedby") || null,
+      id: element.id || null,
+      type: element.getAttribute("type") || element.type || null,
+      autocomplete: element.getAttribute("autocomplete") || null,
+      title: element.getAttribute("title") || element.title || null,
+      associatedLabelText,
+      wrappedLabelText,
+      labelledByText,
+      describedByText,
+      fieldLabelText,
+    };
+  }
+
   generateOptimalSelector(element) {
     const tagName = element.tagName.toLowerCase();
+    const fieldSemantics = this._collectFieldSemantics(element);
 
     // Priority 1: data-testid (most stable)
     if (element.hasAttribute("data-testid")) {
@@ -5998,6 +6198,19 @@ class AIRInterceptor {
         priority: "data-testid",
         rank: rankForPriority("data-testid"),
       };
+    }
+
+    // Priority 1.5: other stable test-style attributes.
+    for (const attrName of ["data-cy", "data-qa"]) {
+      if (element.hasAttribute(attrName)) {
+        const attrValue = element.getAttribute(attrName);
+        if (!attrValue) continue;
+        return {
+          selector: `${tagName}[${attrName}="${escapeCssString(attrValue)}"]`,
+          priority: "attribute",
+          rank: rankForPriority("attribute"),
+        };
+      }
     }
 
     // Priority 2: id — only if it is semantically stable.
@@ -6028,18 +6241,66 @@ class AIRInterceptor {
     }
 
     // Priority 3: name attribute
-    if (element.name) {
+    if (fieldSemantics.name) {
       return {
-        selector: `${tagName}[name="${escapeCssString(element.name)}"]`,
+        selector: `${tagName}[name="${escapeCssString(fieldSemantics.name)}"]`,
         priority: "attribute",
         rank: rankForPriority("attribute"),
       };
     }
 
     // Priority 4: aria-label (very stable for buttons/links)
-    if (element.getAttribute("aria-label")) {
+    if (fieldSemantics.ariaLabel) {
       return {
-        selector: `${tagName}[aria-label="${escapeCssString(element.getAttribute("aria-label"))}"]`,
+        selector: `${tagName}[aria-label="${escapeCssString(fieldSemantics.ariaLabel)}"]`,
+        priority: "attribute",
+        rank: rankForPriority("attribute"),
+      };
+    }
+
+    // Priority 4.25: explicit aria-labelledby for field-like controls.
+    if (fieldSemantics.ariaLabelledBy && this._isFieldLikeTag(tagName)) {
+      return {
+        selector: `${tagName}[aria-labelledby="${escapeCssString(fieldSemantics.ariaLabelledBy)}"]`,
+        priority: "attribute",
+        rank: rankForPriority("attribute"),
+      };
+    }
+
+    // Priority 4.5: exact placeholder for interactive controls.
+    if (
+      fieldSemantics.placeholder &&
+      ["input", "textarea"].includes(tagName)
+    ) {
+      return {
+        selector: `${tagName}[placeholder="${escapeCssString(fieldSemantics.placeholder)}"]`,
+        priority: "attribute",
+        rank: rankForPriority("attribute"),
+      };
+    }
+
+    // Priority 4.6: stable autocomplete hints for field-like controls.
+    if (fieldSemantics.autocomplete && this._isFieldLikeTag(tagName)) {
+      return {
+        selector: `${tagName}[autocomplete="${escapeCssString(fieldSemantics.autocomplete)}"]`,
+        priority: "attribute",
+        rank: rankForPriority("attribute"),
+      };
+    }
+
+    // Priority 4.7: title attribute for field-like controls when no stronger field semantics exist.
+    if (fieldSemantics.title && this._isFieldLikeTag(tagName)) {
+      return {
+        selector: `${tagName}[title="${escapeCssString(fieldSemantics.title)}"]`,
+        priority: "attribute",
+        rank: rankForPriority("attribute"),
+      };
+    }
+
+    // Priority 4.75: meaningful href for links.
+    if (tagName === "a" && isStableHref(element.getAttribute("href"))) {
+      return {
+        selector: `${tagName}[href="${escapeCssString(element.getAttribute("href"))}"]`,
         priority: "attribute",
         rank: rankForPriority("attribute"),
       };
@@ -6063,17 +6324,7 @@ class AIRInterceptor {
       };
     }
 
-    // Priority 7: Stable class
-    const stableClass = this.findStableClass(element);
-    if (stableClass) {
-      return {
-        selector: `.${safeCssEscape(stableClass)}`,
-        priority: "class",
-        rank: rankForPriority("class"),
-      };
-    }
-
-    // Priority 8: Compound selector (tag + text for buttons/links)
+    // Priority 7: button/link text beats weak dynamic classes.
     if (["button", "a", "submit"].includes(tagName)) {
       const text = this.extractText(element);
       if (text && text.length > 0 && text.length < 50) {
@@ -6085,16 +6336,22 @@ class AIRInterceptor {
       }
     }
 
-    // Priority 8.5: Multi-attribute compound selector (Item 2.1 hardening)
+    // Priority 8: Multi-attribute compound selector (Item 2.1 hardening)
     // When no single stable attribute exists, combine 2+ attributes to create
     // a highly specific but still resilient selector. This covers the common
     // case where generated IDs are unstable but name+type+placeholder are stable.
     {
       const parts = [];
-      if (element.name) parts.push(`[name="${escapeCssString(element.name)}"]`);
-      if (element.getAttribute("aria-label")) parts.push(`[aria-label="${escapeCssString(element.getAttribute("aria-label"))}"]`);
+      if (element.hasAttribute("data-cy")) parts.push(`[data-cy="${escapeCssString(element.getAttribute("data-cy"))}"]`);
+      if (element.hasAttribute("data-qa")) parts.push(`[data-qa="${escapeCssString(element.getAttribute("data-qa"))}"]`);
+      if (fieldSemantics.name) parts.push(`[name="${escapeCssString(fieldSemantics.name)}"]`);
+      if (fieldSemantics.ariaLabel) parts.push(`[aria-label="${escapeCssString(fieldSemantics.ariaLabel)}"]`);
+      if (fieldSemantics.ariaLabelledBy) parts.push(`[aria-labelledby="${escapeCssString(fieldSemantics.ariaLabelledBy)}"]`);
       if (element.type && !["text", "button"].includes(element.type)) parts.push(`[type="${escapeCssString(element.type)}"]`);
-      if (element.placeholder) parts.push(`[placeholder="${escapeCssString(element.placeholder)}"]`);
+      if (fieldSemantics.placeholder) parts.push(`[placeholder="${escapeCssString(fieldSemantics.placeholder)}"]`);
+      if (fieldSemantics.autocomplete) parts.push(`[autocomplete="${escapeCssString(fieldSemantics.autocomplete)}"]`);
+      if (fieldSemantics.title) parts.push(`[title="${escapeCssString(fieldSemantics.title)}"]`);
+      if (tagName === "a" && isStableHref(element.getAttribute("href"))) parts.push(`[href="${escapeCssString(element.getAttribute("href"))}"]`);
 
       if (parts.length >= 2) {
         return {
@@ -6105,7 +6362,17 @@ class AIRInterceptor {
       }
     }
 
-    // Priority 9: Parent context + nth-child (better than full path)
+    // Priority 9: Stable semantic class fallback.
+    const stableClass = this.findStableClass(element);
+    if (stableClass) {
+      return {
+        selector: `.${safeCssEscape(stableClass)}`,
+        priority: "class",
+        rank: rankForPriority("class"),
+      };
+    }
+
+    // Priority 10: Parent context + nth-child (better than full path)
     const parent = element.parentElement;
     if (parent) {
       const siblings = Array.from(parent.children).filter(
@@ -6125,7 +6392,7 @@ class AIRInterceptor {
       }
     }
 
-    // Priority 10: XPath (last resort)
+    // Priority 11: XPath (last resort)
     return {
       selector: this.generateXPath(element),
       priority: "xpath",
@@ -6137,35 +6404,29 @@ class AIRInterceptor {
     if (!element.classList || element.classList.length === 0) return null;
 
     const classes = Array.from(element.classList);
+    const stableClasses = classes
+      .map((cls) => String(cls || "").trim())
+      .filter(Boolean)
+      .filter((cls) => !/^MuiInputBase-input$/i.test(cls))
+      .map((cls) => scoreClassCandidate(cls))
+      .sort((left, right) => {
+        if (right.score !== left.score) return right.score - left.score;
+        if (left.penalty !== right.penalty) return left.penalty - right.penalty;
+        if (right.bonus !== left.bonus) return right.bonus - left.bonus;
+        return left.token.length - right.token.length;
+      });
 
-    // 1. Filter out known utility/generic classes that cause Playwright collisions
-    const BANNED_PATTERNS = [
-      /\d{4,}/,                   // Long numbers
-      /^css-/, /^sc-/,            // CSS-in-JS hashes (Emotion, Styled Components)
-      /^oxd-input$/,              // OrangeHRM generic inputs
-      /^oxd-select-text-input$/,  // OrangeHRM generic selects
-      /^el-input__inner$/,        // Element UI generics
-      /^ant-input$/,              // Ant Design generics
-      /^MuiInputBase-input$/      // Material UI generics
-    ];
-
-    const stableClasses = classes.filter(cls => !BANNED_PATTERNS.some(regex => regex.test(cls)));
-
-    // 2. If all classes were banned, return null. This forces generateOptimalSelector 
-    // to safely drop to Priority 8.5 (Multi-attribute) or Priority 9 (Path).
     if (stableClasses.length === 0) return null;
 
-    // 3. Prioritize semantically meaningful classes (e.g., 'username-field' over 'mt-4')
-    const utilityPrefixes = ['mt-', 'mb-', 'pt-', 'pb-', 'flex', 'text-', 'bg-'];
-    stableClasses.sort((a, b) => {
-      const aIsUtility = utilityPrefixes.some(p => a.startsWith(p));
-      const bIsUtility = utilityPrefixes.some(p => b.startsWith(p));
-      if (aIsUtility && !bIsUtility) return 1;
-      if (!aIsUtility && bIsUtility) return -1;
-      return 0;
-    });
+    const best = stableClasses[0];
+    if (!best) return null;
 
-    return stableClasses[0];
+    // Very weak state/utility/shell classes remain available only as a last fallback.
+    if (best.score < -6 && stableClasses.length === 1) {
+      return best.token;
+    }
+
+    return best.token;
   }
 
   generateXPath(element) {
@@ -6253,6 +6514,7 @@ class AIRInterceptor {
   }
 
   extractAttributes(element) {
+    const fieldSemantics = this._collectFieldSemantics(element);
     const dataTestId = element.getAttribute("data-testid") || null;
     const dataCy = element.getAttribute("data-cy") || null;
     const dataQa = element.getAttribute("data-qa") || null;
@@ -6284,16 +6546,24 @@ class AIRInterceptor {
       dataQa,
       "data-qa": dataQa,
       id: element.id || null,
-      name: element.name || null,
+      name: fieldSemantics.name || null,
       role: element.getAttribute("role") || null,
       ariaLabel,
       "aria-label": ariaLabel,
-      type: element.type || null,
-      placeholder: element.placeholder || null,
+      "aria-labelledby": fieldSemantics.ariaLabelledBy || null,
+      "aria-describedby": fieldSemantics.ariaDescribedBy || null,
+      type: fieldSemantics.type || null,
+      placeholder: fieldSemantics.placeholder || null,
+      autocomplete: fieldSemantics.autocomplete || null,
       value: element.value || null,
       href: element.href || null,
-      title: element.title || null,
+      title: fieldSemantics.title || null,
       alt: element.alt || null,
+      associatedLabelText: fieldSemantics.associatedLabelText || null,
+      wrappedLabelText: fieldSemantics.wrappedLabelText || null,
+      labelledByText: fieldSemantics.labelledByText || null,
+      describedByText: fieldSemantics.describedByText || null,
+      fieldLabelText: fieldSemantics.fieldLabelText || null,
       class: boundedClassName,
       classList: boundedClassName,
     };

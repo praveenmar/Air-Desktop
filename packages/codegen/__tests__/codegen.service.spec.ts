@@ -6,6 +6,8 @@ import {
   normalizeSelectorPriority,
   rankFromPriority,
   collapseRedundantClickBeforeInput,
+  compressDuplicateSubmitAfterClick,
+  compressCustomControlOpenSelectPairs,
   suppressPreNavSetupClicks,
   deduplicateSharedAssertions,
 } from '../src/codegen.service';
@@ -215,6 +217,392 @@ describe('CodegenService - Click/Input Collapse', () => {
     const collapsed = collapseRedundantClickBeforeInput(steps);
     expect(collapsed).toHaveLength(2);
     expect(collapsed[0].action).toBe('click');
+  });
+});
+
+describe('CodegenService - Duplicate Submit Compression', () => {
+  it('compresses adjacent click submit pair into one executable click action', () => {
+    const submitAssertion: CodegenAssertion = {
+      type: 'url',
+      value: 'https://app.test/dashboard',
+      source: 'url_change',
+      confidence: 1,
+    };
+
+    const steps: CodegenStep[] = [
+      createStep({
+        step: 1,
+        action: 'click',
+        selector: 'button[type="submit"]',
+        selectorPriority: 'attribute',
+        pageUrl: 'https://app.test/login',
+        normalizedUrl: 'https://app.test/login',
+        traceId: 'trace-1',
+        tabId: 'tab-1',
+        timestamp: 1000,
+        fingerprint: {
+          tagName: 'button',
+          textExcerpt: 'Login',
+          attributes: { type: 'submit' },
+        },
+        assertions: [{ type: 'element_visible', value: 'Login', selector: 'button:has-text("Login")', source: 'anchor', confidence: 0.8 }],
+        userAssertions: [{ assertionIntent: 'see spinner', selector: '.spinner', checkType: 'visible' }],
+      }),
+      createStep({
+        step: 2,
+        action: 'submit',
+        selector: '.login-form-shell',
+        selectorPriority: 'class',
+        pageUrl: 'https://app.test/login',
+        normalizedUrl: 'https://app.test/login',
+        traceId: 'trace-1',
+        tabId: 'tab-1',
+        timestamp: 1045,
+        outcomeType: 'navigation',
+        navigatesTo: 'https://app.test/dashboard',
+        destinationNodeId: 'node-dashboard',
+        fingerprint: {
+          tagName: 'form',
+          context: { nearestContainerTag: 'form' },
+        },
+        assertions: [submitAssertion],
+        userAssertions: [{ assertionIntent: 'land on dashboard', selector: 'h1', expectedValue: 'Dashboard', checkType: 'text' }],
+      }),
+    ];
+
+    const compressed = compressDuplicateSubmitAfterClick(steps);
+    expect(compressed).toHaveLength(1);
+    expect(compressed[0].action).toBe('click');
+    expect(compressed[0].navigatesTo).toBe('https://app.test/dashboard');
+    expect(compressed[0].destinationNodeId).toBe('node-dashboard');
+    expect(compressed[0].outcomeType).toBe('navigation');
+    expect(compressed[0].assertions).toHaveLength(2);
+    expect(compressed[0].assertions).toContainEqual(submitAssertion);
+    expect(compressed[0].userAssertions).toHaveLength(2);
+  });
+
+  it('dedupes identical assertions while preserving unique submit evidence', () => {
+    const duplicateAssertion: CodegenAssertion = {
+      type: 'url',
+      value: 'https://app.test/results',
+      source: 'url_change',
+      confidence: 1,
+    };
+
+    const steps: CodegenStep[] = [
+      createStep({
+        step: 1,
+        action: 'click',
+        selector: 'button[type="submit"]',
+        selectorPriority: 'attribute',
+        pageUrl: 'https://app.test/search',
+        normalizedUrl: 'https://app.test/search',
+        traceId: 'trace-1',
+        tabId: 'tab-1',
+        timestamp: 2000,
+        fingerprint: { tagName: 'button', textExcerpt: 'Search', attributes: { type: 'submit' } },
+        assertions: [duplicateAssertion],
+      }),
+      createStep({
+        step: 2,
+        action: 'submit',
+        selector: '.search-shell',
+        selectorPriority: 'class',
+        pageUrl: 'https://app.test/search',
+        normalizedUrl: 'https://app.test/search',
+        traceId: 'trace-1',
+        tabId: 'tab-1',
+        timestamp: 2030,
+        fingerprint: { tagName: 'form', context: { nearestContainerTag: 'form' } },
+        assertions: [
+          duplicateAssertion,
+          { type: 'element_visible', value: 'Results', selector: 'h1:has-text("Results")', source: 'anchor', confidence: 0.9 },
+        ],
+      }),
+    ];
+
+    const compressed = compressDuplicateSubmitAfterClick(steps);
+    expect(compressed).toHaveLength(1);
+    expect(compressed[0].assertions).toHaveLength(2);
+  });
+
+  it('keeps submit when it is not adjacent to a meaningful click', () => {
+    const steps: CodegenStep[] = [
+      createStep({
+        step: 1,
+        action: 'input',
+        selector: 'input[name="email"]',
+        selectorPriority: 'attribute',
+        pageUrl: 'https://app.test/login',
+        normalizedUrl: 'https://app.test/login',
+        traceId: 'trace-1',
+        tabId: 'tab-1',
+        timestamp: 1000,
+      }),
+      createStep({
+        step: 2,
+        action: 'submit',
+        selector: '.form-shell',
+        selectorPriority: 'class',
+        pageUrl: 'https://app.test/login',
+        normalizedUrl: 'https://app.test/login',
+        traceId: 'trace-1',
+        tabId: 'tab-1',
+        timestamp: 1050,
+        fingerprint: { tagName: 'form', context: { nearestContainerTag: 'form' } },
+      }),
+    ];
+
+    expect(compressDuplicateSubmitAfterClick(steps)).toHaveLength(2);
+  });
+
+  it('keeps submit when trace differs', () => {
+    const steps: CodegenStep[] = [
+      createStep({
+        step: 1,
+        action: 'click',
+        selector: 'button[type="submit"]',
+        selectorPriority: 'attribute',
+        pageUrl: 'https://app.test/login',
+        normalizedUrl: 'https://app.test/login',
+        traceId: 'trace-click',
+        tabId: 'tab-1',
+        timestamp: 1000,
+        fingerprint: { tagName: 'button', textExcerpt: 'Login', attributes: { type: 'submit' } },
+      }),
+      createStep({
+        step: 2,
+        action: 'submit',
+        selector: '.form-shell',
+        selectorPriority: 'class',
+        pageUrl: 'https://app.test/login',
+        normalizedUrl: 'https://app.test/login',
+        traceId: 'trace-submit',
+        tabId: 'tab-1',
+        timestamp: 1010,
+        fingerprint: { tagName: 'form', context: { nearestContainerTag: 'form' } },
+      }),
+    ];
+
+    expect(compressDuplicateSubmitAfterClick(steps)).toHaveLength(2);
+  });
+
+  it('keeps submit when tab or page differs', () => {
+    const baseClick = createStep({
+      step: 1,
+      action: 'click',
+      selector: 'button[type="submit"]',
+      selectorPriority: 'attribute',
+      pageUrl: 'https://app.test/login',
+      normalizedUrl: 'https://app.test/login',
+      traceId: 'trace-1',
+      tabId: 'tab-1',
+      timestamp: 1000,
+      fingerprint: { tagName: 'button', textExcerpt: 'Login', attributes: { type: 'submit' } },
+    });
+    const submitBase = createStep({
+      step: 2,
+      action: 'submit',
+      selector: '.form-shell',
+      selectorPriority: 'class',
+      pageUrl: 'https://app.test/login',
+      normalizedUrl: 'https://app.test/login',
+      traceId: 'trace-1',
+      tabId: 'tab-1',
+      timestamp: 1010,
+      fingerprint: { tagName: 'form', context: { nearestContainerTag: 'form' } },
+    });
+
+    expect(compressDuplicateSubmitAfterClick([
+      baseClick,
+      { ...submitBase, tabId: 'tab-2' },
+    ])).toHaveLength(2);
+
+    expect(compressDuplicateSubmitAfterClick([
+      baseClick,
+      { ...submitBase, normalizedUrl: 'https://app.test/other', pageUrl: 'https://app.test/other' },
+    ])).toHaveLength(2);
+  });
+
+  it('keeps submit-only flow when no prior click exists', () => {
+    const submitStep = createStep({
+      step: 1,
+      action: 'submit',
+      selector: 'form[data-test="search"]',
+      selectorPriority: 'attribute',
+      pageUrl: 'https://app.test/search',
+      normalizedUrl: 'https://app.test/search',
+      traceId: 'trace-1',
+      tabId: 'tab-1',
+      timestamp: 1000,
+      fingerprint: { tagName: 'form' },
+    });
+
+    expect(compressDuplicateSubmitAfterClick([submitStep])).toEqual([submitStep]);
+  });
+});
+
+describe('CodegenService - Custom Control Open/Select Compression', () => {
+  it('compresses immediate custom-control-open + custom-select pair into one semantic select step with preserved evidence', () => {
+    const steps: CodegenStep[] = [
+      createStep({
+        step: 1,
+        action: 'custom-control-open',
+        intent: 'open_user_role',
+        selector: '.custom-trigger',
+        selectorPriority: 'class',
+        pageUrl: 'https://app.test/admin',
+        normalizedUrl: 'https://app.test/admin',
+        traceId: 'trace-1',
+        tabId: 'tab-1',
+        timestamp: 1000,
+        eventId: 'ev-open',
+        controlFamily: 'combobox',
+        triggerSelector: '.custom-trigger',
+        triggerSelectorPriority: 'class',
+        triggerSelectorSpec: {
+          selector: '.custom-trigger',
+          engine: 'css',
+          source: 'interceptor',
+          proofLevel: 'recorded',
+          rank: 7,
+        },
+      }),
+      createStep({
+        step: 2,
+        action: 'custom-select',
+        intent: 'select_admin',
+        selector: '[role="option"]',
+        selectorPriority: 'attribute',
+        pageUrl: 'https://app.test/admin',
+        normalizedUrl: 'https://app.test/admin',
+        traceId: 'trace-1',
+        tabId: 'tab-1',
+        timestamp: 1250,
+        eventId: 'ev-select',
+        controlFamily: 'combobox',
+        optionSelector: '[role="option"]',
+        optionText: 'Admin',
+        optionValue: 'Admin',
+        optionSelectorSpec: {
+          selector: '[role="option"]',
+          engine: 'css',
+          source: 'interceptor',
+          proofLevel: 'recorded',
+          rank: 3,
+        },
+        value: 'Admin',
+      }),
+    ];
+
+    const compressed = compressCustomControlOpenSelectPairs(steps);
+
+    expect(compressed).toHaveLength(1);
+    expect(compressed[0]).toEqual(expect.objectContaining({
+      action: 'custom-select',
+      triggerSelector: '.custom-trigger',
+      optionSelector: '[role="option"]',
+      optionText: 'Admin',
+      optionValue: 'Admin',
+      absorbedOpenEventId: 'ev-open',
+      absorbedOpenTraceId: 'trace-1',
+      compressedFromEvents: ['ev-open', 'ev-select'],
+    }));
+    expect(compressed[0].triggerSelectorSpec).toEqual(expect.objectContaining({
+      selector: '.custom-trigger',
+      proofLevel: 'recorded',
+    }));
+    expect(compressed[0].optionSelectorSpec).toEqual(expect.objectContaining({
+      selector: '[role="option"]',
+      proofLevel: 'recorded',
+    }));
+  });
+
+  it('keeps open-only controls separate', () => {
+    const steps: CodegenStep[] = [
+      createStep({
+        step: 1,
+        action: 'custom-control-open',
+        selector: '.custom-trigger',
+        selectorPriority: 'class',
+        pageUrl: 'https://app.test/admin',
+        normalizedUrl: 'https://app.test/admin',
+        traceId: 'trace-1',
+        tabId: 'tab-1',
+        timestamp: 1000,
+        controlFamily: 'combobox',
+      }),
+    ];
+
+    expect(compressCustomControlOpenSelectPairs(steps)).toHaveLength(1);
+  });
+
+  it('does not compress autocomplete selection yet', () => {
+    const steps: CodegenStep[] = [
+      createStep({
+        step: 1,
+        action: 'custom-control-open',
+        selector: '.autocomplete-trigger',
+        selectorPriority: 'class',
+        pageUrl: 'https://app.test/admin',
+        normalizedUrl: 'https://app.test/admin',
+        traceId: 'trace-1',
+        tabId: 'tab-1',
+        timestamp: 1000,
+        controlFamily: 'autocomplete',
+        triggerSelector: '.autocomplete-trigger',
+      }),
+      createStep({
+        step: 2,
+        action: 'custom-select',
+        selector: '[role="option"]',
+        selectorPriority: 'attribute',
+        pageUrl: 'https://app.test/admin',
+        normalizedUrl: 'https://app.test/admin',
+        traceId: 'trace-1',
+        tabId: 'tab-1',
+        timestamp: 1200,
+        controlFamily: 'autocomplete',
+        optionSelector: '[role="option"]',
+        optionText: 'Kori Bogisich',
+      }),
+    ];
+
+    expect(compressCustomControlOpenSelectPairs(steps)).toHaveLength(2);
+  });
+
+  it('does not compress delayed menu selections', () => {
+    const steps: CodegenStep[] = [
+      createStep({
+        step: 1,
+        action: 'custom-control-open',
+        selector: '.user-menu-trigger',
+        selectorPriority: 'class',
+        pageUrl: 'https://app.test/admin',
+        normalizedUrl: 'https://app.test/admin',
+        traceId: 'trace-1',
+        tabId: 'tab-1',
+        timestamp: 1000,
+        controlFamily: 'menu',
+        triggerSelector: '.user-menu-trigger',
+      }),
+      createStep({
+        step: 2,
+        action: 'custom-menu-select',
+        selector: '[role="menuitem"]',
+        selectorPriority: 'attribute',
+        pageUrl: 'https://app.test/admin',
+        normalizedUrl: 'https://app.test/admin',
+        traceId: 'trace-1',
+        tabId: 'tab-1',
+        timestamp: 9000,
+        controlFamily: 'menu',
+        optionSelector: '[role="menuitem"]',
+        optionText: 'Logout',
+      }),
+    ];
+
+    expect(compressCustomControlOpenSelectPairs(steps)).toHaveLength(2);
   });
 });
 
@@ -759,6 +1147,172 @@ describe('CodegenService - Step Metadata Preservation', () => {
     expect(session.steps[1].sourceNodeId).toBe('node-click');
   });
 
+  it('compresses same-trace submit shell after submit click during buildSession and renumbers steps', () => {
+    const clickPayload = JSON.stringify({
+      normalizedUrl: 'https://app.test/search',
+      fingerprint: {
+        selector: 'button[type="submit"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'button',
+        textExcerpt: 'Search',
+        attributes: { type: 'submit' },
+        attributesHash: 'click-hash',
+      },
+    });
+
+    const submitPayload = JSON.stringify({
+      normalizedUrl: 'https://app.test/search',
+      fingerprint: {
+        selector: '.search-shell',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'form',
+        context: { nearestContainerTag: 'form' },
+        attributes: {},
+        attributesHash: 'submit-hash',
+      },
+    });
+
+    const fakeDb = {
+      prepare(sql: string) {
+        if (sql.includes('FROM sessions')) {
+          return {
+            get: () => ({
+              id: 'session-test',
+              started_at: 1_700_000_000_000,
+            }),
+          };
+        }
+
+        if (sql.includes('FROM events e')) {
+          return {
+            all: () => ([
+              {
+                eventId: 'ev-1',
+                eventType: 'click',
+                timestamp: 1_700_000_000_100,
+                pageUrl: 'https://app.test/search',
+                traceId: 'trace-1',
+                nodeId: 'node-click',
+                payload: clickPayload,
+              },
+              {
+                eventId: 'ev-2',
+                eventType: 'submit',
+                timestamp: 1_700_000_000_150,
+                pageUrl: 'https://app.test/search',
+                traceId: 'trace-1',
+                nodeId: null,
+                payload: submitPayload,
+              },
+            ]),
+          };
+        }
+
+        if (sql.includes('WHERE ed.fingerprint_hash IN')) {
+          return {
+            all: () => ([
+              {
+                fingerprintHash: 'unused-click-edge',
+                edgeId: 'edge-1',
+                triggerEventId: 'ev-1',
+                fromNodeId: 'node-click',
+                toNodeId: 'node-results',
+                outcomeType: 'navigation',
+                sampleSize: 2,
+                probability: 0.95,
+              },
+              {
+                fingerprintHash: 'unused-submit-edge',
+                edgeId: 'edge-2',
+                triggerEventId: 'ev-2',
+                fromNodeId: 'node-click',
+                toNodeId: 'node-results',
+                outcomeType: 'navigation',
+                sampleSize: 2,
+                probability: 0.96,
+              },
+            ]),
+          };
+        }
+
+        if (sql.includes('WHERE ed.trigger_event_id IN')) {
+          return {
+            all: () => ([
+              {
+                fingerprintHash: 'unused-click-edge',
+                edgeId: 'edge-1',
+                triggerEventId: 'ev-1',
+                fromNodeId: 'node-click',
+                toNodeId: 'node-results',
+                outcomeType: 'navigation',
+                sampleSize: 2,
+                probability: 0.95,
+              },
+              {
+                fingerprintHash: 'unused-submit-edge',
+                edgeId: 'edge-2',
+                triggerEventId: 'ev-2',
+                fromNodeId: 'node-click',
+                toNodeId: 'node-results',
+                outcomeType: 'navigation',
+                sampleSize: 2,
+                probability: 0.96,
+              },
+            ]),
+          };
+        }
+
+        if (sql.includes('SELECT control_signature AS controlSignature')) {
+          return { get: () => undefined };
+        }
+
+        if (sql.includes('FROM nodes')) {
+          return {
+            all: () => ([{
+              id: 'node-results',
+              page_url: 'https://app.test/results',
+              page_title: 'Results',
+              anchors: JSON.stringify(['H1:text=Results']),
+            }]),
+            get: () => undefined,
+          };
+        }
+
+        return {
+          get: () => undefined,
+          all: () => [],
+        };
+      },
+      close() {
+        return undefined;
+      },
+    };
+
+    const service = Object.create(CodegenService.prototype) as any;
+    service.db = fakeDb;
+    service.options = {
+      dbPath: ':memory:',
+      minConfidence: 0,
+      includeScrollSteps: false,
+      includeHoverSteps: false,
+    };
+
+    const session = (service as CodegenService).buildSession('session-test');
+    expect(session.steps).toHaveLength(1);
+    expect(session.steps[0].step).toBe(1);
+    expect(session.steps[0].action).toBe('click');
+    expect(session.steps[0].selector).toBe('button[type="submit"]');
+    expect(session.steps[0].navigatesTo).toBe('https://app.test/results');
+    expect(session.steps[0].assertions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'url', value: 'https://app.test/results' }),
+        expect.objectContaining({ selector: 'h1:has-text("Results")' }),
+      ]),
+    );
+  });
+
   it('preserves extended fingerprint attributes and aliases into CodegenStep.fingerprint', () => {
     const eventPayload = JSON.stringify({
       normalizedUrl: 'https://app.test/profile',
@@ -1135,5 +1689,143 @@ describe('CodegenService - Step Metadata Preservation', () => {
     expect(session.steps[1].action).toBe('custom-menu-select');
     expect(session.steps[1].selector).toBe('[role="menuitem"]:has-text("Logout")');
     expect(session.steps[1].value).toBe('Logout');
+  });
+
+  it('buildSession compresses bounded custom-control open/select pairs and preserves trigger-option evidence', () => {
+    const customOpenPayload = JSON.stringify({
+      normalizedUrl: 'https://example.test/admin',
+      fingerprint: {
+        selector: '.oxd-select-text',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        textExcerpt: 'User Role',
+        attributes: {
+          role: 'combobox',
+        },
+        attributesHash: 'hash-open',
+      },
+      controlFamily: 'combobox',
+    });
+
+    const customSelectPayload = JSON.stringify({
+      normalizedUrl: 'https://example.test/admin',
+      fingerprint: {
+        selector: '[role="option"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'div',
+        textExcerpt: 'Admin',
+        attributes: {
+          role: 'option',
+        },
+        attributesHash: 'hash-option',
+      },
+      triggerFingerprint: {
+        selector: '.oxd-select-text',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        textExcerpt: 'User Role',
+        attributes: {
+          role: 'combobox',
+        },
+        attributesHash: 'hash-trigger',
+      },
+      selection: {
+        label: 'Admin',
+        value: 'Admin',
+      },
+      controlFamily: 'combobox',
+      meta: {
+        triggerSelector: '.oxd-select-text',
+        containerRole: 'listbox',
+      },
+    });
+
+    const fakeDb = {
+      prepare(sql: string) {
+        if (sql.includes('FROM sessions')) {
+          return {
+            get: () => ({
+              id: 'session-test',
+              started_at: 1_700_000_000_000,
+            }),
+          };
+        }
+
+        if (sql.includes('FROM events e')) {
+          return {
+            all: () => ([
+              {
+                eventId: 'ev-open',
+                eventType: 'custom-control-open',
+                timestamp: 1_700_000_000_100,
+                pageUrl: 'https://example.test/admin',
+                traceId: 'trace-open',
+                nodeId: 'node-1',
+                payload: customOpenPayload,
+              },
+              {
+                eventId: 'ev-select',
+                eventType: 'custom-select',
+                timestamp: 1_700_000_000_250,
+                pageUrl: 'https://example.test/admin',
+                traceId: 'trace-open',
+                nodeId: 'node-1',
+                payload: customSelectPayload,
+              },
+            ]),
+          };
+        }
+
+        if (sql.includes('FROM edges ed')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('SELECT control_signature AS controlSignature')) {
+          return { get: () => undefined };
+        }
+
+        if (sql.includes('FROM nodes')) {
+          return {
+            all: () => [],
+            get: () => undefined,
+          };
+        }
+
+        return {
+          get: () => undefined,
+          all: () => [],
+        };
+      },
+      close() {
+        return undefined;
+      },
+    };
+
+    const service = Object.create(CodegenService.prototype) as any;
+    service.db = fakeDb;
+    service.options = {
+      dbPath: ':memory:',
+      minConfidence: 0,
+      includeScrollSteps: false,
+      includeHoverSteps: false,
+    };
+
+    const session = (service as CodegenService).buildSession('session-test');
+    expect(session.steps).toHaveLength(1);
+    expect(session.steps[0]).toEqual(expect.objectContaining({
+      action: 'custom-select',
+      selector: '[role="option"]',
+      value: 'Admin',
+      controlFamily: 'combobox',
+      triggerSelector: '.oxd-select-text',
+      optionSelector: '[role="option"]',
+      optionText: 'Admin',
+      absorbedOpenEventId: 'ev-open',
+      absorbedOpenTraceId: 'trace-open',
+      compressedFromEvents: ['ev-open', 'ev-select'],
+    }));
   });
 });

@@ -115,10 +115,25 @@ export function inferStepSignalAttributes(step: CodegenStep): StepSignalAttribut
     fpAttrs?.ariaLabel || fpAttrs?.['aria-label'],
     extractAttributeValue(selector, 'aria-label'),
   );
+  attrs.ariaLabelledBy = preferFingerprint(
+    'aria-labelledby',
+    fpAttrs?.ariaLabelledBy || fpAttrs?.['aria-labelledby'],
+    extractAttributeValue(selector, 'aria-labelledby'),
+  );
+  attrs.ariaDescribedBy = preferFingerprint(
+    'aria-describedby',
+    fpAttrs?.ariaDescribedBy || fpAttrs?.['aria-describedby'],
+    extractAttributeValue(selector, 'aria-describedby'),
+  );
   attrs.placeholder = preferFingerprint(
     'placeholder',
     fpAttrs?.placeholder,
     extractAttributeValue(selector, 'placeholder'),
+  );
+  attrs.autocomplete = preferFingerprint(
+    'autocomplete',
+    fpAttrs?.autocomplete,
+    extractAttributeValue(selector, 'autocomplete'),
   );
   attrs.role = preferFingerprint('role', fpAttrs?.role, extractAttributeValue(selector, 'role'));
   attrs.href = preferFingerprint('href', fpAttrs?.href, extractAttributeValue(selector, 'href'));
@@ -126,6 +141,11 @@ export function inferStepSignalAttributes(step: CodegenStep): StepSignalAttribut
   attrs.title = preferFingerprint('title', fpAttrs?.title, extractAttributeValue(selector, 'title'));
   attrs.alt = preferFingerprint('alt', fpAttrs?.alt, extractAttributeValue(selector, 'alt'));
   attrs.value = preferFingerprint('value', fpAttrs?.value, extractAttributeValue(selector, 'value'));
+  attrs.associatedLabelText = typeof fpAttrs?.associatedLabelText === 'string' ? fpAttrs.associatedLabelText : undefined;
+  attrs.wrappedLabelText = typeof fpAttrs?.wrappedLabelText === 'string' ? fpAttrs.wrappedLabelText : undefined;
+  attrs.labelledByText = typeof fpAttrs?.labelledByText === 'string' ? fpAttrs.labelledByText : undefined;
+  attrs.describedByText = typeof fpAttrs?.describedByText === 'string' ? fpAttrs.describedByText : undefined;
+  attrs.fieldLabelText = typeof fpAttrs?.fieldLabelText === 'string' ? fpAttrs.fieldLabelText : undefined;
   attrs.class = (fpAttrs as Record<string, string | undefined> | undefined)?.class || extractClass(selector) || undefined;
   attrs.tagName = fingerprint?.tagName?.toLowerCase();
   attrs.parentSelector = fingerprint?.parentSelector ?? undefined;

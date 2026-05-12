@@ -6,6 +6,7 @@ import AirSmokeReporter from '../src/smoke/air-reporter';
 import { classifySmokeFailure } from '../src/smoke/smoke-classifier';
 import { writeControlledPlaywrightConfig } from '../src/smoke/playwright-config-writer';
 import { readRawPlaywrightResult } from '../src/smoke/smoke-report';
+import { analyzeSmokeRepairEvidence } from '../src/smoke/smoke-repair';
 import { runSmokeBaseline } from '../src/smoke/smoke-runner';
 
 function makeTempDir(prefix: string): string {
@@ -447,6 +448,71 @@ describe('smoke baseline runner', () => {
     expect(report.screenshotPath).toContain('screenshot.png');
   });
 
+  it('writes a repair suggestion JSON for weak input failures when live DOM evidence is attached', async () => {
+    const dir = makeTempDir('air-smoke-repair-input-');
+    const specFile = path.join(dir, 'demo.smoke.spec.ts');
+    const generatedFile = path.join(dir, 'DemoPage.ts');
+    const sidecarFile = path.join(dir, 'DemoPage.air.json');
+    const source = makeGeneratedPageSource();
+    writeFile(specFile, 'test("demo", async () => {});');
+    writeFile(generatedFile, source);
+    const sidecar: any = makeSidecar();
+    sidecar.methods.clickSearchButton.actionType = 'input';
+    sidecar.methods.clickSearchButton.fieldLabelText = 'Username';
+    sidecar.methods.clickSearchButton.originalSelector = '.oxd-input';
+    sidecar.methods.clickSearchButton.selectorUsed = '.oxd-input';
+    writeFile(sidecarFile, JSON.stringify(sidecar, null, 2));
+    const line = lineNumberOf(source, 'await target.click();');
+    const stack = `locator.fill: strict mode violation.\n    at DemoPage.clickSearchButton (${generatedFile}:${line}:11)`;
+    const repairEvidencePath = path.join(dir, 'repair-evidence.json');
+    writeFile(repairEvidencePath, JSON.stringify({
+      methodName: 'clickSearchButton',
+      currentUrl: 'https://example.test/admin',
+      html: '<form><div class="oxd-input-group"><label>Username</label><div><input class="oxd-input" type="text"></div></div></form>',
+      methodMeta: {
+        step: 9,
+        actionType: 'input',
+        originalSelector: '.oxd-input',
+        selectorUsed: '.oxd-input',
+        fieldLabelText: 'Username',
+      },
+    }, null, 2));
+
+    const report = await runSmokeBaseline({
+      specFile,
+      sidecarFile,
+      executor: async (request) => {
+        fs.writeFileSync(
+          request.rawResultPath,
+          JSON.stringify(
+            makeFailingRawResult({
+              file: generatedFile,
+              message: 'locator.fill: strict mode violation.',
+              stack,
+              attachments: [
+                { name: 'test-failed-1', contentType: 'image/png', path: path.join(dir, 'screenshot.png') },
+                { name: 'air-repair-9.json', contentType: 'application/json', path: repairEvidencePath },
+              ],
+            }),
+            null,
+            2,
+          ),
+        );
+        return { exitCode: 1 };
+      },
+    });
+
+    expect(report.repairEvidencePath).toContain('repair-evidence.json');
+    expect(report.repairSuggestionFile).toContain('repair-suggestion.json');
+    expect(report.repairSuggestionCount).toBe(1);
+    const suggestion = JSON.parse(fs.readFileSync(report.repairSuggestionFile!, 'utf8'));
+    expect(suggestion.suggestions[0]).toEqual(expect.objectContaining({
+      kind: 'input-label-context',
+      status: 'repairable',
+      oldSelector: '.oxd-input',
+    }));
+  });
+
   it('preserves exact proof vs emitted equivalent distinction in the smoke report', async () => {
     const dir = makeTempDir('air-smoke-equivalent-');
     const specFile = path.join(dir, 'demo.smoke.spec.ts');
@@ -611,5 +677,78 @@ describe('smoke baseline runner', () => {
     expect(report.failureType).toBe('action_timeout');
     expect(report.firstFailingStep).toBe(9);
     expect(report.failingMethodName).toBe('clickSearchButton');
+  });
+});
+
+describe('smoke repair analyzer', () => {
+  it('repairs a weak input from live DOM field label evidence', () => {
+    const result = analyzeSmokeRepairEvidence({
+      methodName: 'fillAdminSearchUsername',
+      currentUrl: 'https://example.test/admin',
+      html: '<form><div class="oxd-input-group"><label>Username</label><div><input class="oxd-input" type="text"></div></div></form>',
+      methodMeta: {
+        actionType: 'input',
+        originalSelector: '.oxd-input',
+        fieldLabelText: 'Username',
+      },
+    });
+    expect(result.suggestions[0]).toEqual(expect.objectContaining({
+      kind: 'input-label-context',
+      status: 'repairable',
+      oldSelector: '.oxd-input',
+    }));
+  });
+
+  it('repairs an ambiguous custom-control trigger from live DOM field label evidence', () => {
+    const result = analyzeSmokeRepairEvidence({
+      methodName: 'selectUserRoleAdmin',
+      currentUrl: 'https://example.test/admin',
+      html: '<form><div class="oxd-input-group"><label>User Role</label><div class="oxd-select-text" role="combobox" aria-haspopup="listbox">Admin</div></div><div class="oxd-input-group"><label>Status</label><div class="oxd-select-text" role="combobox" aria-haspopup="listbox">Enabled</div></div></form>',
+      methodMeta: {
+        actionType: 'custom-select',
+        triggerOriginalSelector: '.oxd-select-text',
+        triggerFieldLabelText: 'User Role',
+        optionText: 'Admin',
+      },
+    });
+    expect(result.suggestions[0]).toEqual(expect.objectContaining({
+      kind: 'custom-control-trigger-context',
+      status: 'repairable',
+      oldSelector: '.oxd-select-text',
+    }));
+  });
+
+  it('blocks repair when duplicate labels exist', () => {
+    const result = analyzeSmokeRepairEvidence({
+      methodName: 'fillAdminSearchUsername',
+      currentUrl: 'https://example.test/admin',
+      html: '<form><div class="oxd-input-group"><label>Username</label><input class="oxd-input"></div><div class="oxd-input-group"><label>Username</label><input class="oxd-input"></div></form>',
+      methodMeta: {
+        actionType: 'input',
+        originalSelector: '.oxd-input',
+        fieldLabelText: 'Username',
+      },
+    });
+    expect(result.suggestions[0]).toEqual(expect.objectContaining({
+      status: 'blocked',
+      reason: 'duplicate_label_text',
+    }));
+  });
+
+  it('blocks repair when a field container has multiple inputs', () => {
+    const result = analyzeSmokeRepairEvidence({
+      methodName: 'fillAdminSearchUsername',
+      currentUrl: 'https://example.test/admin',
+      html: '<form><div class="oxd-input-group"><label>Username</label><input class="oxd-input"><input class="oxd-input"></div></form>',
+      methodMeta: {
+        actionType: 'input',
+        originalSelector: '.oxd-input',
+        fieldLabelText: 'Username',
+      },
+    });
+    expect(result.suggestions[0]).toEqual(expect.objectContaining({
+      status: 'blocked',
+      reason: 'multiple_input_like_targets',
+    }));
   });
 });

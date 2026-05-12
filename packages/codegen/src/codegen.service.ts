@@ -40,6 +40,7 @@ import {
   AssertionType,
   FingerprintData,
   NestedContextData,
+  SelectorSpec,
 } from './types';
 import type { ResolverConfig, SnapshotCache } from './selector-resolver';
 import type { SnapshotHandle, SnapshotInventory, SnapshotSelectionMode, StateBoundary } from './snapshot-selector';
@@ -396,6 +397,115 @@ function extractNestedContext(payloadJson: string | null): NestedContextData | u
   }
 }
 
+function extractCustomControlFamily(payloadJson: string | null): string | undefined {
+  if (!payloadJson) return undefined;
+  try {
+    const payload = JSON.parse(payloadJson);
+    const familyCandidates = [
+      payload?.controlFamily,
+      payload?.meta?.containerRole,
+    ];
+    for (const candidate of familyCandidates) {
+      if (typeof candidate === 'string' && candidate.length > 0) {
+        return candidate;
+      }
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function buildRecordedSelectorSpecFromFingerprint(
+  selector: string | undefined,
+  selectorPriority: string | undefined,
+  selectorRank?: number,
+): SelectorSpec | undefined {
+  const normalizedSelector = (selector || '').trim();
+  if (!normalizedSelector) return undefined;
+  const normalizedPriority = normalizeSelectorPriority(selectorPriority);
+  const rank = selectorRank ?? rankFromPriority(normalizedPriority);
+  return buildSelectorSpec({
+    selector: normalizedSelector,
+    selectorPriority: normalizedPriority,
+    source: 'interceptor',
+    proofLevel: 'recorded',
+    rank,
+  });
+}
+
+function extractCustomControlEvidence(
+  payloadJson: string | null,
+  eventType: ActionType,
+): Partial<CodegenStep> {
+  if (!payloadJson) return {};
+  try {
+    const payload = JSON.parse(payloadJson);
+    const fingerprint = normalizeFingerprint(payload?.fingerprint);
+    const triggerFingerprint = normalizeFingerprint(payload?.triggerFingerprint);
+    const triggerSelector =
+      triggerFingerprint?.selector ??
+      (typeof payload?.meta?.triggerSelector === 'string' && payload.meta.triggerSelector.length > 0
+        ? payload.meta.triggerSelector
+        : undefined);
+    const triggerSelectorPriority =
+      normalizeSelectorPriority(triggerFingerprint?.selectorPriority) ??
+      (triggerSelector ? 'unknown' : undefined);
+    const optionText =
+      payload?.selection?.label ??
+      payload?.selection?.value ??
+      fingerprint?.textExcerpt ??
+      undefined;
+    const optionValue =
+      payload?.selection?.value ??
+      payload?.selection?.label ??
+      fingerprint?.textExcerpt ??
+      undefined;
+
+    if (eventType === 'custom-control-open') {
+      return {
+        controlFamily: extractCustomControlFamily(payloadJson),
+        triggerFingerprint: fingerprint ?? undefined,
+        triggerSelector: fingerprint?.selector,
+        triggerSelectorPriority: normalizeSelectorPriority(fingerprint?.selectorPriority),
+        triggerSelectorSpec: buildRecordedSelectorSpecFromFingerprint(
+          fingerprint?.selector,
+          fingerprint?.selectorPriority,
+          fingerprint?.selectorRank,
+        ),
+      };
+    }
+
+    if (eventType === 'custom-select' || eventType === 'custom-menu-select') {
+      return {
+        controlFamily: extractCustomControlFamily(payloadJson),
+        triggerFingerprint: triggerFingerprint ?? undefined,
+        triggerSelector,
+        triggerSelectorPriority: triggerSelector
+          ? normalizeSelectorPriority(triggerFingerprint?.selectorPriority)
+          : undefined,
+        triggerSelectorSpec: buildRecordedSelectorSpecFromFingerprint(
+          triggerFingerprint?.selector ?? triggerSelector,
+          triggerFingerprint?.selectorPriority,
+          triggerFingerprint?.selectorRank,
+        ),
+        optionSelector: fingerprint?.selector,
+        optionText,
+        optionValue,
+        optionSelectorSpec: buildRecordedSelectorSpecFromFingerprint(
+          fingerprint?.selector,
+          fingerprint?.selectorPriority,
+          fingerprint?.selectorRank,
+        ),
+      };
+    }
+
+    return {};
+  } catch {
+    return {};
+  }
+}
+
 function extractTabId(payloadJson: string | null): string | null | undefined {
   if (!payloadJson) return undefined;
   try {
@@ -459,6 +569,11 @@ function buildIntent(eventType: string, fp: FingerprintData): string {
     fp.textExcerpt,
     fp.attributes?.['ariaLabel'],
     fp.attributes?.['aria-label'],
+    fp.attributes?.['fieldLabelText'],
+    fp.attributes?.['associatedLabelText'],
+    fp.attributes?.['wrappedLabelText'],
+    fp.attributes?.['labelledByText'],
+    fp.attributes?.['placeholder'],
     fp.attributes?.['title'],
     fp.attributes?.['alt'],
     fp.attributes?.['name'],
@@ -592,6 +707,275 @@ export function collapseRedundantClickBeforeInput(steps: CodegenStep[]): Codegen
       isLikelyTextEntryStep(next);
 
     if (shouldCollapse) {
+      continue;
+    }
+
+    out.push(current);
+  }
+
+  return out;
+}
+
+const DUPLICATE_SUBMIT_AFTER_CLICK_MAX_MS = 1000;
+const CUSTOM_CONTROL_OPEN_SELECT_MAX_MS = 1500;
+
+function assertionKey(assertion: CodegenAssertion): string {
+  return JSON.stringify({
+    type: assertion.type,
+    value: assertion.value,
+    selector: assertion.selector ?? null,
+    source: assertion.source,
+    confidence: assertion.confidence,
+  });
+}
+
+function userAssertionKey(assertion: { assertionIntent: string; selector: string; expectedValue?: string; checkType: string }): string {
+  return JSON.stringify({
+    assertionIntent: assertion.assertionIntent,
+    selector: assertion.selector,
+    expectedValue: assertion.expectedValue ?? null,
+    checkType: assertion.checkType,
+  });
+}
+
+function mergeAssertions(
+  primary: CodegenAssertion[],
+  absorbed: CodegenAssertion[],
+): CodegenAssertion[] {
+  const merged: CodegenAssertion[] = [];
+  const seen = new Set<string>();
+
+  for (const assertion of [...primary, ...absorbed]) {
+    const key = assertionKey(assertion);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(assertion);
+  }
+
+  return merged;
+}
+
+function mergeUserAssertions<
+  T extends { assertionIntent: string; selector: string; expectedValue?: string; checkType: string },
+>(
+  primary: T[],
+  absorbed: T[],
+): T[] {
+  const merged: T[] = [];
+  const seen = new Set<string>();
+
+  for (const assertion of [...primary, ...absorbed]) {
+    const key = userAssertionKey(assertion);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(assertion);
+  }
+
+  return merged;
+}
+
+function containsSubmitLikeText(value: string | undefined): boolean {
+  if (!value) return false;
+  return /\b(submit|search|save|login|log\s*in|sign\s*in|register|create\s+account|continue|next|apply|send|confirm)\b/i
+    .test(value);
+}
+
+function isMeaningfulSubmitControl(step: CodegenStep): boolean {
+  if (step.action !== 'click') return false;
+
+  const selector = (step.selector ?? '').toLowerCase();
+  const tagName = (step.fingerprint?.tagName ?? '').toLowerCase();
+  const role = (step.fingerprint?.attributes?.role ?? '').toLowerCase();
+  const type = (step.fingerprint?.attributes?.type ?? '').toLowerCase();
+
+  if (/^(button|input)\[type=["']?submit["']?\]/i.test(selector)) return true;
+  if ((tagName === 'button' || tagName === 'input') && type === 'submit') return true;
+
+  const labelCandidates: Array<string | undefined> = [
+    step.fingerprint?.textExcerpt ?? undefined,
+    step.fingerprint?.attributes?.value,
+    step.fingerprint?.attributes?.title,
+    step.fingerprint?.attributes?.ariaLabel,
+    step.fingerprint?.attributes?.['aria-label'],
+    step.intent.replace(/^click_/, '').replace(/_/g, ' '),
+  ];
+
+  const isButtonLike =
+    tagName === 'button' ||
+    tagName === 'input' ||
+    role === 'button' ||
+    selector.startsWith('button') ||
+    selector.startsWith('input');
+
+  return isButtonLike && labelCandidates.some(candidate => containsSubmitLikeText(candidate));
+}
+
+function isLikelyFormShellSubmit(step: CodegenStep): boolean {
+  if (step.action !== 'submit') return false;
+
+  const selector = (step.selector ?? '').toLowerCase();
+  const tagName = (step.fingerprint?.tagName ?? '').toLowerCase();
+  const role = (step.fingerprint?.attributes?.role ?? '').toLowerCase();
+  const nearestContainerTag = (step.fingerprint?.context?.nearestContainerTag ?? '').toLowerCase();
+  const parentTag = (step.fingerprint?.context?.parentTag ?? '').toLowerCase();
+
+  if (tagName === 'form' || role === 'form') return true;
+  if (selector === 'form' || selector.startsWith('form[') || selector.startsWith('form.')) return true;
+
+  const formContext =
+    nearestContainerTag === 'form' ||
+    parentTag === 'form' ||
+    selector.includes('form');
+
+  return formContext && FRAGILE_PRIORITIES.has(step.selectorPriority);
+}
+
+function canAbsorbSubmitOutcome(clickStep: CodegenStep, submitStep: CodegenStep): boolean {
+  if (clickStep.action !== 'click' || submitStep.action !== 'submit') return false;
+  if (clickStep.traceId == null || submitStep.traceId == null || clickStep.traceId !== submitStep.traceId) return false;
+
+  const clickTab = clickStep.tabId ?? null;
+  const submitTab = submitStep.tabId ?? null;
+  if (clickTab !== submitTab) return false;
+
+  if (getStepNormalizedUrl(clickStep) !== getStepNormalizedUrl(submitStep)) return false;
+
+  if (typeof clickStep.timestamp === 'number' && typeof submitStep.timestamp === 'number') {
+    const deltaMs = submitStep.timestamp - clickStep.timestamp;
+    if (deltaMs < 0 || deltaMs > DUPLICATE_SUBMIT_AFTER_CLICK_MAX_MS) return false;
+  } else {
+    return false;
+  }
+
+  if (!isMeaningfulSubmitControl(clickStep)) return false;
+  if (!isLikelyFormShellSubmit(submitStep)) return false;
+
+  return true;
+}
+
+function mergeSubmitIntoClick(clickStep: CodegenStep, submitStep: CodegenStep): CodegenStep {
+  return {
+    ...clickStep,
+    outcomeType: submitStep.outcomeType ?? clickStep.outcomeType,
+    navigatesTo: submitStep.navigatesTo ?? clickStep.navigatesTo,
+    destinationNodeId: submitStep.destinationNodeId ?? clickStep.destinationNodeId,
+    assertions: mergeAssertions(clickStep.assertions, submitStep.assertions),
+    userAssertions: mergeUserAssertions(clickStep.userAssertions, submitStep.userAssertions),
+    confidence: Math.max(clickStep.confidence, submitStep.confidence),
+    sampleSize: Math.max(clickStep.sampleSize, submitStep.sampleSize),
+  };
+}
+
+export function compressDuplicateSubmitAfterClick(steps: CodegenStep[]): CodegenStep[] {
+  const out: CodegenStep[] = [];
+
+  for (let i = 0; i < steps.length; i++) {
+    const current = steps[i];
+    const next = steps[i + 1];
+
+    if (current && next && canAbsorbSubmitOutcome(current, next)) {
+      out.push(mergeSubmitIntoClick(current, next));
+      i++;
+      continue;
+    }
+
+    out.push(current);
+  }
+
+  return out;
+}
+
+function isSelectLikeControlFamily(family: string | undefined): boolean {
+  const normalized = (family || '').toLowerCase();
+  return ['combobox', 'listbox', 'select', 'dropdown'].includes(normalized);
+}
+
+function canCompressOpenSelectPair(openStep: CodegenStep, selectStep: CodegenStep): boolean {
+  if (openStep.action !== 'custom-control-open' || selectStep.action !== 'custom-select') return false;
+  if (openStep.traceId == null || selectStep.traceId == null || openStep.traceId !== selectStep.traceId) return false;
+
+  const openTab = openStep.tabId ?? null;
+  const selectTab = selectStep.tabId ?? null;
+  if (openTab !== selectTab) return false;
+  if (getStepNormalizedUrl(openStep) !== getStepNormalizedUrl(selectStep)) return false;
+
+  if (typeof openStep.timestamp !== 'number' || typeof selectStep.timestamp !== 'number') return false;
+  const deltaMs = selectStep.timestamp - openStep.timestamp;
+  if (deltaMs < 0 || deltaMs > CUSTOM_CONTROL_OPEN_SELECT_MAX_MS) return false;
+
+  if (!isSelectLikeControlFamily(openStep.controlFamily ?? selectStep.controlFamily)) return false;
+  if ((openStep.controlFamily ?? '').toLowerCase() === 'autocomplete') return false;
+  if ((selectStep.controlFamily ?? '').toLowerCase() === 'autocomplete') return false;
+
+  const triggerSelector = selectStep.triggerSelector ?? openStep.triggerSelector ?? openStep.selector;
+  const optionSelector = selectStep.optionSelector ?? selectStep.selector;
+  const optionText = selectStep.optionText ?? selectStep.value ?? selectStep.fingerprint?.textExcerpt ?? undefined;
+
+  if (!triggerSelector || triggerSelector.trim().length === 0) return false;
+  if ((!optionSelector || optionSelector.trim().length === 0) && (!optionText || optionText.trim().length === 0)) {
+    return false;
+  }
+
+  return true;
+}
+
+function compressOpenSelectPair(openStep: CodegenStep, selectStep: CodegenStep): CodegenStep {
+  const compressedEventIds = [openStep.eventId, selectStep.eventId].filter(
+    (value): value is string => typeof value === 'string' && value.length > 0,
+  );
+
+  return {
+    ...selectStep,
+    controlFamily: selectStep.controlFamily ?? openStep.controlFamily,
+    triggerSelector: selectStep.triggerSelector ?? openStep.triggerSelector ?? openStep.selector,
+    triggerSelectorPriority:
+      selectStep.triggerSelectorPriority ??
+      openStep.triggerSelectorPriority ??
+      openStep.selectorPriority,
+    triggerFingerprint:
+      selectStep.triggerFingerprint ??
+      openStep.triggerFingerprint ??
+      openStep.fingerprint,
+    triggerSelectorSpec:
+      selectStep.triggerSelectorSpec ??
+      openStep.triggerSelectorSpec ??
+      openStep.selectorSpec,
+    triggerResolvedSelector:
+      selectStep.triggerResolvedSelector ??
+      openStep.triggerResolvedSelector,
+    optionSelector: selectStep.optionSelector ?? selectStep.selector,
+    optionText:
+      selectStep.optionText ??
+      selectStep.value ??
+      selectStep.fingerprint?.textExcerpt ??
+      undefined,
+    optionValue:
+      selectStep.optionValue ??
+      selectStep.value ??
+      selectStep.optionText ??
+      selectStep.fingerprint?.textExcerpt ??
+      undefined,
+    optionSelectorSpec:
+      selectStep.optionSelectorSpec ??
+      selectStep.selectorSpec,
+    optionResolvedSelector:
+      selectStep.optionResolvedSelector,
+    absorbedOpenEventId: openStep.eventId,
+    absorbedOpenTraceId: openStep.traceId,
+    compressedFromEvents: compressedEventIds,
+  };
+}
+
+export function compressCustomControlOpenSelectPairs(steps: CodegenStep[]): CodegenStep[] {
+  const out: CodegenStep[] = [];
+
+  for (let i = 0; i < steps.length; i++) {
+    const current = steps[i];
+    const next = steps[i + 1];
+
+    if (current && next && canCompressOpenSelectPair(current, next)) {
+      out.push(compressOpenSelectPair(current, next));
+      i++;
       continue;
     }
 
@@ -907,6 +1291,8 @@ export class CodegenService {
         userAssertions:   [],
       };
 
+      Object.assign(step, extractCustomControlEvidence(ev.payload, ev.eventType as ActionType));
+
       if (sourceNodeId) {
         lastResolvedSourceNodeId = sourceNodeId;
       }
@@ -961,7 +1347,9 @@ export class CodegenService {
     // Removes hamburger-expand and container-tap noise clicks that precede
     // every SPA sidebar navigation (e.g. .oxd-icon and div > div:nth-of-type).
     const afterClickInputCollapse = collapseRedundantClickBeforeInput(rawSteps);
-    const afterSetupFilter = suppressPreNavSetupClicks(afterClickInputCollapse);
+    const afterSubmitCompression = compressDuplicateSubmitAfterClick(afterClickInputCollapse);
+    const afterCustomControlCompression = compressCustomControlOpenSelectPairs(afterSubmitCompression);
+    const afterSetupFilter = suppressPreNavSetupClicks(afterCustomControlCompression);
 
     // â”€â”€ 7. FIX C: strip assertions shared across multiple destination pages â”€â”€
     // Removes global layout elements (Add, Reset, Search buttons) that appear

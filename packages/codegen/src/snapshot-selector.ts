@@ -5,6 +5,7 @@ import type {
   SnapshotSelectionProvenance,
   TemporalClass,
 } from './types';
+import { isVisibleElement as isSnapshotDomVisibleElement } from './resolver/visibility';
 
 export type SnapshotSelectionMode = 'action' | 'outcome';
 
@@ -117,6 +118,14 @@ export interface SnapshotSelectionResult {
   snapshot: Document | null;
   provenance: SnapshotSelectionProvenance;
   evaluatedCandidates: SnapshotCandidateTraceEntry[];
+}
+
+interface LabelStructureEvidence {
+  active: boolean;
+  evidence: boolean;
+  score: number;
+  reason: string | null;
+  blockedReason: string | null;
 }
 
 function buildIcKey(normalizedUrl: string, controlSignature?: string | null): string {
@@ -256,6 +265,50 @@ function normalizeText(value: string): string {
   return value.replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
+function getFieldLabelText(step: CodegenStep): string | null {
+  const value = step.fingerprint?.attributes?.fieldLabelText;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function hasStrongDirectSelectorEvidence(step: CodegenStep): boolean {
+  const priority = step.selectorPriority;
+  if (
+    priority === 'data-testid'
+    || priority === 'id'
+    || priority === 'attribute'
+    || priority === 'text'
+  ) {
+    return true;
+  }
+
+  const attrs = step.fingerprint?.attributes ?? {};
+  return !!(
+    attrs.dataTestId
+    || attrs['data-testid']
+    || attrs.dataCy
+    || attrs['data-cy']
+    || attrs.dataQa
+    || attrs['data-qa']
+    || attrs.id
+    || attrs.name
+    || attrs.placeholder
+    || attrs.ariaLabel
+    || attrs['aria-label']
+    || attrs.href
+  );
+}
+
+function isWeakLabelContextFallbackCandidate(step: CodegenStep): boolean {
+  if (step.action !== 'input') return false;
+  if (hasStrongDirectSelectorEvidence(step)) return false;
+  const fieldLabelText = getFieldLabelText(step);
+  if (!fieldLabelText) return false;
+  const priority = step.selectorPriority ?? 'unknown';
+  return priority === 'class' || priority === 'path' || priority === 'unknown' || priority === 'other';
+}
+
 function isLikelyCssSelector(selector: string): boolean {
   const trimmed = selector.trim();
   if (!trimmed) return false;
@@ -266,11 +319,180 @@ function isLikelyCssSelector(selector: string): boolean {
   return true;
 }
 
-function isVisibleElement(element: Element): boolean {
-  const anyElement = element as HTMLElement;
-  if (anyElement.offsetParent !== null) return true;
-  const rect = anyElement.getBoundingClientRect?.();
-  return !!rect && rect.width > 0 && rect.height > 0;
+function getVisibleInputLikeControls(root: ParentNode): Element[] {
+  try {
+    return Array.from(
+      root.querySelectorAll(
+        'input,textarea,select,[role="textbox"],[role="combobox"],[role="searchbox"],[role="spinbutton"],[contenteditable="true"],[aria-haspopup="listbox"],[aria-haspopup="combobox"]',
+      ),
+    ).filter(isSnapshotDomVisibleElement);
+  } catch {
+    return [];
+  }
+}
+
+function findTightFieldContainer(label: Element, target: Element): { container: Element | null; blockedReason?: string } {
+  let current: Element | null = label;
+  let depth = 0;
+  while (current && depth < 5) {
+    const tagName = current.tagName?.toLowerCase() || '';
+    if (['body', 'html', 'main', 'section', 'article', 'table', 'tbody', 'thead', 'form'].includes(tagName)) {
+      break;
+    }
+
+    const controls = getVisibleInputLikeControls(current);
+    if (controls.length === 1 && controls[0] === target) {
+      return { container: current };
+    }
+
+    if (controls.length > 1 && controls.includes(target)) {
+      return { container: null, blockedReason: 'multiple_input_like_targets' };
+    }
+
+    current = current.parentElement;
+    depth += 1;
+  }
+  return { container: null, blockedReason: 'no_bounded_label_container' };
+}
+
+function findVisibleTargetForOriginalSelector(
+  step: CodegenStep,
+  snapshot: Document,
+): { target: Element | null; blockedReason?: string } {
+  const selector = step.selector?.trim();
+  if (!selector || !isLikelyCssSelector(selector)) {
+    return { target: null, blockedReason: 'label_structure_missing' };
+  }
+
+  try {
+    const allMatches = Array.from(snapshot.querySelectorAll(selector));
+    const matches = allMatches.filter(isSnapshotDomVisibleElement);
+    if (matches.length === 1) return { target: matches[0] ?? null };
+    if (matches.length > 1) return { target: null, blockedReason: 'target_selector_ambiguous' };
+    if (allMatches.length > 0) {
+      return { target: null, blockedReason: 'target_visibility_mismatch' };
+    }
+    return { target: null, blockedReason: 'target_missing' };
+  } catch {
+    return { target: null, blockedReason: 'target_selector_ambiguous' };
+  }
+}
+
+function findLabelStructureEvidence(step: CodegenStep, snapshot: Document): LabelStructureEvidence {
+  if (!isWeakLabelContextFallbackCandidate(step)) {
+    return {
+      active: false,
+      evidence: false,
+      score: 0,
+      reason: null,
+      blockedReason: null,
+    };
+  }
+
+  const fieldLabelText = getFieldLabelText(step);
+  if (!fieldLabelText) {
+    return {
+      active: true,
+      evidence: false,
+      score: 0,
+      reason: null,
+      blockedReason: 'field_label_missing',
+    };
+  }
+
+  const targetResolution = findVisibleTargetForOriginalSelector(step, snapshot);
+  const target = targetResolution.target;
+  if (!target) {
+    return {
+      active: true,
+      evidence: false,
+      score: 0,
+      reason: null,
+      blockedReason: targetResolution.blockedReason ?? 'target_missing',
+    };
+  }
+
+  let labels: Element[] = [];
+  try {
+    labels = Array.from(snapshot.querySelectorAll('label'));
+  } catch {
+    labels = [];
+  }
+
+  const normalizedFieldLabel = normalizeText(fieldLabelText);
+  const matchingLabels = labels.filter(label => normalizeText(label.textContent || '') === normalizedFieldLabel);
+  if (matchingLabels.length === 0) {
+    return {
+      active: true,
+      evidence: false,
+      score: 0,
+      reason: null,
+      blockedReason: 'label_missing',
+    };
+  }
+  if (matchingLabels.length > 1) {
+    return {
+      active: true,
+      evidence: false,
+      score: 1,
+      reason: 'label_text_match',
+      blockedReason: 'duplicate_labels',
+    };
+  }
+
+  const label = matchingLabels[0];
+  let associationScore = 1;
+  const targetId = target.getAttribute('id');
+  const labelFor = label.getAttribute('for');
+  if (targetId && labelFor === targetId) {
+    associationScore = 3;
+  } else if (label.contains(target)) {
+    associationScore = 3;
+  } else {
+    const labelledBy = target.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      const ids = labelledBy.split(/\s+/).filter(Boolean);
+      const labelId = label.getAttribute('id');
+      if (labelId && ids.includes(labelId)) {
+        associationScore = 3;
+      }
+    }
+  }
+
+  const boundedContainer = findTightFieldContainer(label, target);
+  if (!boundedContainer.container) {
+    return {
+      active: true,
+      evidence: false,
+      score: associationScore,
+      reason: 'label_text_match',
+      blockedReason: boundedContainer.blockedReason ?? 'no_bounded_label_container',
+    };
+  }
+
+  const controls = getVisibleInputLikeControls(boundedContainer.container);
+  if (controls.length !== 1 || controls[0] !== target) {
+    return {
+      active: true,
+      evidence: false,
+      score: associationScore + 1,
+      reason: 'bounded_container_match',
+      blockedReason: controls.length > 1 ? 'multiple_input_like_targets' : 'target_not_bound_to_label_container',
+    };
+  }
+
+  return {
+    active: true,
+    evidence: true,
+    score: associationScore + 3,
+    reason: associationScore >= 3 ? 'exact_label_association' : 'bounded_label_structure',
+    blockedReason: null,
+  };
+}
+
+function labelEvidenceReason(evidence: LabelStructureEvidence): string | null {
+  if (evidence.evidence) return evidence.reason;
+  return evidence.blockedReason;
 }
 
 function isDestructiveAction(step: CodegenStep): boolean {
@@ -415,7 +637,7 @@ function findTargetEvidence(step: CodegenStep, snapshot: Document): string | nul
       const tagName = fingerprint.tagName?.toLowerCase() || '*';
       const candidates = Array.from(snapshot.querySelectorAll(tagName));
       const textMatch = candidates.some(candidate => {
-        if (!isVisibleElement(candidate)) return false;
+        if (!isSnapshotDomVisibleElement(candidate)) return false;
         return textSignalsFromElement(candidate).some(signal => signal.includes(targetText));
       });
       if (textMatch) return 'fingerprint_text';
@@ -725,18 +947,27 @@ function selectFromCandidates(
   let selectedSnapshot: Document | null = null;
   let selectedCandidate: SnapshotCandidateOption | null = null;
   let selectedConfidence = 0;
+  let selectedLabelEvidence: LabelStructureEvidence = {
+    active: false,
+    evidence: false,
+    score: 0,
+    reason: null,
+    blockedReason: null,
+  };
+  const weakLabelFallback = mode === 'action' && isWeakLabelContextFallbackCandidate(step);
   let targetMissingFallback:
     | {
       snapshot: Document;
       candidate: SnapshotCandidateOption;
       confidenceScore: number;
       evidenceReason: string | null;
+      labelEvidence: LabelStructureEvidence;
       traceIndex: number;
     }
     | null = null;
 
   for (const candidate of candidates) {
-    if (selectedCandidate) {
+    if (selectedCandidate && !weakLabelFallback) {
       evaluatedCandidates.push(
         createTraceEntry(candidate, {
           skipReason: SNAPSHOT_SKIP_REASONS.HIGHER_PRIORITY_CANDIDATE_ALREADY_SELECTED,
@@ -805,6 +1036,15 @@ function selectFromCandidates(
 
     const targetEvaluation = evaluateTargetPresence(step, candidate, snapshot, mode);
     const destructive = isDestructiveAction(step);
+    const labelEvidence = weakLabelFallback
+      ? findLabelStructureEvidence(step, snapshot)
+      : {
+          active: false,
+          evidence: false,
+          score: 0,
+          reason: null,
+          blockedReason: null,
+        };
     if (targetEvaluation.confidenceScore !== undefined) {
       confidenceScore = Math.min(confidenceScore, targetEvaluation.confidenceScore);
     }
@@ -816,6 +1056,8 @@ function selectFromCandidates(
           confidenceScore,
           targetPresent: targetEvaluation.targetPresent,
           shadowDegraded: targetEvaluation.shadowDegraded,
+          labelStructureEvidence: labelEvidence.evidence,
+          labelStructureEvidenceReason: labelEvidenceReason(labelEvidence),
         })
       );
       continue;
@@ -830,6 +1072,8 @@ function selectFromCandidates(
           snapshotTargetEvidenceReason: targetEvaluation.evidenceReason ?? targetEvaluation.skipReason ?? null,
           shadowDegraded: targetEvaluation.shadowDegraded,
           skipReason: targetEvaluation.skipReason,
+          labelStructureEvidence: labelEvidence.evidence,
+          labelStructureEvidenceReason: labelEvidenceReason(labelEvidence),
         })
       ) - 1;
       if (!targetMissingFallback) {
@@ -838,32 +1082,93 @@ function selectFromCandidates(
           candidate,
           confidenceScore,
           evidenceReason: targetEvaluation.evidenceReason ?? targetEvaluation.skipReason ?? null,
+          labelEvidence,
           traceIndex,
         };
       }
       continue;
     }
 
-    evaluatedCandidates.push(
-      createTraceEntry(candidate, {
+    const traceEntry = createTraceEntry(candidate, {
+      selected: true,
+      reason: candidate.reasonIfSelected,
+      confidenceScore,
+      targetPresent: true,
+      snapshotTargetEvidenceReason: targetEvaluation.evidenceReason ?? 'selector_match',
+      skipReason: icStateEvaluation.annotationReason
+        ?? (icTabUnknown ? SNAPSHOT_SKIP_REASONS.IC_TAB_UNKNOWN : undefined),
+      labelStructureEvidence: labelEvidence.evidence,
+      labelStructureEvidenceReason: labelEvidenceReason(labelEvidence),
+    });
+
+    if (!weakLabelFallback) {
+      evaluatedCandidates.push(traceEntry);
+      selectedSnapshot = snapshot;
+      selectedCandidate = candidate;
+      selectedConfidence = confidenceScore;
+      selectedLabelEvidence = labelEvidence;
+      continue;
+    }
+
+    const candidateIndex = evaluatedCandidates.push(traceEntry) - 1;
+    const shouldReplace =
+      !selectedCandidate
+      || (
+        labelEvidence.evidence
+        && !selectedLabelEvidence.evidence
+      )
+      || (
+        labelEvidence.evidence
+        && selectedLabelEvidence.evidence
+        && (
+          labelEvidence.score > selectedLabelEvidence.score
+          || (
+            labelEvidence.score === selectedLabelEvidence.score
+            && confidenceScore > selectedConfidence
+          )
+        )
+      );
+
+    if (shouldReplace) {
+      if (selectedCandidate) {
+        const previousIndex = evaluatedCandidates.findIndex(entry =>
+          entry.selected
+          && entry.source === selectedCandidate?.source
+          && entry.temporalClass === selectedCandidate?.temporalClass,
+        );
+        if (previousIndex >= 0) {
+          evaluatedCandidates[previousIndex] = {
+            ...evaluatedCandidates[previousIndex],
+            selected: false,
+            reason: undefined,
+            skipReason: SNAPSHOT_SKIP_REASONS.HIGHER_PRIORITY_CANDIDATE_ALREADY_SELECTED,
+          };
+        }
+      }
+      evaluatedCandidates[candidateIndex] = {
+        ...evaluatedCandidates[candidateIndex],
         selected: true,
         reason: candidate.reasonIfSelected,
-        confidenceScore,
-        targetPresent: true,
-        snapshotTargetEvidenceReason: targetEvaluation.evidenceReason ?? 'selector_match',
-        skipReason: icStateEvaluation.annotationReason
-          ?? (icTabUnknown ? SNAPSHOT_SKIP_REASONS.IC_TAB_UNKNOWN : undefined),
-      })
-    );
-    selectedSnapshot = snapshot;
-    selectedCandidate = candidate;
-    selectedConfidence = confidenceScore;
+      };
+      selectedSnapshot = snapshot;
+      selectedCandidate = candidate;
+      selectedConfidence = confidenceScore;
+      selectedLabelEvidence = labelEvidence;
+    } else {
+      evaluatedCandidates[candidateIndex] = {
+        ...evaluatedCandidates[candidateIndex],
+        selected: false,
+        reason: undefined,
+        skipReason: SNAPSHOT_SKIP_REASONS.HIGHER_PRIORITY_CANDIDATE_ALREADY_SELECTED,
+      };
+    }
   }
 
   if (!selectedCandidate && targetMissingFallback) {
     selectedSnapshot = targetMissingFallback.snapshot;
     selectedCandidate = targetMissingFallback.candidate;
     selectedConfidence = targetMissingFallback.confidenceScore;
+    selectedLabelEvidence = targetMissingFallback.labelEvidence;
     evaluatedCandidates[targetMissingFallback.traceIndex] = {
       ...evaluatedCandidates[targetMissingFallback.traceIndex],
       selected: true,
@@ -893,6 +1198,16 @@ function selectFromCandidates(
       entry.source === selectedCandidate?.source &&
       entry.temporalClass === selectedCandidate?.temporalClass,
     )?.snapshotTargetEvidenceReason ?? null,
+    labelStructureEvidence: weakLabelFallback ? selectedLabelEvidence.evidence : undefined,
+    labelStructureEvidenceReason: weakLabelFallback
+      ? labelEvidenceReason(selectedLabelEvidence)
+      : undefined,
+    labelContextSnapshotSource: weakLabelFallback && selectedLabelEvidence.evidence
+      ? selectedCandidate.source
+      : null,
+    labelContextBlockedReason: weakLabelFallback && !selectedLabelEvidence.evidence
+      ? selectedLabelEvidence.blockedReason
+      : null,
   };
 
   return {

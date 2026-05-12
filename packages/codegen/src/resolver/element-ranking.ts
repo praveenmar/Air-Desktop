@@ -201,13 +201,25 @@ export function enrichSignalAttributesFromElement(attrs: StepSignalAttributes, e
     const aria = htmlElement.getAttribute('aria-label');
     if (aria) attrs.ariaLabel = aria;
   }
+  if (!attrs.ariaLabelledBy) {
+    const ariaLabelledBy = htmlElement.getAttribute('aria-labelledby');
+    if (ariaLabelledBy) attrs.ariaLabelledBy = ariaLabelledBy;
+  }
   if (!attrs.placeholder) {
     const placeholder = htmlElement.getAttribute('placeholder');
     if (placeholder) attrs.placeholder = placeholder;
   }
+  if (!attrs.autocomplete) {
+    const autocomplete = htmlElement.getAttribute('autocomplete');
+    if (autocomplete) attrs.autocomplete = autocomplete;
+  }
   if (!attrs.role) {
     const role = htmlElement.getAttribute('role');
     if (role) attrs.role = role;
+  }
+  if (!attrs.title) {
+    const title = htmlElement.getAttribute('title');
+    if (title) attrs.title = title;
   }
   if (!attrs.class && htmlElement.className) {
     attrs.class = htmlElement.className;

@@ -81,6 +81,9 @@ export interface SmokeReport {
   equivalentSourceSelector?: string | null;
   screenshotPath?: string | null;
   tracePath?: string | null;
+  repairEvidencePath?: string | null;
+  repairSuggestionFile?: string | null;
+  repairSuggestionCount?: number;
   rawPlaywrightResultPath?: string | null;
   stackLocation?: SmokeStackLocation | null;
   recommendedNextAction?: string | null;

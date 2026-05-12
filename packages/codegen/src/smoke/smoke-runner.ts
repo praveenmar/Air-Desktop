@@ -15,6 +15,7 @@ import {
   type SmokeReport,
   writeSmokeReport,
 } from './smoke-report';
+import { writeSmokeRepairSuggestion } from './smoke-repair';
 import { mapSmokeFailureToStep } from './step-mapper';
 
 export interface SmokeRunOptions {
@@ -89,6 +90,7 @@ function readSidecar(sidecarFile?: string | null): AirMetadata | null {
 function resolveFailureArtifacts(raw: RawPlaywrightResult | null): {
   screenshotPath: string | null;
   tracePath: string | null;
+  repairEvidencePath: string | null;
 } {
   const failing = pickFirstFailingResult(raw);
   const attachments = failing?.attachments ?? [];
@@ -99,10 +101,14 @@ function resolveFailureArtifacts(raw: RawPlaywrightResult | null): {
   const trace = attachments.find((attachment) =>
     attachment.contentType === 'application/zip' || /trace/i.test(attachment.name ?? ''),
   );
+  const repairEvidence = attachments.find((attachment) =>
+    attachment.contentType === 'application/json' || /air-repair/i.test(attachment.name ?? ''),
+  );
 
   return {
     screenshotPath: screenshot?.path ?? null,
     tracePath: trace?.path ?? null,
+    repairEvidencePath: repairEvidence?.path ?? null,
   };
 }
 
@@ -234,6 +240,12 @@ export async function runSmokeBaseline(options: SmokeRunOptions): Promise<SmokeR
   const metadata = readSidecar(sidecarFile);
   const methodMeta = mapping.methodMeta;
   const artifacts = resolveFailureArtifacts(rawResult);
+  const repairSuggestionFile = path.join(config.runDir, 'repair-suggestion.json');
+  const repairSuggestion = writeSmokeRepairSuggestion({
+    evidenceFile: artifacts.repairEvidencePath,
+    screenshotPath: artifacts.screenshotPath,
+    outputFile: repairSuggestionFile,
+  });
   const failureType = classifySmokeFailure({
     rawResult,
     error: selectedError,
@@ -263,6 +275,9 @@ export async function runSmokeBaseline(options: SmokeRunOptions): Promise<SmokeR
     equivalentSourceSelector: emitted.equivalentSourceSelector,
     screenshotPath: artifacts.screenshotPath,
     tracePath: artifacts.tracePath,
+    repairEvidencePath: artifacts.repairEvidencePath,
+    repairSuggestionFile: repairSuggestion ? repairSuggestionFile : null,
+    repairSuggestionCount: repairSuggestion?.suggestions.length ?? 0,
     rawPlaywrightResultPath: config.rawResultPath,
     stackLocation: mapping.stackLocation,
     recommendedNextAction: getRecommendedNextAction(failureType),
