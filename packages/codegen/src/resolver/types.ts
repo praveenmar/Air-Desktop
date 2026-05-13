@@ -1,7 +1,9 @@
 import type {
+  BoundedFieldSelectorSpec,
   CodegenAssertion,
   CodegenSession,
   CodegenStep,
+  FlatSelectorEngine,
   LabelContextSelectorSpec,
   TriggerContextSelectorSpec,
   LlmResponseFormat,
@@ -66,6 +68,7 @@ export interface CandidateValidation {
   confidenceScore?: number;
   ambiguityReason?: string;
   resolvedElement?: Element | null;
+  warningCodes?: string[];
 }
 
 export interface RawCandidate {
@@ -87,10 +90,12 @@ export interface RawCandidate {
     | 'other'
     | 'path'
     | 'chained'
+    | 'bounded-field'
     | 'label-context'
     | 'trigger-context';
-  engine?: SelectorEngine;
+  engine?: FlatSelectorEngine | 'bounded-field';
   categoryOverride?: SelectorCategory;
+  boundedField?: BoundedFieldSelectorSpec;
   labelContext?: LabelContextSelectorSpec;
   triggerContext?: TriggerContextSelectorSpec;
   rank: number;

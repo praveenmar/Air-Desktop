@@ -6056,6 +6056,9 @@ class AIRInterceptor {
     const textExcerpt = this.extractText(element);
     const context = this.extractContext(element);
     const attributes = this.extractAttributes(element);
+    const selectorAmbiguity = this._collectSelectorAmbiguity(element, selectorResult);
+    const boundedFieldContext = this._collectBoundedFieldContext(element, selectorResult);
+    const accessibilityEvidence = this._collectAccessibilityEvidence(element);
     const attributesHash = this.hashAttributes(attributes);
 
     if (this.config.debugMode) {
@@ -6064,6 +6067,9 @@ class AIRInterceptor {
       console.log("Text excerpt:", textExcerpt);
       console.log("Context:", context);
       console.log("Attributes:", attributes);
+      console.log("Selector ambiguity:", selectorAmbiguity);
+      console.log("Bounded field context:", boundedFieldContext);
+      console.log("Accessibility evidence:", accessibilityEvidence);
       console.log("Attributes hash:", attributesHash);
       console.groupEnd();
     }
@@ -6077,8 +6083,196 @@ class AIRInterceptor {
       textExcerpt,
       context,
       attributes,
+      selectorAmbiguity,
+      boundedFieldContext,
+      accessibilityEvidence,
       attributesHash,
     };
+  }
+
+  _collectSelectorAmbiguity(element, selectorResult) {
+    const selector = selectorResult?.selector;
+    if (!selector || !element?.ownerDocument) return undefined;
+    const matches = this._queryElementsForSelector(selector, selectorResult?.priority, element.ownerDocument);
+    if (!Array.isArray(matches)) return undefined;
+
+    const visibleMatches = matches.filter((candidate) => this._isElementVisible(candidate));
+    const visiblePositionInMatches = visibleMatches.indexOf(element);
+    const positionInMatches = matches.indexOf(element);
+
+    // Unique if:
+    // 1. Sole visible match and we are it.
+    // 2. OR no visible matches exist and we are the sole match overall.
+    const isUnique = (visibleMatches.length === 1 && visiblePositionInMatches === 0) ||
+                     (visibleMatches.length === 0 && matches.length === 1 && positionInMatches === 0);
+
+    return {
+      originalSelector: selector,
+      originalPriority: selectorResult?.priority || undefined,
+      matchCount: matches.length,
+      visibleMatchCount: visibleMatches.length,
+      positionInMatches: visiblePositionInMatches >= 0 ? visiblePositionInMatches : null,
+      isUnique,
+      isAmbiguous: visibleMatches.length > 1,
+    };
+  }
+
+  _queryElementsForSelector(selector, priority, documentRef) {
+    if (!selector || !documentRef) return [];
+    try {
+      if (priority === "xpath" || selector.startsWith("//") || selector.startsWith("xpath=") || /^id\(".*"\)$/i.test(selector)) {
+        const expression = selector.startsWith("xpath=") ? selector.slice(6) : selector;
+        const result = documentRef.evaluate(
+          expression,
+          documentRef,
+          null,
+          XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+          null,
+        );
+        const nodes = [];
+        for (let i = 0; i < result.snapshotLength; i += 1) {
+          const node = result.snapshotItem(i);
+          if (node?.nodeType === Node.ELEMENT_NODE) nodes.push(node);
+        }
+        return nodes;
+      }
+
+      if (priority === "text" || selector.startsWith("text=")) {
+        const needle = this._normalizeFieldSemanticText(String(selector).replace(/^text=/, ""), 200);
+        if (!needle) return [];
+        return Array.from(documentRef.querySelectorAll("*")).filter((candidate) =>
+          this._normalizeFieldSemanticText(this.extractText(candidate) || "", 200) === needle,
+        );
+      }
+
+      return Array.from(documentRef.querySelectorAll(selector));
+    } catch {
+      return [];
+    }
+  }
+
+  _collectBoundedFieldContext(element, selectorResult) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return undefined;
+    const tagName = element.tagName.toLowerCase();
+    const role = element.getAttribute("role");
+
+    // Determine control kind
+    let targetControlKind = null;
+    if (["input", "textarea", "select"].includes(tagName)) {
+      targetControlKind = tagName;
+    } else if (role === "combobox") {
+      targetControlKind = "combobox";
+    } else if (
+      element.getAttribute("aria-haspopup") === "listbox" ||
+      element.classList.contains("oxd-select-text") ||
+      element.classList.contains("select-trigger")
+    ) {
+      targetControlKind = "custom-trigger";
+    }
+
+    if (!targetControlKind) return undefined;
+
+    const documentRef = element.ownerDocument || document;
+
+    // Label resolution
+    const associatedLabel = element.id ? documentRef.querySelector(`label[for="${safeCssEscape(element.id)}"]`) : null;
+    const wrappedLabel = element.closest("label");
+
+    let fieldLabelText = null;
+    let fieldRelation = null;
+
+    if (associatedLabel) {
+      fieldLabelText = this._normalizeFieldSemanticText(associatedLabel.textContent);
+      fieldRelation = "label-for";
+    } else if (wrappedLabel) {
+      fieldLabelText = this._normalizeFieldSemanticText(wrappedLabel.textContent);
+      fieldRelation = "wrapped-label";
+    } else {
+      // Try sibling label (common in grid/form layouts)
+      const parent = element.parentElement;
+      if (parent) {
+        // Look for any label in the same parent
+        const siblingLabel = parent.querySelector("label");
+        if (siblingLabel) {
+          fieldLabelText = this._normalizeFieldSemanticText(siblingLabel.textContent);
+          fieldRelation = "sibling-label";
+        }
+      }
+    }
+
+    // Container resolution
+    const container = element.closest(".oxd-input-group, .oxd-form-row, .oxd-grid-item, .field-row, fieldset, [role='group']");
+
+    let visibleControlCountInContainer = 1;
+    let competingControlCount = 0;
+    if (container) {
+      const controls = Array.from(container.querySelectorAll("input, textarea, select, [role='combobox'], [aria-haspopup='listbox'], .select-trigger, .oxd-select-text"));
+      const visibleControls = controls.filter((c) => this._isElementVisible(c));
+      visibleControlCountInContainer = visibleControls.length;
+      competingControlCount = visibleControlCountInContainer - 1;
+    }
+
+    return {
+      fieldLabelText,
+      fieldRelation,
+      targetControlKind,
+      containerSelector: container ? this.generateOptimalSelector(container).selector : null,
+      visibleControlCountInContainer,
+      competingControlCount,
+      isValid: !!fieldLabelText,
+    };
+  }
+
+  _collectAccessibilityEvidence(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return undefined;
+
+    const evidence = {
+      role: element.getAttribute("role") || null,
+      accessibleName: null,
+      accessibleNameSource: "none",
+    };
+
+    const documentRef = element.ownerDocument || document;
+
+    // 1. aria-label
+    const ariaLabel = element.getAttribute("aria-label");
+    if (ariaLabel) {
+      evidence.accessibleName = ariaLabel;
+      evidence.accessibleNameSource = "aria-label";
+      return evidence;
+    }
+
+    // 2. aria-labelledby
+    const ariaLabelledBy = element.getAttribute("aria-labelledby");
+    if (ariaLabelledBy) {
+      const ids = ariaLabelledBy.split(/\s+/).filter(Boolean);
+      evidence.labelledByIds = ids;
+      evidence.accessibleNameSource = "aria-labelledby";
+
+      if (ids.length > 0) {
+        const names = ids
+          .map((id) => documentRef.getElementById(id)?.textContent?.trim())
+          .filter(Boolean);
+        evidence.accessibleName = names.join(" ") || null;
+      }
+      return evidence;
+    }
+
+    // 3. label[for]
+    if (element.id) {
+      try {
+        const label = documentRef.querySelector(`label[for="${safeCssEscape(element.id)}"]`);
+        if (label) {
+          evidence.labelText = label.textContent?.trim() || null;
+          evidence.accessibleName = evidence.labelText;
+          evidence.accessibleNameSource = "label-for";
+          evidence.isNativeLabelAssociation = true;
+          return evidence;
+        }
+      } catch (e) {}
+    }
+
+    return evidence;
   }
 
   _isFieldLikeTag(tagName) {

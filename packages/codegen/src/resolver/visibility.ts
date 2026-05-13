@@ -45,7 +45,12 @@ export function isVisibleElement(el: Element): boolean {
   return true;
 }
 
-export function validateCSSCandidate(selector: string, snapshot: Document, step?: CodegenStep): CandidateValidation {
+export function validateCSSCandidate(
+  selector: string,
+  snapshot: Document,
+  step?: CodegenStep,
+  root: ParentNode = snapshot,
+): CandidateValidation {
   if (!isLikelyCssSelector(selector)) {
     return {
       totalMatchCount: 0,
@@ -57,7 +62,7 @@ export function validateCSSCandidate(selector: string, snapshot: Document, step?
 
   let matches: NodeListOf<Element>;
   try {
-    matches = snapshot.querySelectorAll(selector);
+    matches = root.querySelectorAll(selector);
   } catch {
     return {
       totalMatchCount: 0,
@@ -111,7 +116,12 @@ export function validateCSSCandidate(selector: string, snapshot: Document, step?
   };
 }
 
-export function validateTextCandidate(selector: string, snapshot: Document, step?: CodegenStep): CandidateValidation {
+export function validateTextCandidate(
+  selector: string,
+  snapshot: Document,
+  step?: CodegenStep,
+  root: ParentNode = snapshot,
+): CandidateValidation {
   const rawSelector = selector.trim();
   let scopeSelector: string | null = null;
   let textNeedle = '';
@@ -145,8 +155,8 @@ export function validateTextCandidate(selector: string, snapshot: Document, step
   let scopeMatches: Element[];
   try {
     scopeMatches = scopeSelector
-      ? Array.from(snapshot.querySelectorAll(scopeSelector))
-      : Array.from(snapshot.querySelectorAll('*'));
+      ? Array.from(root.querySelectorAll(scopeSelector))
+      : Array.from(root.querySelectorAll('*'));
   } catch {
     return {
       totalMatchCount: 0,

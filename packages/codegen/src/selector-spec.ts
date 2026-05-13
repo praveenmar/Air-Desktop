@@ -1,14 +1,24 @@
 import type {
+  BoundedFieldSelectorSpec,
+  BoundedFieldStructuredSelectorSpec,
   EquivalentRendering,
+  FlatSelectorEngine,
+  FlatSelectorSpec,
   LabelContextRenderStatus,
   LabelContextSelectorSpec,
-  SelectorEngine,
+  ScopedSelectorSpec,
   SelectorPriority,
   SelectorProofLevel,
   SelectorSource,
   SelectorSpec,
   TriggerContextSelectorSpec,
 } from './types';
+import { compilePlaywrightLocator } from './locator-compiler';
+import {
+  classifyBoundedFieldRenderStatus,
+  getBoundedFieldRenderingWarnings,
+  renderBoundedFieldLocator,
+} from './resolver/bounded-field/render-bounded-field';
 
 function escapeRegexLiteral(value: string): string {
   return value.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
@@ -25,7 +35,7 @@ function trimSelector(selector: string | null | undefined): string {
 export function inferSelectorEngine(
   selector: string | null | undefined,
   selectorPriority?: SelectorPriority | string,
-): SelectorEngine {
+): FlatSelectorEngine {
   const trimmed = trimSelector(selector);
 
   if (/^getByTestId\(/.test(trimmed)) return 'testid';
@@ -46,7 +56,7 @@ export function inferSelectorEngine(
 export function buildSelectorSpec(params: {
   selector: string;
   selectorPriority?: SelectorPriority | string;
-  engine?: SelectorEngine;
+  engine?: FlatSelectorEngine;
   source: SelectorSource;
   proofLevel: SelectorProofLevel;
   labelContext?: LabelContextSelectorSpec;
@@ -55,7 +65,7 @@ export function buildSelectorSpec(params: {
   confidence?: number;
   rejectReason?: string | null;
   warningCodes?: string[] | null;
-}): SelectorSpec {
+}): FlatSelectorSpec {
   const selector = trimSelector(params.selector);
   const warningCodes = Array.from(new Set((params.warningCodes ?? []).filter(Boolean)));
 
@@ -66,6 +76,60 @@ export function buildSelectorSpec(params: {
     proofLevel: params.proofLevel,
     labelContext: params.labelContext,
     triggerContext: params.triggerContext,
+    rank: typeof params.rank === 'number' ? params.rank : undefined,
+    confidence: typeof params.confidence === 'number' ? params.confidence : undefined,
+    rejectReason: params.rejectReason ?? undefined,
+    warningCodes: warningCodes.length > 0 ? warningCodes : undefined,
+  };
+}
+
+export function buildScopedSelectorSpec(params: {
+  selector: string;
+  scope: SelectorSpec;
+  target: SelectorSpec;
+  relation?: ScopedSelectorSpec['relation'];
+  source: SelectorSource;
+  proofLevel: SelectorProofLevel;
+  rank?: number;
+  confidence?: number;
+  rejectReason?: string | null;
+  warningCodes?: string[] | null;
+}): ScopedSelectorSpec {
+  const warningCodes = Array.from(new Set((params.warningCodes ?? []).filter(Boolean)));
+
+  return {
+    selector: trimSelector(params.selector),
+    engine: 'scoped',
+    scope: params.scope,
+    target: params.target,
+    relation: params.relation,
+    source: params.source,
+    proofLevel: params.proofLevel,
+    rank: typeof params.rank === 'number' ? params.rank : undefined,
+    confidence: typeof params.confidence === 'number' ? params.confidence : undefined,
+    rejectReason: params.rejectReason ?? undefined,
+    warningCodes: warningCodes.length > 0 ? warningCodes : undefined,
+  };
+}
+
+export function buildBoundedFieldSelectorSpec(params: {
+  selector: string;
+  boundedField: BoundedFieldSelectorSpec;
+  source: SelectorSource;
+  proofLevel: SelectorProofLevel;
+  rank?: number;
+  confidence?: number;
+  rejectReason?: string | null;
+  warningCodes?: string[] | null;
+}): BoundedFieldStructuredSelectorSpec {
+  const warningCodes = Array.from(new Set((params.warningCodes ?? []).filter(Boolean)));
+
+  return {
+    selector: trimSelector(params.selector),
+    engine: 'bounded-field',
+    boundedField: params.boundedField,
+    source: params.source,
+    proofLevel: params.proofLevel,
     rank: typeof params.rank === 'number' ? params.rank : undefined,
     confidence: typeof params.confidence === 'number' ? params.confidence : undefined,
     rejectReason: params.rejectReason ?? undefined,
@@ -166,6 +230,20 @@ function renderTriggerContextLocator(triggerContext: TriggerContextSelectorSpec)
   }
 }
 
+function renderScopedTargetSegment(spec: SelectorSpec | undefined): string | null {
+  if (!spec || spec.engine === 'scoped') return null;
+  if (spec.engine === 'label-context' || spec.engine === 'trigger-context' || spec.engine === 'bounded-field') return null;
+  const selector = trimSelector(spec.selector);
+  return selector ? JSON.stringify(selector) : null;
+}
+
+function renderScopedLocator(spec: ScopedSelectorSpec): string | null {
+  const scopeExpr = renderLocatorExpressionFromSelectorSpec(spec.scope);
+  const targetSegment = renderScopedTargetSegment(spec.target);
+  if (!scopeExpr || !targetSegment) return null;
+  return `${scopeExpr}.locator(${targetSegment})`;
+}
+
 export function isSelectorSpecExactProofLevel(
   proofLevel: SelectorProofLevel | undefined,
 ): boolean {
@@ -239,6 +317,29 @@ export function canRenderSelectorSpecConfidently(
   spec: SelectorSpec | undefined,
 ): boolean {
   if (!spec) return false;
+  if (spec.engine === 'scoped') {
+    return (
+      canRenderSelectorSpecConfidently(spec.scope) &&
+      canRenderSelectorSpecConfidently(spec.target) &&
+      !!renderScopedLocator(spec) &&
+      !(
+        spec.proofLevel === 'blocked' ||
+        spec.proofLevel === 'unvalidated' ||
+        spec.proofLevel === 'inferred_unproven'
+      )
+    );
+  }
+  if (
+    spec.engine === 'bounded-field' &&
+    spec.boundedField &&
+    (
+      classifyBoundedFieldRenderStatus(spec.boundedField) === 'proof-only-no-clean-render' ||
+      classifyBoundedFieldRenderStatus(spec.boundedField) === 'blocked-unsafe-render' ||
+      !renderBoundedFieldLocator(spec.boundedField)
+    )
+  ) {
+    return false;
+  }
   if (
     spec.engine === 'label-context' &&
     spec.labelContext &&
@@ -268,11 +369,15 @@ export function getSelectorSpecRenderingWarnings(
   if (!spec) return [];
 
   const warnings = new Set(spec.warningCodes ?? []);
-  if (spec.labelContext?.warningCodes) {
-    for (const code of spec.labelContext.warningCodes) warnings.add(code);
+  const flatSpec = spec.engine !== 'scoped' && spec.engine !== 'bounded-field' ? spec as FlatSelectorSpec : null;
+  if (flatSpec?.labelContext?.warningCodes) {
+    for (const code of flatSpec.labelContext.warningCodes) warnings.add(code);
   }
-  if (spec.triggerContext?.warningCodes) {
-    for (const code of spec.triggerContext.warningCodes) warnings.add(code);
+  if (flatSpec?.triggerContext?.warningCodes) {
+    for (const code of flatSpec.triggerContext.warningCodes) warnings.add(code);
+  }
+  if (spec.engine === 'bounded-field' && spec.boundedField) {
+    for (const code of getBoundedFieldRenderingWarnings(spec.boundedField)) warnings.add(code);
   }
   switch (spec.proofLevel) {
     case 'recorded':
@@ -305,7 +410,7 @@ export function getSelectorSpecRenderingWarnings(
     if (renderStatus === 'proof-only-no-clean-render') warnings.add('custom-control-trigger-proof-only');
     if (renderStatus === 'blocked-unsafe-render') warnings.add('custom-control-trigger-blocked-unsafe-render');
   }
-  return Array.from(warnings);
+  return Array.from(warnings) as string[];
 }
 
 export function pickPreferredEquivalentRendering(
@@ -319,6 +424,12 @@ export function renderLocatorExpressionFromSelectorSpec(
   spec: SelectorSpec | undefined,
 ): string | null {
   if (!spec) return null;
+  if (spec.engine === 'scoped') {
+    return renderScopedLocator(spec);
+  }
+  if (spec.engine === 'bounded-field' && spec.boundedField) {
+    return renderBoundedFieldLocator(spec.boundedField);
+  }
   if (spec.engine === 'label-context' && spec.labelContext) {
     return renderLabelContextLocator(spec.labelContext);
   }

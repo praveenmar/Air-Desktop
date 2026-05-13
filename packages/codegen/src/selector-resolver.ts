@@ -1,7 +1,9 @@
 import type {
+  BoundedFieldSelectorSpec,
   CodegenSession,
   CodegenStep,
   EquivalentRendering,
+  FlatSelectorEngine,
   LabelContextRenderStatus,
   LabelContextSelectorSpec,
   TriggerContextSelectorSpec,
@@ -76,8 +78,19 @@ import {
   validateCSSCandidate,
   validateTextCandidate,
 } from './resolver/visibility';
+import { validateRawCandidate } from './resolver/selector-spec-validator';
+import {
+  findExactVisibleLabelLikeDescendants,
+  findTightFieldContainer,
+  findTightTriggerContainer,
+  getVisibleInputLikeControls,
+  getVisibleTriggerLikeControls,
+  isGenericContainerSelector,
+  normalizeStructuredSelectorText,
+} from './resolver/structured-selector-utils';
 import { serializeSnapshotExcerpt } from './resolver/excerpt-builder';
 import { buildSelectorSpec } from './selector-spec';
+import { buildBoundedFieldSelectorSpec } from './selector-spec';
 import {
   classifySelectorCategory,
   mapSelectorProofSource,
@@ -85,6 +98,12 @@ import {
   stabilityBaseScoreForCategory,
   summarizeSelectorEvaluation,
 } from './selector-evaluation';
+import {
+  buildBoundedFieldCandidates,
+  buildBoundedFieldTriggerCandidates,
+  diagnoseBoundedFieldInputCandidate,
+  isWeakBoundedFieldInputCandidate,
+} from './resolver/bounded-field';
 
 export type {
   CandidateValidation,
@@ -105,6 +124,7 @@ export type {
   SnapshotCache,
 } from './resolver/types';
 export { isVisibleElement, validateCSSCandidate, validateTextCandidate } from './resolver/visibility';
+export { validateSelectorSpec, validateScopedSelectorSpec } from './resolver/selector-spec-validator';
 
 const SELECTOR_RANK_MAP: Record<string, number> = {
   'data-testid': 1,
@@ -505,7 +525,7 @@ function getSelectorRank(
 }
 
 function normalizeLabelContextText(value: string | null | undefined): string {
-  return normalizeTextForMatch(typeof value === 'string' ? value : '');
+  return normalizeStructuredSelectorText(value);
 }
 
 function getFieldLabelText(step: CodegenStep): string | null {
@@ -540,7 +560,7 @@ function hasStrongDirectSelectorEvidence(step: CodegenStep): boolean {
 }
 
 function isStructuredContextSource(source: RawCandidate['source']): boolean {
-  return source === 'label-context' || source === 'trigger-context';
+  return source === 'label-context' || source === 'trigger-context' || source === 'bounded-field';
 }
 
 function buildTriggerResolutionStep(step: CodegenStep): CodegenStep {
@@ -600,103 +620,6 @@ function isWeakLabelContextFallbackCandidate(
   if (snapshotSelection?.labelStructureEvidence !== true) return false;
   const priority = step.selectorPriority ?? 'unknown';
   return priority === 'class' || priority === 'path' || priority === 'unknown' || priority === 'other';
-}
-
-function getVisibleInputLikeControls(root: ParentNode): Element[] {
-  try {
-    return Array.from(
-      root.querySelectorAll(
-        'input,textarea,select,[role="textbox"],[role="combobox"],[role="searchbox"],[role="spinbutton"],[contenteditable="true"],[aria-haspopup="listbox"],[aria-haspopup="combobox"]',
-      ),
-    ).filter(isVisibleElement);
-  } catch {
-    return [];
-  }
-}
-
-function getVisibleTriggerLikeControls(root: ParentNode): Element[] {
-  try {
-    return Array.from(
-      root.querySelectorAll(
-        'select,[role="combobox"],[role="button"][aria-haspopup],[aria-haspopup="listbox"],[aria-haspopup="combobox"],button[aria-haspopup],input[role="combobox"],[contenteditable="true"]',
-      ),
-    ).filter(isVisibleElement);
-  } catch {
-    return [];
-  }
-}
-
-function findExactVisibleLabelLikeDescendants(root: Element, labelText: string): Element[] {
-  const normalizedLabel = normalizeLabelContextText(labelText);
-  try {
-    const candidates = Array.from(root.querySelectorAll('label,legend,span,div,p')).filter(element =>
-      isVisibleElement(element) &&
-      normalizeLabelContextText(element.textContent || '') === normalizedLabel,
-    );
-    return candidates.filter(element =>
-      !candidates.some(other => other !== element && element.contains(other)),
-    );
-  } catch {
-    return [];
-  }
-}
-
-function findTightFieldContainer(label: Element, target: Element): { container: Element | null; blockedReason?: string } {
-  let current: Element | null = label;
-  let depth = 0;
-  while (current && depth < 5) {
-    const tagName = current.tagName?.toLowerCase() || '';
-    if (['body', 'html', 'main', 'section', 'article', 'table', 'tbody', 'thead', 'form'].includes(tagName)) {
-      break;
-    }
-
-    const controls = getVisibleInputLikeControls(current);
-    if (controls.length === 1 && controls[0] === target) {
-      return { container: current };
-    }
-
-    if (controls.length > 1 && controls.includes(target)) {
-      return { container: null, blockedReason: 'multiple_input_like_targets' };
-    }
-
-    current = current.parentElement;
-    depth += 1;
-  }
-
-  return { container: null, blockedReason: 'broad_container_only' };
-}
-
-function findTightTriggerContainer(
-  target: Element,
-  labelText: string,
-): { container: Element | null; labelElement?: Element | null; blockedReason?: string } {
-  let current: Element | null = target;
-  let depth = 0;
-  while (current && depth < 5) {
-    const tagName = current.tagName?.toLowerCase() || '';
-    if (['body', 'html', 'main', 'section', 'article', 'table', 'tbody', 'thead', 'form'].includes(tagName)) {
-      break;
-    }
-
-    const labels = findExactVisibleLabelLikeDescendants(current, labelText);
-    if (labels.length > 1) {
-      return { container: null, labelElement: null, blockedReason: 'duplicate_label_text' };
-    }
-
-    const controls = getVisibleTriggerLikeControls(current);
-    if (labels.length === 1 && controls.length === 1 && controls[0] === target) {
-      return { container: current, labelElement: labels[0] };
-    }
-
-    if (labels.length === 1 && controls.length > 1 && controls.includes(target)) {
-      return { container: null, labelElement: labels[0], blockedReason: 'multiple_input_like_targets' };
-    }
-
-    current = current.parentElement;
-    depth += 1;
-  }
-
-  return { container: null, labelElement: null, blockedReason: 'broad_container_only' };
 }
 
 function findVisibleTargetForOriginalSelectorWithReason(
@@ -1059,169 +982,19 @@ function buildTriggerContextCandidates(
   }];
 }
 
-function validateLabelContextCandidate(
-  candidate: RawCandidate,
-  snapshot: Document,
-  step?: CodegenStep,
-): CandidateValidation {
-  const labelContext = candidate.labelContext;
-  if (!labelContext) {
-    return {
-      totalMatchCount: 0,
-      visibleMatchCount: 0,
-      effectiveMatchCount: 0,
-      reason: 'invalid-selector',
-      confidenceScore: 0,
-    };
-  }
-
-  const matches: Element[] = [];
-  if (labelContext.association === 'wrapped-label') {
-    try {
-      const labels = Array.from(snapshot.querySelectorAll('label')).filter(label =>
-        normalizeLabelContextText(label.textContent || '') === normalizeLabelContextText(labelContext.labelText),
-      );
-      for (const label of labels) {
-        const controls = getVisibleInputLikeControls(label).filter(control =>
-          control.tagName?.toLowerCase() === labelContext.targetTag,
-        );
-        if (controls.length === 1) {
-          matches.push(controls[0]);
-        }
-      }
-    } catch {
-      return {
-        totalMatchCount: 0,
-        visibleMatchCount: 0,
-        effectiveMatchCount: 0,
-        reason: 'invalid-selector',
-        confidenceScore: 0,
-      };
-    }
-  } else if (labelContext.association === 'bounded-field' && labelContext.containerSelector) {
-    try {
-      const containers = Array.from(snapshot.querySelectorAll(labelContext.containerSelector)).filter(isVisibleElement);
-      for (const container of containers) {
-        const labels = Array.from(container.querySelectorAll('label')).filter(label =>
-          normalizeLabelContextText(label.textContent || '') === normalizeLabelContextText(labelContext.labelText),
-        );
-        if (labels.length !== 1) continue;
-        const controls = getVisibleInputLikeControls(container).filter(control =>
-          control.tagName?.toLowerCase() === labelContext.targetTag,
-        );
-        if (controls.length === 1) {
-          matches.push(controls[0]);
-        }
-      }
-    } catch {
-      return {
-        totalMatchCount: 0,
-        visibleMatchCount: 0,
-        effectiveMatchCount: 0,
-        reason: 'invalid-selector',
-        confidenceScore: 0,
-      };
-    }
-  } else {
-    return validateCSSCandidate(candidate.selector, snapshot, step);
-  }
-
-  const visibleMatches = matches.filter(isVisibleElement);
-  const resolvedElement = visibleMatches.length === 1 ? visibleMatches[0] : null;
-  return {
-    totalMatchCount: matches.length,
-    visibleMatchCount: visibleMatches.length,
-    effectiveMatchCount: visibleMatches.length === 1 ? 1 : visibleMatches.length > 1 ? 2 : 0,
-    reason:
-      visibleMatches.length === 1
-        ? 'unique-visible'
-        : visibleMatches.length > 1
-          ? 'non-unique'
-          : 'no-visible-match',
-    confidenceScore: visibleMatches.length === 1 ? 0.88 : visibleMatches.length > 1 ? 0.3 : 0.05,
-    resolvedElement,
-  };
-}
-
-function validateTriggerContextCandidate(
-  candidate: RawCandidate,
-  snapshot: Document,
-): CandidateValidation {
-  const triggerContext = candidate.triggerContext;
-  if (!triggerContext || triggerContext.association !== 'bounded-field' || !triggerContext.containerSelector) {
-    return {
-      totalMatchCount: 0,
-      visibleMatchCount: 0,
-      effectiveMatchCount: 0,
-      reason: 'invalid-selector',
-      confidenceScore: 0,
-    };
-  }
-
-  const matches: Element[] = [];
-  try {
-    const containers = Array.from(snapshot.querySelectorAll(triggerContext.containerSelector)).filter(isVisibleElement);
-    for (const container of containers) {
-      const labelMatches = findExactVisibleLabelLikeDescendants(container, triggerContext.labelText)
-        .filter(element => (element.tagName?.toLowerCase() || '') === (triggerContext.labelElementTag || 'label'));
-      if (labelMatches.length !== 1) continue;
-      const controls = getVisibleTriggerLikeControls(container).filter(control => {
-        const childSelector = triggerContext.cleanChildSelector || triggerContext.triggerSelector;
-        if (!childSelector) return false;
-        try {
-          return Array.from(container.querySelectorAll(childSelector)).includes(control);
-        } catch {
-          return false;
-        }
-      });
-      if (controls.length === 1) {
-        matches.push(controls[0]);
-      }
-    }
-  } catch {
-    return {
-      totalMatchCount: 0,
-      visibleMatchCount: 0,
-      effectiveMatchCount: 0,
-      reason: 'invalid-selector',
-      confidenceScore: 0,
-    };
-  }
-
-  const visibleMatches = matches.filter(isVisibleElement);
-  const resolvedElement = visibleMatches.length === 1 ? visibleMatches[0] : null;
-  return {
-    totalMatchCount: matches.length,
-    visibleMatchCount: visibleMatches.length,
-    effectiveMatchCount: visibleMatches.length === 1 ? 1 : visibleMatches.length > 1 ? 2 : 0,
-    reason:
-      visibleMatches.length === 1
-        ? 'unique-visible'
-        : visibleMatches.length > 1
-          ? 'non-unique'
-          : 'no-visible-match',
-    confidenceScore: visibleMatches.length === 1 ? 0.88 : visibleMatches.length > 1 ? 0.3 : 0.05,
-    resolvedElement,
-  };
-}
-
 function validateCandidate(
   selectorOrCandidate: string | RawCandidate,
   snapshot: Document,
   step?: CodegenStep,
 ): CandidateValidation {
-  const selector = typeof selectorOrCandidate === 'string'
-    ? selectorOrCandidate
-    : selectorOrCandidate.selector;
-  if (typeof selectorOrCandidate !== 'string' && selectorOrCandidate.engine === 'label-context') {
-    return validateLabelContextCandidate(selectorOrCandidate, snapshot, step);
+  if (typeof selectorOrCandidate === 'string') {
+    const selector = selectorOrCandidate;
+    return isTextSelector(selector)
+      ? validateTextCandidate(selector, snapshot, step)
+      : validateCSSCandidate(selector, snapshot, step);
   }
-  if (typeof selectorOrCandidate !== 'string' && selectorOrCandidate.engine === 'trigger-context') {
-    return validateTriggerContextCandidate(selectorOrCandidate, snapshot);
-  }
-  return isTextSelector(selector)
-    ? validateTextCandidate(selector, snapshot, step)
-    : validateCSSCandidate(selector, snapshot, step);
+
+  return validateRawCandidate(selectorOrCandidate, snapshot, step);
 }
 
 function hasStrongAttributeSignal(selector: string): boolean {
@@ -1256,7 +1029,16 @@ function isKnownShellSelector(selector?: string | null): boolean {
 
 function shouldBlockGenericShellOverride(originalSelector?: string | null, candidateSelector?: string | null): boolean {
   if (!candidateSelector || candidateSelector === originalSelector) return false;
-  return isKnownShellSelector(candidateSelector);
+  if (isKnownShellSelector(candidateSelector)) return true;
+
+  // Block generic parent-child overrides like "div input"
+  const parts = candidateSelector.split(/\s+|>/);
+  if (parts.length > 1) {
+    const parent = parts[0].trim();
+    if (isGenericContainerSelector(parent)) return true;
+  }
+
+  return false;
 }
 
 function shouldTrustOriginalOnSnapshotMiss(
@@ -1308,6 +1090,7 @@ export function shouldKeepOriginal(
   snapshotSelection?: SnapshotSelectionProvenance,
 ): boolean {
   if (!step.selector) return false;
+  if (isWeakBoundedFieldInputCandidate(step)) return false;
   if (isWeakLabelContextFallbackCandidate(step, snapshotSelection)) return false;
   const validation = validateCandidate(step.selector, snapshot, step);
   if (validation.reason !== 'unique-visible') return false;
@@ -1334,7 +1117,7 @@ function pushCandidate(
   selector: string | null | undefined,
   source: RawCandidate['source'],
   rank: number,
-  extras: Partial<Pick<RawCandidate, 'engine' | 'categoryOverride' | 'labelContext'>> = {},
+  extras: Partial<Pick<RawCandidate, 'engine' | 'categoryOverride' | 'boundedField' | 'labelContext' | 'triggerContext'>> = {},
 ): void {
   const normalized = (selector || '').trim();
   if (!normalized) return;
@@ -1353,7 +1136,6 @@ export function generateCandidates(
   const attrs = inferStepSignalAttributes(step);
   const seedElements = findSeedElements(step, snapshot);
   let textExcerpt = extractTextExcerpt(step);
-
   pushCandidate(
     candidates,
     seen,
@@ -1371,6 +1153,21 @@ export function generateCandidates(
   }
 
   const tagName = attrs.tagName || step.fingerprint?.tagName?.toLowerCase();
+
+  for (const candidate of buildBoundedFieldCandidates({ step, snapshot, snapshotSelection })) {
+    pushCandidate(
+      candidates,
+      seen,
+      candidate.selector,
+      candidate.source,
+      candidate.rank,
+      {
+        engine: candidate.engine,
+        categoryOverride: candidate.categoryOverride,
+        boundedField: candidate.boundedField,
+      },
+    );
+  }
 
   for (const candidate of buildLabelContextCandidates(step, snapshot, snapshotSelection)) {
     pushCandidate(
@@ -1946,7 +1743,8 @@ function evaluateSemanticReject(
     };
   }
 
-  const element = candidate.validation.resolvedElement ?? getCandidateElement(snapshot, candidate.candidate.selector);
+  const validation = candidate.validation;
+  const element = validation.resolvedElement ?? getCandidateElement(snapshot, candidate.candidate.selector);
   if (!element) {
     return {
       score: 0,
@@ -2044,12 +1842,21 @@ function sortPreferredRenderings(renderings: EquivalentRendering[]): EquivalentR
 }
 
 function buildPreferredEquivalentRenderings(params: {
-  selectorSpec: ReturnType<typeof buildSelectorSpec>;
+  selectorSpec: SelectorSpec;
   category: SelectorCategory;
   validation: CandidateValidation;
   resolvedElement?: Element | null;
 }): EquivalentRendering[] {
   if (params.validation.effectiveMatchCount !== 1 || params.validation.reason !== 'unique-visible') {
+    return [];
+  }
+
+  if (
+    params.selectorSpec.engine === 'scoped' ||
+    params.selectorSpec.engine === 'bounded-field' ||
+    params.selectorSpec.engine === 'label-context' ||
+    params.selectorSpec.engine === 'trigger-context'
+  ) {
     return [];
   }
 
@@ -2140,20 +1947,41 @@ function buildCandidateSelectorEvaluation(params: {
 }): SelectorEvaluation {
   const category = params.candidate.categoryOverride
     ?? classifySelectorCategory(params.candidate.selector, params.source ?? params.candidate.source);
-  const proofLevel = params.proofLevel ?? (params.validation.effectiveMatchCount === 1 ? 'snapshot_validated' : 'unvalidated');
-  const selectorSpec = buildSelectorSpec({
-    selector: params.candidate.selector,
-    engine: params.candidate.engine,
-    source: params.source ?? 'resolver',
-    proofLevel,
-    labelContext: params.candidate.labelContext,
-    triggerContext: params.candidate.triggerContext,
-    rank: params.candidate.rank,
-    confidence: params.validation.confidenceScore ?? params.baselineScore,
-    warningCodes: params.warningCodes,
-    rejectReason: params.semanticRejectReason ?? undefined,
-  });
-  const proofScore = proofScoreForValidation(params.validation);
+  const proofLevel = params.proofLevel ?? (
+    params.candidate.engine === 'bounded-field' &&
+    params.candidate.boundedField?.source === 'recorded-bounded-field' &&
+    !params.validation.resolvedElement &&
+    params.validation.effectiveMatchCount === 1
+      ? 'recorded'
+      : (params.validation.effectiveMatchCount === 1 ? 'snapshot_validated' : 'unvalidated')
+  );
+  const selectorSpec = params.candidate.engine === 'bounded-field' && params.candidate.boundedField
+    ? buildBoundedFieldSelectorSpec({
+        selector: params.candidate.selector,
+        boundedField: params.candidate.boundedField,
+        source: params.source ?? 'resolver',
+        proofLevel,
+        rank: params.candidate.rank,
+        confidence: params.validation.confidenceScore ?? params.baselineScore,
+        warningCodes: params.warningCodes,
+        rejectReason: params.semanticRejectReason ?? undefined,
+      })
+    : buildSelectorSpec({
+        selector: params.candidate.selector,
+        engine: params.candidate.engine as FlatSelectorEngine | undefined,
+        source: params.source ?? 'resolver',
+        proofLevel,
+        labelContext: params.candidate.labelContext,
+        triggerContext: params.candidate.triggerContext,
+        rank: params.candidate.rank,
+        confidence: params.validation.confidenceScore ?? params.baselineScore,
+        warningCodes: params.warningCodes,
+        rejectReason: params.semanticRejectReason ?? undefined,
+      });
+  let proofScore = proofScoreForValidation(params.validation);
+  if (proofLevel === 'recorded') {
+    proofScore = Math.max(proofScore, 1.0);
+  }
   const brittleness = computeBrittlenessPenalty(params.candidate.selector, category);
   const entropyPenalty = Math.max(0, -(params.idEntropyScore ?? 0)) + Math.max(0, -(params.classEntropyScore ?? 0));
   const stabilityScore = Math.max(0, Math.min(1, stabilityBaseScoreForCategory(category) - (brittleness.penalty * 0.45) - (entropyPenalty * 0.35)));
@@ -2342,7 +2170,8 @@ function buildResolvedSelectorSpec(params: {
   selector: string;
   source: 'interceptor' | 'resolver' | 'llm';
   proofLevel: 'recorded' | 'snapshot_validated' | 'semantic_validated' | 'blocked' | 'unvalidated';
-  engine?: 'css' | 'xpath' | 'text' | 'testid' | 'role' | 'label' | 'label-context' | 'trigger-context' | 'placeholder' | 'playwright';
+  engine?: 'css' | 'xpath' | 'text' | 'testid' | 'role' | 'label' | 'label-context' | 'trigger-context' | 'bounded-field' | 'placeholder' | 'playwright' | 'playwright-locator';
+  boundedField?: BoundedFieldSelectorSpec;
   labelContext?: LabelContextSelectorSpec;
   triggerContext?: TriggerContextSelectorSpec;
   rank?: number;
@@ -2350,10 +2179,23 @@ function buildResolvedSelectorSpec(params: {
   rejectReason?: string | null;
   warningCodes?: string[];
 }) {
+  if (params.engine === 'bounded-field' && params.boundedField) {
+    return buildBoundedFieldSelectorSpec({
+      selector: params.selector,
+      boundedField: params.boundedField,
+      source: params.source,
+      proofLevel: params.proofLevel,
+      rank: params.rank,
+      confidence: params.confidence,
+      rejectReason: params.rejectReason,
+      warningCodes: params.warningCodes,
+    });
+  }
+
   return buildSelectorSpec({
     selector: params.selector,
     selectorPriority: params.source === 'interceptor' ? params.step.selectorPriority : undefined,
-    engine: params.engine,
+    engine: params.engine as FlatSelectorEngine | undefined,
     source: params.source,
     proofLevel: params.proofLevel,
     labelContext: params.labelContext,
@@ -2374,20 +2216,12 @@ function buildResolutionSelectorEvaluation(params: {
   validation?: CandidateValidation;
 }): SelectorEvaluation {
   if (params.candidateEvaluation) {
+    const mergedSelectorSpec = {
+      ...params.candidateEvaluation.selectorSpec,
+      ...params.selectorSpec,
+    } as SelectorSpec;
     return summarizeSelectorEvaluation(
-      {
-        ...params.candidateEvaluation.selectorSpec,
-        selector: params.selectorSpec.selector,
-        engine: params.selectorSpec.engine,
-        source: params.selectorSpec.source,
-        proofLevel: params.selectorSpec.proofLevel,
-        labelContext: params.selectorSpec.labelContext,
-        triggerContext: params.selectorSpec.triggerContext,
-        rank: params.selectorSpec.rank,
-        confidence: params.selectorSpec.confidence,
-        rejectReason: params.selectorSpec.rejectReason,
-        warningCodes: params.selectorSpec.warningCodes,
-      },
+      mergedSelectorSpec,
       {
         category: params.candidateEvaluation.category,
         validation: params.candidateEvaluation.validation,
@@ -2412,6 +2246,8 @@ function buildResolutionSelectorEvaluation(params: {
 
   const category = params.selectorSpec.engine === 'label-context' || params.selectorSpec.engine === 'trigger-context'
     ? 'label-context'
+    : params.selectorSpec.engine === 'bounded-field'
+      ? 'bounded-field'
     : classifySelectorCategory(params.selectorSpec.selector, params.selectorSpec.source);
   const proofSource = mapSelectorProofSource({
     source: params.selectorSpec.source,
@@ -2523,7 +2359,8 @@ function resolveTriggerContextForStep(
   }
 
   const candidates = buildTriggerContextCandidates(step, snapshot, snapshotSelection);
-  const candidate = candidates[0];
+  const boundedCandidates = buildBoundedFieldTriggerCandidates({ step, snapshot, snapshotSelection });
+  const candidate = boundedCandidates[0] ?? candidates[0];
   if (!candidate) {
     warningCodes.add('custom-control-trigger-target-binding-ambiguous');
     return {
@@ -2535,7 +2372,15 @@ function resolveTriggerContextForStep(
   }
 
   const validation = validateCandidate(candidate, snapshot, buildTriggerResolutionStep(step));
-  if (validation.reason !== 'unique-visible' || validation.effectiveMatchCount !== 1 || !candidate.triggerContext) {
+  const boundedField = candidate.boundedField;
+  const isRecordedValid = (boundedField && boundedField.source === 'recorded-bounded-field') || 
+                          ((candidate as any).source === 'interceptor' && candidate.triggerContext) ||
+                          ((candidate as any).source === 'trigger-context');
+  if (
+    (validation.reason !== 'unique-visible' && !isRecordedValid) ||
+    validation.effectiveMatchCount !== 1 ||
+    (!candidate.triggerContext && !boundedField)
+  ) {
     warningCodes.add('custom-control-trigger-target-binding-ambiguous');
     return {
       triggerContextLabel: labelText,
@@ -2548,7 +2393,9 @@ function resolveTriggerContextForStep(
     };
   }
 
-  const renderStatus = candidate.triggerContext.renderStatus ?? 'proof-only-no-clean-render';
+  const renderStatus = candidate.triggerContext?.renderStatus
+    ?? boundedField?.renderStatus
+    ?? 'proof-only-no-clean-render';
   if (renderStatus === 'proven-structural-fallback') {
     warningCodes.add('custom-control-trigger-structural-fallback');
   }
@@ -2561,14 +2408,25 @@ function resolveTriggerContextForStep(
     selector: candidate.selector,
     source: 'resolver',
     proofLevel: 'semantic_validated',
-    engine: 'trigger-context',
-    triggerContext: {
-      ...candidate.triggerContext,
-      warningCodes: Array.from(new Set([
-        ...(candidate.triggerContext.warningCodes ?? []),
-        ...Array.from(warningCodes),
-      ])),
-    },
+    engine: candidate.engine === 'bounded-field' ? 'bounded-field' : 'trigger-context',
+    boundedField: boundedField
+      ? {
+          ...boundedField,
+          warningCodes: Array.from(new Set([
+            ...(boundedField.warningCodes ?? []),
+            ...Array.from(warningCodes),
+          ])),
+        }
+      : undefined,
+    triggerContext: candidate.triggerContext
+      ? {
+          ...candidate.triggerContext,
+          warningCodes: Array.from(new Set([
+            ...(candidate.triggerContext.warningCodes ?? []),
+            ...Array.from(warningCodes),
+          ])),
+        }
+      : undefined,
     rank: candidate.rank,
     confidence: validation.confidenceScore ?? 0.88,
     warningCodes: Array.from(warningCodes),
@@ -2577,14 +2435,15 @@ function resolveTriggerContextForStep(
   return {
     triggerResolvedSelector: candidate.selector,
     triggerResolvedSelectorSpec: resolvedSelectorSpec,
-    triggerContextLabel: labelText,
+    triggerContextLabel: boundedField?.labelText ?? labelText,
     triggerContextRenderStatus: renderStatus,
-    triggerContextRenderReason: candidate.triggerContext.renderReason ?? null,
-    triggerBoundedContainerSummary: candidate.triggerContext.boundedContainerSummary ?? null,
-    triggerStructuralFallbackLocator: candidate.triggerContext.structuralFallbackLocator ?? null,
+    triggerContextRenderReason: candidate.triggerContext?.renderReason ?? boundedField?.renderReason ?? null,
+    triggerBoundedContainerSummary: candidate.triggerContext?.boundedContainerSummary ?? boundedField?.boundedContainerSummary ?? null,
+    triggerStructuralFallbackLocator: candidate.triggerContext?.structuralFallbackLocator ?? boundedField?.structuralFallbackLocator ?? null,
     triggerWarningCodes: Array.from(new Set([
       ...Array.from(warningCodes),
-      ...(candidate.triggerContext.warningCodes ?? []),
+      ...(candidate.triggerContext?.warningCodes ?? []),
+      ...(boundedField?.warningCodes ?? []),
     ])),
   };
 }
@@ -2963,6 +2822,9 @@ function deriveDeterministicResolution(
 
   if (!winner) {
     const bestAvailableCandidate = lowScoreFallbackCandidates[0] ?? uniqueCandidates[0];
+    const boundedFieldRejectReason = isWeakBoundedFieldInputCandidate(step)
+      ? diagnoseBoundedFieldInputCandidate({ step, snapshot, snapshotSelection }) ?? null
+      : null;
     if (rejectedCandidates.length > 0) {
       const blockedEvaluation = semanticEvaluations.find(evaluation => evaluation.semantic.rejectReason !== null);
       baseMetadata.warningCodes.push('deterministic-semantic-reject');
@@ -2985,6 +2847,10 @@ function deriveDeterministicResolution(
     }
     if (uniqueCandidates.length === 0) {
       baseMetadata.warningCodes.push('no-unique-candidate');
+      if (boundedFieldRejectReason) {
+        baseMetadata.warningCodes.push(boundedFieldRejectReason);
+        baseMetadata.rejectReason = baseMetadata.rejectReason ?? boundedFieldRejectReason;
+      }
     } else if (rejectedCandidates.length === 0) {
       baseMetadata.warningCodes.push('deterministic-below-threshold');
       if (lowScoreFallback) {
@@ -3047,12 +2913,15 @@ function deriveDeterministicResolution(
     source: 'resolver',
     proofLevel: 'semantic_validated',
     engine: winner.candidate.candidate.engine,
+    boundedField: winner.candidate.candidate.boundedField,
     labelContext: winner.candidate.candidate.labelContext,
+    triggerContext: winner.candidate.candidate.triggerContext,
     rank: winner.candidate.candidate.rank,
     confidence: winner.candidate.validation.confidenceScore ?? winner.candidate.score,
     warningCodes: [
       ...baseMetadata.warningCodes,
       'deterministic-override',
+      ...(winner.candidate.candidate.source === 'bounded-field' ? ['bounded-field-recovery'] : []),
       ...(winner.candidate.candidate.source === 'label-context' ? ['label-context-recovery'] : []),
       ...(winner.candidate.candidate.source === 'trigger-context' ? ['custom-control-trigger-bounded-context-recovery'] : []),
       ...(winner.candidate.validation.ambiguityReason ? ['deterministic-dom-order-tiebreaker'] : []),
@@ -3078,6 +2947,7 @@ function deriveDeterministicResolution(
     warningCodes: [
       ...baseMetadata.warningCodes,
       'deterministic-override',
+      ...(winner.candidate.candidate.source === 'bounded-field' ? ['bounded-field-recovery'] : []),
       ...(winner.candidate.candidate.source === 'label-context' ? ['label-context-recovery'] : []),
       ...(winner.candidate.candidate.source === 'trigger-context' ? ['custom-control-trigger-bounded-context-recovery'] : []),
       ...(winner.candidate.validation.ambiguityReason ? ['deterministic-dom-order-tiebreaker'] : []),

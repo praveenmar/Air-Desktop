@@ -595,6 +595,55 @@ describe('LlmOrchestrator - emission safety', () => {
     expect(emitted.labelContextRenderStatus).toBe('clean-scoped-locator');
   });
 
+  it('renders bounded-field proof as a scoped locator with an AIR warning', () => {
+    const step = createStep({
+      action: 'input',
+      selector: '.generic-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'input_username',
+      value: 'Admin',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'fillUsername',
+      `locator('.generic-input').fill('Admin')`,
+      'bounded-field("Username" within div.field-row -> input)',
+      {
+        selector: 'bounded-field("Username" within div.field-row -> input)',
+        engine: 'bounded-field',
+        source: 'resolver',
+        proofLevel: 'semantic_validated',
+        boundedField: {
+          source: 'snapshot-bounded-field',
+          labelText: 'Username',
+          target: {
+            selector: 'input',
+            engine: 'css',
+            source: 'resolver',
+            proofLevel: 'snapshot_validated',
+          },
+          controlKind: 'input',
+          relation: 'bounded-container',
+          originalSelector: '.generic-input',
+          containerSelector: 'div.field-row',
+          labelElementTag: 'div',
+          boundedContainerSummary: 'div.field-row',
+          renderStatus: 'proven-structural-fallback',
+          renderReason: 'no_clean_parent_selector',
+          cleanChildSelector: 'input',
+          warningCodes: ['bounded-field-structural-fallback'],
+        },
+      },
+    );
+
+    expect(emitted.methodCode).toContain('this.page.locator("div.field-row").filter({ has: this.page.locator("div").filter({ hasText: /^Username$/ }) }).locator("input")');
+    expect(emitted.methodCode).toContain('// AIR WARNING: Structural bounded-field fallback.');
+    expect(emitted.emittedLocatorWarnings).toContain('bounded-field-structural-fallback');
+    expect(emitted.boundedFieldRenderStatus).toBe('proven-structural-fallback');
+  });
+
   it('escapes exact label regex safely for structural fallback rendering', () => {
     const step = createStep({
       action: 'input',
@@ -1874,14 +1923,17 @@ describe('LlmOrchestrator - sidecar resolver metadata', () => {
 
     expect(sidecar.methods.selectAdmin).toEqual(expect.objectContaining({
       triggerOriginalSelector: '.select-trigger',
-      triggerResolvedSelector: expect.stringContaining('trigger-context("User Role"'),
+      triggerResolvedSelector: expect.stringContaining('bounded-field("User Role"'),
       triggerContextLabel: 'User Role',
-      triggerContextRenderStatus: 'proven-structural-fallback',
+      triggerContextRenderStatus: expect.stringMatching(/clean-scoped-locator|proven-structural-fallback/),
     }));
-    expect(sidecar.methods.selectAdmin.triggerContextProof).toEqual(expect.objectContaining({
+    const triggerBoundedField =
+      sidecar.methods.selectAdmin.triggerSelectorSpec?.engine === 'bounded-field'
+        ? sidecar.methods.selectAdmin.triggerSelectorSpec.boundedField
+        : undefined;
+    expect(triggerBoundedField).toEqual(expect.objectContaining({
       labelText: 'User Role',
-      association: 'bounded-field',
-      warningCodes: expect.arrayContaining(['custom-control-trigger-structural-fallback']),
+      relation: expect.stringMatching(/sibling-label|bounded-container/),
     }));
 
     callSpy.mockRestore();

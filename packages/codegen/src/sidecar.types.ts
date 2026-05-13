@@ -1,5 +1,8 @@
 import type {
   ActionType,
+  BoundedFieldControlKind,
+  BoundedFieldRelation,
+  BoundedFieldSelectorSpec,
   EquivalentRendering,
   LabelContextRenderStatus,
   LabelContextSelectorSpec,
@@ -45,6 +48,17 @@ export interface AirMethodMeta {
   triggerBoundedContainerSummary?: string;
   triggerStructuralFallbackLocator?: string;
   triggerWarningCodes?: string[];
+  boundedFieldProof?: BoundedFieldSelectorSpec;
+  boundedFieldLabelText?: string;
+  boundedFieldRelation?: BoundedFieldRelation;
+  boundedFieldControlKind?: BoundedFieldControlKind;
+  boundedFieldRenderStatus?: LabelContextRenderStatus;
+  boundedFieldRenderReason?: string;
+  boundedFieldOriginalSelector?: string;
+  boundedFieldTargetSelectorSpec?: SelectorSpec;
+  boundedFieldMatchedContainerSummary?: string;
+  boundedFieldWarningCodes?: string[];
+  boundedFieldRejectReason?: string;
   optionSelector?: string;
   optionText?: string;
   optionValue?: string;

@@ -1,7 +1,12 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { CodegenSession, CodegenStep } from './types';
-import type { LabelContextRenderStatus, LabelContextSelectorSpec, TriggerContextSelectorSpec } from './types';
+import type {
+  BoundedFieldSelectorSpec,
+  LabelContextRenderStatus,
+  LabelContextSelectorSpec,
+  TriggerContextSelectorSpec,
+} from './types';
 import { AirMetadata, AirMethodMeta } from './sidecar.types';
 import { computeActionChecksum } from './checksum.utils';
 import { GoogleGenerativeAI } from '@google/generative-ai';
@@ -13,6 +18,10 @@ import {
   renderLocatorExpressionFromEquivalentRendering,
   renderLocatorExpressionFromSelectorSpec,
 } from './selector-spec';
+import {
+  buildBoundedFieldWarningComments,
+  classifyBoundedFieldRenderStatus,
+} from './resolver/bounded-field/render-bounded-field';
 import {
   normalizeLlmRetrySuggestions,
   normalizeLlmSuggestions,
@@ -75,6 +84,13 @@ interface EmittedMethod {
   triggerContextLabel?: string | null;
   triggerBoundedContainerSummary?: string | null;
   triggerStructuralFallbackLocator?: string | null;
+  boundedFieldRenderStatus?: LabelContextRenderStatus;
+  boundedFieldRenderReason?: string | null;
+  boundedFieldLabelText?: string | null;
+  boundedFieldRelation?: AirMethodMeta['boundedFieldRelation'];
+  boundedFieldControlKind?: AirMethodMeta['boundedFieldControlKind'];
+  boundedFieldMatchedContainerSummary?: string | null;
+  boundedFieldOriginalSelector?: string | null;
   extraWarningComments?: string[];
   extraWarningCodes?: string[];
 }
@@ -286,6 +302,10 @@ export class LlmOrchestrator {
             ])),
           }
         : undefined;
+      const generatedTriggerSpec = (generationStep ?? originalStep).triggerSelectorSpec;
+      const generatedTriggerBoundedField = generatedTriggerSpec?.engine === 'bounded-field'
+        ? generatedTriggerSpec.boundedField
+        : undefined;
 
       sidecarMethods[methodName] = {
         step: originalStep.step,
@@ -319,14 +339,34 @@ export class LlmOrchestrator {
         triggerSelectorPriority: originalStep.triggerSelectorPriority,
         triggerResolvedSelector: (generationStep ?? originalStep).triggerResolvedSelector,
         triggerSelectorSpec: (generationStep ?? originalStep).triggerSelectorSpec,
-        triggerContextProof: (generationStep ?? originalStep).triggerSelectorSpec?.triggerContext,
+        triggerContextProof: ((generationStep ?? originalStep).triggerSelectorSpec as any)?.triggerContext,
         triggerContextLabel: emittedMethod.triggerContextLabel ?? undefined,
         triggerContextRenderStatus: emittedMethod.triggerContextRenderStatus,
         triggerContextRenderReason: emittedMethod.triggerContextRenderReason ?? undefined,
         triggerBoundedContainerSummary: emittedMethod.triggerBoundedContainerSummary ?? undefined,
         triggerStructuralFallbackLocator: emittedMethod.triggerStructuralFallbackLocator ?? undefined,
-        triggerWarningCodes: (generationStep ?? originalStep).triggerSelectorSpec?.triggerContext?.warningCodes
+        triggerWarningCodes: (generatedTriggerSpec as any)?.triggerContext?.warningCodes
+          ?? generatedTriggerBoundedField?.warningCodes
           ?? resolverForSidecar?.triggerWarningCodes,
+        boundedFieldProof: resolution?.resolvedSelectorSpec?.engine === 'bounded-field'
+          ? resolution.resolvedSelectorSpec.boundedField
+          : undefined,
+        boundedFieldLabelText: emittedMethod.boundedFieldLabelText ?? undefined,
+        boundedFieldRelation: emittedMethod.boundedFieldRelation,
+        boundedFieldControlKind: emittedMethod.boundedFieldControlKind,
+        boundedFieldRenderStatus: emittedMethod.boundedFieldRenderStatus,
+        boundedFieldRenderReason: emittedMethod.boundedFieldRenderReason ?? undefined,
+        boundedFieldOriginalSelector: emittedMethod.boundedFieldOriginalSelector ?? undefined,
+        boundedFieldTargetSelectorSpec: resolution?.resolvedSelectorSpec?.engine === 'bounded-field'
+          ? resolution.resolvedSelectorSpec.boundedField.target
+          : undefined,
+        boundedFieldMatchedContainerSummary: emittedMethod.boundedFieldMatchedContainerSummary ?? undefined,
+        boundedFieldWarningCodes: resolution?.resolvedSelectorSpec?.engine === 'bounded-field'
+          ? resolution.resolvedSelectorSpec.boundedField.warningCodes
+          : undefined,
+        boundedFieldRejectReason: resolution?.resolvedSelectorSpec?.engine === 'bounded-field'
+          ? resolution.resolvedSelectorSpec.boundedField.rejectReason ?? resolution.resolvedSelectorSpec.rejectReason
+          : undefined,
         optionSelector: originalStep.optionSelector,
         optionText: originalStep.optionText,
         optionValue: originalStep.optionValue,
@@ -342,7 +382,7 @@ export class LlmOrchestrator {
         equivalentProofSource: emittedMethod.equivalentProofSource,
         equivalentSourceSelector: emittedMethod.equivalentSourceSelector ?? undefined,
         preferredRenderings: emittedMethod.preferredRenderings,
-        labelContextProof: resolution?.resolvedSelectorSpec?.labelContext,
+        labelContextProof: (resolution?.resolvedSelectorSpec as any)?.labelContext,
         labelContextRenderStatus: emittedMethod.labelContextRenderStatus,
         labelContextRenderReason: emittedMethod.labelContextRenderReason ?? undefined,
         labelText: emittedMethod.labelText ?? undefined,
@@ -355,8 +395,8 @@ export class LlmOrchestrator {
         warningCodes: Array.from(new Set([
           ...(emittedMethod.emittedLocatorWarnings ?? []),
           ...(emittedMethod.extraWarningCodes ?? []),
-          ...((resolution?.resolvedSelectorSpec?.labelContext?.warningCodes) ?? []),
-          ...(((generationStep ?? originalStep).triggerSelectorSpec?.triggerContext?.warningCodes) ?? []),
+          ...(((resolution?.resolvedSelectorSpec as any)?.labelContext?.warningCodes) ?? []),
+          ...((((generationStep ?? originalStep).triggerSelectorSpec as any)?.triggerContext?.warningCodes) ?? []),
           ...(resolverForSidecar?.triggerWarningCodes ?? []),
         ])),
       };
@@ -906,7 +946,12 @@ ${methodsContent.join('\n\n')}
   ): string | null {
     const exact = renderLocatorExpressionFromSelectorSpec(selectorSpec);
     if (exact) return exact;
-    if (selectorSpec?.engine === 'label-context' || selectorSpec?.engine === 'trigger-context') {
+    if (
+      selectorSpec?.engine === 'label-context' ||
+      selectorSpec?.engine === 'trigger-context' ||
+      selectorSpec?.engine === 'bounded-field' ||
+      selectorSpec?.engine === 'scoped'
+    ) {
       return null;
     }
     const normalized = (selector || '').trim();
@@ -925,6 +970,12 @@ ${methodsContent.join('\n\n')}
       `// Proof: exact label + one visible ${labelContext.targetTag} inside bounded field container.`,
       `// Consider adding data-testid/name/aria-label for a cleaner locator.`,
     ];
+  }
+
+  private static buildBoundedFieldFallbackWarningComments(
+    boundedField?: BoundedFieldSelectorSpec,
+  ): string[] {
+    return buildBoundedFieldWarningComments(boundedField);
   }
 
   private static buildTriggerStructuralFallbackWarningComments(
@@ -1010,8 +1061,14 @@ ${methodsContent.join('\n\n')}
       step.triggerResolvedSelector ?? step.triggerSelector,
       step.triggerSelectorSpec,
     );
-    const triggerContext = step.triggerSelectorSpec?.triggerContext;
-    const labelContext = resolvedSelectorSpec?.labelContext;
+    const triggerContext = (step.triggerSelectorSpec as any)?.triggerContext;
+    const triggerBoundedField = step.triggerSelectorSpec?.engine === 'bounded-field'
+      ? step.triggerSelectorSpec.boundedField
+      : undefined;
+    const boundedField = resolvedSelectorSpec?.engine === 'bounded-field'
+      ? resolvedSelectorSpec.boundedField
+      : undefined;
+    const labelContext = (resolvedSelectorSpec as any)?.labelContext;
     const labelContextRenderStatus = this.classifyLabelContextRenderStatus(labelContext) ?? undefined;
     const labelContextRenderReason = labelContext?.renderReason ?? null;
     const labelText = labelContext?.labelText ?? null;
@@ -1021,23 +1078,36 @@ ${methodsContent.join('\n\n')}
     const cleanChildSelector = labelContext?.cleanChildSelector ?? null;
     const structuralFallbackLocator = labelContext?.structuralFallbackLocator ?? exactLocatorExpr ?? null;
     const recoveredFromSelector = labelContext?.recoveredFromSelector ?? null;
+    const boundedFieldRenderStatus = classifyBoundedFieldRenderStatus(boundedField) ?? undefined;
+    const boundedFieldRenderReason = boundedField?.renderReason ?? null;
+    const boundedFieldLabelText = boundedField?.labelText ?? null;
+    const boundedFieldRelation = boundedField?.relation;
+    const boundedFieldControlKind = boundedField?.controlKind;
+    const boundedFieldMatchedContainerSummary = boundedField?.boundedContainerSummary ?? null;
+    const boundedFieldOriginalSelector = boundedField?.originalSelector ?? null;
     const triggerWarningCodes = Array.from(new Set([
       ...(triggerContext?.warningCodes ?? []),
+      ...(triggerBoundedField?.warningCodes ?? []),
       ...(resolverMetadata?.triggerWarningCodes ?? []),
     ]));
     const triggerContextRenderStatus = triggerContext?.renderStatus
+      ?? classifyBoundedFieldRenderStatus(triggerBoundedField)
       ?? resolverMetadata?.triggerContextRenderStatus
       ?? undefined;
     const triggerContextRenderReason = triggerContext?.renderReason
+      ?? triggerBoundedField?.renderReason
       ?? resolverMetadata?.triggerContextRenderReason
       ?? null;
     const triggerContextLabel = triggerContext?.labelText
+      ?? triggerBoundedField?.labelText
       ?? resolverMetadata?.triggerContextLabel
       ?? null;
     const triggerBoundedContainerSummary = triggerContext?.boundedContainerSummary
+      ?? triggerBoundedField?.boundedContainerSummary
       ?? resolverMetadata?.triggerBoundedContainerSummary
       ?? null;
     const triggerStructuralFallbackLocator = triggerContext?.structuralFallbackLocator
+      ?? triggerBoundedField?.structuralFallbackLocator
       ?? resolverMetadata?.triggerStructuralFallbackLocator
       ?? triggerLocatorExpr
       ?? null;
@@ -1200,7 +1270,13 @@ ${methodsContent.join('\n\n')}
     for (const line of this.buildStructuralFallbackWarningComments(labelContext)) {
       inlineWarningLines.push(`  ${line}`);
     }
+    for (const line of this.buildBoundedFieldFallbackWarningComments(boundedField)) {
+      inlineWarningLines.push(`  ${line}`);
+    }
     for (const line of this.buildTriggerStructuralFallbackWarningComments(triggerContext)) {
+      inlineWarningLines.push(`  ${line}`);
+    }
+    for (const line of this.buildBoundedFieldFallbackWarningComments(triggerBoundedField)) {
       inlineWarningLines.push(`  ${line}`);
     }
     if (weakCompressedCustomSelect) {
@@ -1259,6 +1335,13 @@ ${methodsContent.join('\n\n')}
       triggerContextLabel,
       triggerBoundedContainerSummary,
       triggerStructuralFallbackLocator,
+      boundedFieldRenderStatus,
+      boundedFieldRenderReason,
+      boundedFieldLabelText,
+      boundedFieldRelation,
+      boundedFieldControlKind,
+      boundedFieldMatchedContainerSummary,
+      boundedFieldOriginalSelector,
       extraWarningComments: this.buildStructuralFallbackWarningComments(labelContext),
       extraWarningCodes: weakCompressedCustomSelect ? ['custom-control-trigger-weak-fallback'] : [],
     };

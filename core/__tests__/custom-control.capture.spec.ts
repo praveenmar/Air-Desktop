@@ -124,6 +124,7 @@ function makeSelectorProbe(): Record<string, unknown> {
     debugMode: false,
     maxTextLength: 200,
   };
+  interceptor._isElementVisible = vi.fn((el: Element | null) => !!el);
   return interceptor;
 }
 
@@ -277,6 +278,71 @@ describe('input field semantic context enrichment', () => {
 
       expect(fingerprint.attributes.wrappedLabelText).toContain('Work Email');
       expect(fingerprint.attributes.fieldLabelText).toContain('Work Email');
+      expect(fingerprint.boundedFieldContext).toEqual(expect.objectContaining({
+        fieldLabelText: 'Work Email',
+        isValid: true,
+      }));
+    });
+  });
+
+  it('captures live selector ambiguity and bounded field context for weak unnamed inputs', () => {
+    return withBrowserGlobals(`
+      <div class="toolbar"><input class="generic-input" placeholder="Search" /></div>
+      <div class="field-row">
+        <label>Username</label>
+        <input class="generic-input" type="text" />
+      </div>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('.field-row input') as HTMLInputElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target);
+
+      expect(fingerprint.selector).toBe('.generic-input');
+      expect(fingerprint.selectorAmbiguity).toEqual(expect.objectContaining({
+        originalSelector: '.generic-input',
+        matchCount: 2,
+        visibleMatchCount: 2,
+        isUnique: false,
+        isAmbiguous: true,
+      }));
+      expect(fingerprint.boundedFieldContext).toEqual(expect.objectContaining({
+        fieldLabelText: 'Username',
+        fieldRelation: 'sibling-label',
+        targetControlKind: 'input',
+        visibleControlCountInContainer: 1,
+        competingControlCount: 0,
+        isValid: true,
+      }));
+    });
+  });
+
+  it('captures distinct bounded trigger context for repeated custom select triggers', () => {
+    return withBrowserGlobals(`
+      <div class="field-row">
+        <label>User Role</label>
+        <div class="select-trigger" aria-haspopup="listbox">-- Select --</div>
+      </div>
+      <div class="field-row">
+        <label>Status</label>
+        <div class="select-trigger" aria-haspopup="listbox">-- Select --</div>
+      </div>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('.field-row .select-trigger') as HTMLDivElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target);
+
+      expect(fingerprint.selectorAmbiguity).toEqual(expect.objectContaining({
+        originalSelector: '.select-trigger',
+        visibleMatchCount: 2,
+        isAmbiguous: true,
+      }));
+      expect(fingerprint.boundedFieldContext).toEqual(expect.objectContaining({
+        fieldLabelText: 'User Role',
+        targetControlKind: 'custom-trigger',
+        isValid: true,
+      }));
     });
   });
 

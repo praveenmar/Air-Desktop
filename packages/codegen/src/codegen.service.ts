@@ -1,4 +1,4 @@
-﻿/**
+/**
  * packages/codegen/src/codegen.service.ts
  *
  * The AIR Code Generation Service â€” "The Compressor".
@@ -235,6 +235,162 @@ function normalizeFingerprintAttributes(raw: unknown): FingerprintData['attribut
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
+function normalizeSelectorAmbiguity(raw: unknown): FingerprintData['selectorAmbiguity'] | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const source = raw as Record<string, unknown>;
+  const matchCount = typeof source.matchCount === 'number' ? source.matchCount : undefined;
+  const visibleMatchCount = typeof source.visibleMatchCount === 'number' ? source.visibleMatchCount : undefined;
+  const isUnique = typeof source.isUnique === 'boolean' ? source.isUnique : undefined;
+  const isAmbiguous = typeof source.isAmbiguous === 'boolean' ? source.isAmbiguous : undefined;
+  if (
+    typeof source.originalSelector !== 'string' ||
+    matchCount == null ||
+    visibleMatchCount == null ||
+    isUnique == null ||
+    isAmbiguous == null
+  ) {
+    return undefined;
+  }
+
+  return {
+    originalSelector: source.originalSelector,
+    originalPriority: typeof source.originalPriority === 'string' ? source.originalPriority : undefined,
+    matchCount,
+    visibleMatchCount,
+    positionInMatches:
+      source.positionInMatches === null
+        ? null
+        : (typeof source.positionInMatches === 'number' ? source.positionInMatches : undefined),
+    isUnique,
+    isAmbiguous,
+  };
+}
+
+function normalizeBoundedFieldContext(raw: unknown): FingerprintData['boundedFieldContext'] | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const source = raw as Record<string, unknown>;
+  const rawCandidates = Array.isArray(source.boundedContainerSelectorCandidates)
+    ? source.boundedContainerSelectorCandidates
+    : [];
+  const boundedContainerSelectorCandidates = rawCandidates
+    .map(candidate => {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+      const record = candidate as Record<string, unknown>;
+      if (typeof record.selector !== 'string' || typeof record.kind !== 'string') return null;
+      return {
+        selector: record.selector,
+        kind: record.kind,
+        isClean: typeof record.isClean === 'boolean' ? record.isClean : undefined,
+      };
+    })
+    .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null);
+
+  const fieldRelation =
+    source.fieldRelation === null
+      ? null
+      : (
+          source.fieldRelation === 'label-for' ||
+          source.fieldRelation === 'wrapped-label' ||
+          source.fieldRelation === 'aria-labelledby' ||
+          source.fieldRelation === 'sibling-label' ||
+          source.fieldRelation === 'bounded-container'
+            ? source.fieldRelation
+            : undefined
+        );
+  const targetControlKind =
+    source.targetControlKind === null
+      ? null
+      : (
+          source.targetControlKind === 'input' ||
+          source.targetControlKind === 'textarea' ||
+          source.targetControlKind === 'select' ||
+          source.targetControlKind === 'custom-trigger' ||
+          source.targetControlKind === 'combobox' ||
+          source.targetControlKind === 'searchbox' ||
+          source.targetControlKind === 'contenteditable' ||
+          source.targetControlKind === 'unknown'
+            ? source.targetControlKind
+            : undefined
+        );
+  return {
+    fieldLabelText:
+      source.fieldLabelText === null
+        ? null
+        : (typeof source.fieldLabelText === 'string' ? source.fieldLabelText : undefined),
+    fieldRelation,
+    targetControlKind,
+    visibleControlCountInContainer:
+      source.visibleControlCountInContainer === null
+        ? null
+        : (typeof source.visibleControlCountInContainer === 'number' ? source.visibleControlCountInContainer : undefined),
+    targetIndexWithinContainer:
+      source.targetIndexWithinContainer === null
+        ? null
+        : (typeof source.targetIndexWithinContainer === 'number' ? source.targetIndexWithinContainer : undefined),
+    boundedContainerSummary:
+      source.boundedContainerSummary === null
+        ? null
+        : (typeof source.boundedContainerSummary === 'string' ? source.boundedContainerSummary : undefined),
+    boundedContainerSelectorCandidates:
+      boundedContainerSelectorCandidates.length > 0 ? boundedContainerSelectorCandidates : undefined,
+    cleanParentSelector:
+      source.cleanParentSelector === null
+        ? null
+        : (typeof source.cleanParentSelector === 'string' ? source.cleanParentSelector : undefined),
+    cleanChildSelector:
+      source.cleanChildSelector === null
+        ? null
+        : (typeof source.cleanChildSelector === 'string' ? source.cleanChildSelector : undefined),
+    containerSelector:
+      source.containerSelector === null
+        ? null
+        : (typeof source.containerSelector === 'string' ? source.containerSelector : undefined),
+    competingControlCount:
+      source.competingControlCount === null
+        ? null
+        : (typeof source.competingControlCount === 'number' ? source.competingControlCount : undefined),
+    duplicateLabelCount:
+      source.duplicateLabelCount === null
+        ? null
+        : (typeof source.duplicateLabelCount === 'number' ? source.duplicateLabelCount : undefined),
+    isValid: typeof source.isValid === 'boolean' ? source.isValid : undefined,
+    blockedReason:
+      source.blockedReason === null
+        ? null
+        : (typeof source.blockedReason === 'string' ? source.blockedReason : undefined),
+  };
+}
+
+function normalizeAccessibilityEvidence(raw: unknown): FingerprintData['accessibilityEvidence'] | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const source = raw as Record<string, unknown>;
+  
+  const validSources = [
+    'aria-label',
+    'aria-labelledby',
+    'label-for',
+    'wrapped-label',
+    'button-text',
+    'link-text',
+    'placeholder',
+    'title',
+    'none',
+  ];
+
+  return {
+    role: typeof source.role === 'string' ? source.role : (source.role === null ? null : undefined),
+    accessibleName: typeof source.accessibleName === 'string' ? source.accessibleName : (source.accessibleName === null ? null : undefined),
+    accessibleNameSource: (validSources.includes(source.accessibleNameSource as string) 
+      ? source.accessibleNameSource 
+      : 'none') as any,
+    labelText: typeof source.labelText === 'string' ? source.labelText : (source.labelText === null ? null : undefined),
+    labelledByIds: Array.isArray(source.labelledByIds) 
+      ? source.labelledByIds.filter((id): id is string => typeof id === 'string') 
+      : undefined,
+    isNativeLabelAssociation: typeof source.isNativeLabelAssociation === 'boolean' ? source.isNativeLabelAssociation : undefined,
+  };
+}
+
 function normalizeFingerprint(raw: unknown): FingerprintData | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const fingerprint = raw as Record<string, unknown>;
@@ -270,6 +426,9 @@ function normalizeFingerprint(raw: unknown): FingerprintData | null {
       }
       : undefined,
     attributes,
+    selectorAmbiguity: normalizeSelectorAmbiguity(fingerprint.selectorAmbiguity),
+    boundedFieldContext: normalizeBoundedFieldContext(fingerprint.boundedFieldContext),
+    accessibilityEvidence: normalizeAccessibilityEvidence(fingerprint.accessibilityEvidence),
     attributesHash: typeof fingerprint.attributesHash === 'string' ? fingerprint.attributesHash : undefined,
   };
 

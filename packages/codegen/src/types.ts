@@ -56,8 +56,10 @@ export type SelectorEngine =
   | 'testid'
   | 'role'
   | 'label'
+  | 'scoped'
   | 'label-context'
   | 'trigger-context'
+  | 'bounded-field'
   | 'placeholder'
   | 'playwright';
 
@@ -126,18 +128,148 @@ export interface TriggerContextSelectorSpec {
   warningCodes?: string[];
 }
 
-export interface SelectorSpec {
+export type BoundedFieldControlKind =
+  | 'input'
+  | 'textarea'
+  | 'select'
+  | 'custom-trigger'
+  | 'combobox'
+  | 'searchbox'
+  | 'contenteditable'
+  | 'unknown';
+
+export type BoundedFieldRelation =
+  | 'label-for'
+  | 'wrapped-label'
+  | 'aria-labelledby'
+  | 'sibling-label'
+  | 'bounded-container';
+
+export interface BoundedFieldSelectorSpec {
+  source: 'snapshot-bounded-field' | 'recorded-bounded-field' | 'live-dom-repair';
+  labelText: string;
+  target: SelectorSpec;
+  controlKind: BoundedFieldControlKind;
+  relation: BoundedFieldRelation;
+  originalSelector?: string;
+  containerSelector?: string;
+  labelElementTag?: string;
+  boundedContainerSummary?: string;
+  snapshotSource?: ResolverSnapshotSource | null;
+  renderStatus?: LabelContextRenderStatus;
+  renderReason?: string | null;
+  cleanParentSelector?: string;
+  cleanChildSelector?: string;
+  structuralFallbackLocator?: string;
+  warningCodes?: string[];
+  rejectReason?: string | null;
+  visibleControlCountInContainer?: number | null;
+  targetIndexWithinContainer?: number | null;
+  competingControlCount?: number | null;
+  duplicateLabelCount?: number | null;
+  recordedValidity?: boolean;
+  recordedBlockedReason?: string | null;
+}
+
+export type FlatSelectorEngine =
+  | 'css'
+  | 'xpath'
+  | 'text'
+  | 'testid'
+  | 'role'
+  | 'label'
+  | 'placeholder'
+  | 'playwright'
+  | 'label-context'
+  | 'trigger-context';
+
+export type ScopedSelectorRelation =
+  | 'parent-child'
+  | 'bounded-field'
+  | 'component-boundary';
+
+interface SelectorSpecBase {
   selector: string;
-  engine: SelectorEngine;
   source: SelectorSource;
   proofLevel: SelectorProofLevel;
-  labelContext?: LabelContextSelectorSpec;
-  triggerContext?: TriggerContextSelectorSpec;
   rank?: number;
   confidence?: number;
   rejectReason?: string;
   warningCodes?: string[];
 }
+
+export interface FlatSelectorSpec extends SelectorSpecBase {
+  engine: FlatSelectorEngine;
+  labelContext?: LabelContextSelectorSpec;
+  triggerContext?: TriggerContextSelectorSpec;
+}
+
+export interface ScopedSelectorSpec extends SelectorSpecBase {
+  engine: 'scoped';
+  scope: SelectorSpec;
+  target: SelectorSpec;
+  relation?: ScopedSelectorRelation;
+}
+
+export interface BoundedFieldStructuredSelectorSpec extends SelectorSpecBase {
+  engine: 'bounded-field';
+  boundedField: BoundedFieldSelectorSpec;
+}
+
+export type PlaywrightLocatorKind =
+  | 'locator'
+  | 'getByRole'
+  | 'getByLabel'
+  | 'getByPlaceholder'
+  | 'getByText'
+  | 'getByTestId';
+
+export interface RegexLiteralSpec {
+  source: string;
+  flags?: string;
+}
+
+export interface PlaywrightLocatorOptions {
+  name?: string | RegexLiteralSpec;
+  exact?: boolean;
+  hasText?: string | RegexLiteralSpec;
+}
+
+export interface PlaywrightLocatorNode {
+  kind: PlaywrightLocatorKind;
+
+  /**
+   * For:
+   * - locator: CSS/XPath/text selector string
+   * - getByRole: role name
+   * - getByLabel: label text
+   * - getByPlaceholder: placeholder text
+   * - getByText: visible text
+   * - getByTestId: test id value
+   */
+  value: string;
+
+  options?: PlaywrightLocatorOptions;
+
+  /**
+   * Optional metadata for audit only.
+   * Do not use for compiler behavior unless explicitly needed.
+   */
+  proofSource?: string;
+  warningCodes?: string[];
+}
+
+export interface PlaywrightLocatorSpec extends SelectorSpecBase {
+  engine: 'playwright-locator';
+  chain: PlaywrightLocatorNode[];
+  debugSelector?: string;
+  warnings?: string[];
+}
+
+export type SelectorSpec = 
+  | FlatSelectorSpec 
+  | ScopedSelectorSpec 
+  | BoundedFieldStructuredSelectorSpec;
 
 export type SelectorCategory =
   | 'testid'
@@ -150,6 +282,7 @@ export type SelectorCategory =
   | 'aria-label'
   | 'role-attr'
   | 'text'
+  | 'bounded-field'
   | 'label-context'
   | 'class'
   | 'semantic-css'
@@ -403,6 +536,58 @@ export interface FingerprintAttributes {
   classList?: string;
 }
 
+export interface FingerprintSelectorAmbiguity {
+  originalSelector: string;
+  originalPriority?: string;
+  matchCount: number;
+  visibleMatchCount: number;
+  positionInMatches?: number | null;
+  isUnique: boolean;
+  isAmbiguous: boolean;
+}
+
+export interface FingerprintBoundedContainerSelectorCandidate {
+  selector: string;
+  kind: string;
+  isClean?: boolean;
+}
+
+export interface FingerprintBoundedFieldContext {
+  fieldLabelText?: string | null;
+  fieldRelation?: BoundedFieldRelation | null;
+  targetControlKind?: BoundedFieldControlKind | null;
+  visibleControlCountInContainer?: number | null;
+  targetIndexWithinContainer?: number | null;
+  boundedContainerSummary?: string | null;
+  boundedContainerSelectorCandidates?: FingerprintBoundedContainerSelectorCandidate[];
+  cleanParentSelector?: string | null;
+  cleanChildSelector?: string | null;
+  containerSelector?: string | null;
+  competingControlCount?: number | null;
+  duplicateLabelCount?: number | null;
+  isValid?: boolean;
+  blockedReason?: string | null;
+  recordedBlockedReason?: string | null;
+}
+
+export interface AccessibilityEvidence {
+  role?: string | null;
+  accessibleName?: string | null;
+  accessibleNameSource?:
+    | 'aria-label'
+    | 'aria-labelledby'
+    | 'label-for'
+    | 'wrapped-label'
+    | 'button-text'
+    | 'link-text'
+    | 'placeholder'
+    | 'title'
+    | 'none';
+  labelText?: string | null;
+  labelledByIds?: string[];
+  isNativeLabelAssociation?: boolean;
+}
+
 export interface FingerprintData {
   selector?: string;
   selectorPriority?: string;
@@ -415,6 +600,9 @@ export interface FingerprintData {
     nearestContainerTag?: string | null;
   };
   attributes?: FingerprintAttributes;
+  selectorAmbiguity?: FingerprintSelectorAmbiguity;
+  boundedFieldContext?: FingerprintBoundedFieldContext;
+  accessibilityEvidence?: AccessibilityEvidence;
   attributesHash?: string;
 }
 

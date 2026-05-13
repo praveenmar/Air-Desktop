@@ -33,6 +33,7 @@ export function classifySelectorCategory(
 ): SelectorCategory {
   const normalized = selector.trim();
   if (!normalized) return source === 'llm' ? 'llm' : 'unknown';
+  if (source === 'bounded-field') return 'bounded-field';
   if (source === 'label-context' || source === 'trigger-context') return 'label-context';
   if (isXPathSelector(normalized)) return 'xpath';
   if (source === 'parent-scope') return 'parent-scoped';
@@ -105,6 +106,7 @@ export function stabilityBaseScoreForCategory(category: SelectorCategory): numbe
     case 'role-attr':
       return 0.66;
     case 'label-context':
+    case 'bounded-field':
       return 0.64;
     case 'semantic-css':
       return 0.65;

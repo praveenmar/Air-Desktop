@@ -25,6 +25,77 @@ export const FingerprintContextSchema = z.object({
 }).passthrough();
 export type FingerprintContext = z.infer<typeof FingerprintContextSchema>;
 
+export const SelectorAmbiguityMetadataSchema = z.object({
+  originalSelector: z.string(),
+  originalPriority: SelectorPrioritySchema.optional(),
+  matchCount: z.number().int().min(0),
+  visibleMatchCount: z.number().int().min(0),
+  positionInMatches: z.number().int().min(0).nullable().optional(),
+  isUnique: z.boolean(),
+  isAmbiguous: z.boolean(),
+}).passthrough();
+export type SelectorAmbiguityMetadata = z.infer<typeof SelectorAmbiguityMetadataSchema>;
+
+export const BoundedContainerSelectorCandidateSchema = z.object({
+  selector: z.string(),
+  kind: z.string(),
+  isClean: z.boolean().optional(),
+}).passthrough();
+export type BoundedContainerSelectorCandidate = z.infer<typeof BoundedContainerSelectorCandidateSchema>;
+
+export const BoundedFieldContextSchema = z.object({
+  fieldLabelText: z.string().nullable().optional(),
+  fieldRelation: z.enum([
+    'label-for',
+    'wrapped-label',
+    'aria-labelledby',
+    'sibling-label',
+    'bounded-container',
+  ]).nullable().optional(),
+  targetControlKind: z.enum([
+    'input',
+    'textarea',
+    'select',
+    'custom-trigger',
+    'combobox',
+    'searchbox',
+    'contenteditable',
+    'unknown',
+  ]).nullable().optional(),
+  visibleControlCountInContainer: z.number().int().min(0).nullable().optional(),
+  targetIndexWithinContainer: z.number().int().min(0).nullable().optional(),
+  boundedContainerSummary: z.string().nullable().optional(),
+  boundedContainerSelectorCandidates: z.array(BoundedContainerSelectorCandidateSchema).optional(),
+  cleanParentSelector: z.string().nullable().optional(),
+  cleanChildSelector: z.string().nullable().optional(),
+  containerSelector: z.string().nullable().optional(),
+  competingControlCount: z.number().int().min(0).nullable().optional(),
+  duplicateLabelCount: z.number().int().min(0).nullable().optional(),
+  isValid: z.boolean().optional(),
+  blockedReason: z.string().nullable().optional(),
+}).passthrough();
+export type BoundedFieldContext = z.infer<typeof BoundedFieldContextSchema>;
+
+export const AccessibilityEvidenceSchema = z.object({
+  role: z.string().nullable().optional(),
+  accessibleName: z.string().nullable().optional(),
+  accessibleNameSource: z.enum([
+    'aria-label',
+    'aria-labelledby',
+    'label-for',
+    'wrapped-label',
+    'button-text',
+    'link-text',
+    'placeholder',
+    'title',
+    'none',
+  ]).optional(),
+  labelText: z.string().nullable().optional(),
+  labelledByIds: z.array(z.string()).optional(),
+  isNativeLabelAssociation: z.boolean().optional(),
+}).passthrough();
+export type AccessibilityEvidence = z.infer<typeof AccessibilityEvidenceSchema>;
+
 /** Compact fingerprint for an element (4-layer identification) */
 export const ElementFingerprintSchema = z.object({
   selector: z.string(),
@@ -35,6 +106,9 @@ export const ElementFingerprintSchema = z.object({
   textExcerpt: z.string().nullable(),
   context: FingerprintContextSchema,
   attributes: z.record(z.string(), z.string().optional()),
+  selectorAmbiguity: SelectorAmbiguityMetadataSchema.optional(),
+  boundedFieldContext: BoundedFieldContextSchema.optional(),
+  accessibilityEvidence: AccessibilityEvidenceSchema.optional(),
   attributesHash: z.string(),
 }).passthrough();
 export type ElementFingerprint = z.infer<typeof ElementFingerprintSchema>;

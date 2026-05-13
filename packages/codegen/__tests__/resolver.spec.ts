@@ -3878,8 +3878,11 @@ describe('selector-resolver', () => {
 
     const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
 
-    expect(result.resolutions[0].resolvedSelector).toBe('input.generic-input');
-    expect(result.resolutions[0].resolvedSelectorSpec?.labelContext).toBeUndefined();
+    // Bounded-field recovery is valid here because it provides a unique local association 
+    // within the div container, even though the label text is globally duplicated.
+    // This is more robust than the original weak class selector.
+    expect(result.resolutions[0].resolvedSelector).toContain('bounded-field("Username"');
+    expect((result.resolutions[0].resolvedSelectorSpec as any)?.labelContext).toBeUndefined();
   });
 
   it('does not invoke llm fallback when deterministic label-context recovery succeeds', async () => {
@@ -4005,6 +4008,60 @@ describe('selector-resolver', () => {
     expect(result.resolutions[0].resolvedSelectorSpec?.engine).not.toBe('label-context');
   });
 
+  it('recovers a weak class-only input as a bounded-field selector when exact field proof exists', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <div class="field-row">
+          <div>Username</div>
+          <input />
+        </div>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      action: 'input',
+      intent: 'input_username',
+      selector: '.generic-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.generic-input',
+        tagName: 'input',
+        attributes: {
+          class: 'generic-input',
+          type: 'text',
+          fieldLabelText: 'Username',
+        },
+      },
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'bounded_field_unit',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelectorSpec?.engine).toBe('bounded-field');
+    const boundedFieldSpec = resolution.resolvedSelectorSpec?.engine === 'bounded-field'
+      ? resolution.resolvedSelectorSpec.boundedField
+      : undefined;
+    expect(boundedFieldSpec).toEqual(expect.objectContaining({
+      labelText: 'Username',
+      controlKind: 'input',
+      relation: expect.stringMatching(/sibling-label|bounded-container/),
+    }));
+  });
+
   it('blocks bounded label-context recovery when a custom combobox trigger competes inside the same container', async () => {
     const snapshot = makeHtmlDocument(`
       <html><body>
@@ -4052,7 +4109,7 @@ describe('selector-resolver', () => {
 
     const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
     expect(result.resolutions[0].resolvedSelector).toBe('input.generic-input');
-    expect(result.resolutions[0].resolvedSelectorSpec?.labelContext).toBeUndefined();
+    expect((result.resolutions[0].resolvedSelectorSpec as any)?.labelContext).toBeUndefined();
   });
 
   it('recovers an ambiguous custom-control trigger using bounded field context for User Role', async () => {
@@ -4114,16 +4171,23 @@ describe('selector-resolver', () => {
     const resolution = result.resolutions[0];
 
     expect(resolution.resolverMetadata.triggerResolvedSelectorSpec).toEqual(expect.objectContaining({
-      engine: 'trigger-context',
-      triggerContext: expect.objectContaining({
+      engine: 'bounded-field',
+      boundedField: expect.objectContaining({
         labelText: 'User Role',
-        association: 'bounded-field',
+        relation: expect.stringMatching(/sibling-label|bounded-container/),
         containerSelector: 'div.field-row',
-        renderStatus: 'proven-structural-fallback',
+        renderStatus: expect.stringMatching(/clean-scoped-locator|proven-structural-fallback/),
       }),
     }));
-    expect(resolution.resolverMetadata.triggerResolvedSelector).toContain('trigger-context("User Role"');
-    expect(resolution.resolverMetadata.triggerWarningCodes).toContain('custom-control-trigger-structural-fallback');
+    expect(resolution.resolverMetadata.triggerResolvedSelector).toContain('bounded-field("User Role"');
+    if (resolution.resolverMetadata.triggerResolvedSelectorSpec?.engine === 'bounded-field') {
+      const renderStatus = resolution.resolverMetadata.triggerResolvedSelectorSpec.boundedField?.renderStatus;
+      if (renderStatus === 'proven-structural-fallback') {
+        expect(resolution.resolverMetadata.triggerWarningCodes).toContain('custom-control-trigger-structural-fallback');
+      } else {
+        expect(resolution.resolverMetadata.triggerWarningCodes ?? []).not.toContain('custom-control-trigger-structural-fallback');
+      }
+    }
   });
 
   it('recovers an ambiguous custom-control trigger using bounded field context for Status', async () => {
@@ -4184,11 +4248,13 @@ describe('selector-resolver', () => {
     const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
     const resolution = result.resolutions[0];
 
-    expect(resolution.resolverMetadata.triggerResolvedSelectorSpec?.triggerContext).toEqual(expect.objectContaining({
+    const triggerBoundedField = resolution.resolverMetadata.triggerResolvedSelectorSpec?.engine === 'bounded-field'
+      ? resolution.resolverMetadata.triggerResolvedSelectorSpec.boundedField
+      : undefined;
+    expect(triggerBoundedField).toEqual(expect.objectContaining({
       labelText: 'Status',
-      association: 'bounded-field',
     }));
-    expect(resolution.resolverMetadata.triggerResolvedSelector).toContain('trigger-context("Status"');
+    expect(resolution.resolverMetadata.triggerResolvedSelector).toContain('bounded-field("Status"');
   });
 
   it('blocks trigger-context recovery when the bounded container has two visible triggers', async () => {

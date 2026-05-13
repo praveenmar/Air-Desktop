@@ -256,4 +256,73 @@ describe('active-path schema survival', () => {
     expect(menuParsed.type).toBe('custom-menu-select');
     expect((menuParsed as Record<string, unknown>).optionRole).toBe('menuitem');
   });
+
+  it('preserves selector ambiguity and bounded field context on fingerprints through event validation', () => {
+    const parsed = AIREventSchema.parse({
+      id: '55555555-5555-4555-8555-555555555555',
+      type: 'input',
+      timestamp: 1_700_000_000_030,
+      sessionId: 'session-55555555-5555-4555-8555-555555555555',
+      trigger: 'change',
+      fingerprint: {
+        selector: '.generic-input',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'input',
+        textExcerpt: null,
+        context: {
+          parentTag: 'div',
+          nearestContainerTag: 'div',
+        },
+        attributes: {
+          fieldLabelText: 'Username',
+          class: 'generic-input',
+        },
+        selectorAmbiguity: {
+          originalSelector: '.generic-input',
+          originalPriority: 'class',
+          matchCount: 2,
+          visibleMatchCount: 2,
+          positionInMatches: 1,
+          isUnique: false,
+          isAmbiguous: true,
+        },
+        boundedFieldContext: {
+          fieldLabelText: 'Username',
+          fieldRelation: 'sibling-label',
+          targetControlKind: 'input',
+          visibleControlCountInContainer: 1,
+          targetIndexWithinContainer: 0,
+          boundedContainerSummary: 'div.field-row',
+          boundedContainerSelectorCandidates: [
+            { selector: '[data-testid="username-field"]', kind: 'data-testid', isClean: true },
+          ],
+          cleanParentSelector: '[data-testid="username-field"]',
+          cleanChildSelector: 'input',
+          containerSelector: '[data-testid="username-field"]',
+          competingControlCount: 0,
+          duplicateLabelCount: 1,
+          isValid: true,
+          blockedReason: null,
+        },
+        attributesHash: 'hash-bounded-field',
+      },
+    });
+
+    expect(parsed.type).toBe('input');
+    expect((parsed.fingerprint as Record<string, unknown>)?.selectorAmbiguity).toEqual(
+      expect.objectContaining({
+        originalSelector: '.generic-input',
+        visibleMatchCount: 2,
+        isAmbiguous: true,
+      }),
+    );
+    expect((parsed.fingerprint as Record<string, unknown>)?.boundedFieldContext).toEqual(
+      expect.objectContaining({
+        fieldLabelText: 'Username',
+        cleanParentSelector: '[data-testid="username-field"]',
+        isValid: true,
+      }),
+    );
+  });
 });

@@ -145,7 +145,12 @@ export function inferStepSignalAttributes(step: CodegenStep): StepSignalAttribut
   attrs.wrappedLabelText = typeof fpAttrs?.wrappedLabelText === 'string' ? fpAttrs.wrappedLabelText : undefined;
   attrs.labelledByText = typeof fpAttrs?.labelledByText === 'string' ? fpAttrs.labelledByText : undefined;
   attrs.describedByText = typeof fpAttrs?.describedByText === 'string' ? fpAttrs.describedByText : undefined;
-  attrs.fieldLabelText = typeof fpAttrs?.fieldLabelText === 'string' ? fpAttrs.fieldLabelText : undefined;
+  attrs.fieldLabelText =
+    typeof fpAttrs?.fieldLabelText === 'string'
+      ? fpAttrs.fieldLabelText
+      : (typeof fingerprint?.boundedFieldContext?.fieldLabelText === 'string'
+          ? fingerprint.boundedFieldContext.fieldLabelText
+          : undefined);
   attrs.class = (fpAttrs as Record<string, string | undefined> | undefined)?.class || extractClass(selector) || undefined;
   attrs.tagName = fingerprint?.tagName?.toLowerCase();
   attrs.parentSelector = fingerprint?.parentSelector ?? undefined;
