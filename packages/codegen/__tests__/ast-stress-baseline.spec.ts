@@ -17,14 +17,14 @@ describe('Baseline AST Stress Testing (T1 & T2 Only)', () => {
   beforeAll(() => {
     const htmlPath = path.resolve(__dirname, '../../../core/__tests__/fixtures/dom-stress-fixtures.html');
     const html = fs.readFileSync(htmlPath, 'utf8');
-    dom = new JSDOM(html, { url: 'http://localhost' });
+    dom = new (JSDOM as any)(html, { url: 'http://localhost' });
     
     // Mock browser globals for interceptor
     global.window = dom.window as any;
     global.document = dom.window.document as any;
-    global.Node = dom.window.Node as any;
-    global.Element = dom.window.Element as any;
-    global.HTMLElement = dom.window.HTMLElement as any;
+    global.Node = (dom.window as any).Node;
+    global.Element = (dom.window as any).Element;
+    global.HTMLElement = (dom.window as any).HTMLElement;
     global.CSS = { escape: (s: string) => s } as any;
     (global.window as any).fetch = () => Promise.resolve();
 
@@ -79,6 +79,7 @@ describe('Baseline AST Stress Testing (T1 & T2 Only)', () => {
     it('handles complex quoting and exact matching', () => {
       const spec: PlaywrightLocatorSpec = {
         engine: 'playwright-locator',
+        selector: '',
         source: 'manual',
         proofLevel: 'recorded',
         chain: [{
@@ -93,6 +94,7 @@ describe('Baseline AST Stress Testing (T1 & T2 Only)', () => {
     it('handles regex literals with forward slashes and strips exact', () => {
       const spec: PlaywrightLocatorSpec = {
         engine: 'playwright-locator',
+        selector: '',
         source: 'manual',
         proofLevel: 'recorded',
         chain: [{
@@ -107,6 +109,7 @@ describe('Baseline AST Stress Testing (T1 & T2 Only)', () => {
     it('handles chained locators', () => {
       const spec: PlaywrightLocatorSpec = {
         engine: 'playwright-locator',
+        selector: '',
         source: 'manual',
         proofLevel: 'recorded',
         chain: [

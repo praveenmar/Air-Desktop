@@ -266,6 +266,14 @@ export interface PlaywrightLocatorSpec extends SelectorSpecBase {
   warnings?: string[];
 }
 
+export interface PlaywrightNativeCandidate {
+  spec: PlaywrightLocatorSpec;
+  reason: string;
+  sourceEvidence: 'accessibilityEvidence' | 'attributes';
+  proofLevel: 'unvalidated';
+  warningCodes: string[];
+}
+
 export type SelectorSpec = 
   | FlatSelectorSpec 
   | ScopedSelectorSpec 
