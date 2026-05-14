@@ -6226,23 +6226,59 @@ class AIRInterceptor {
   _collectAccessibilityEvidence(element) {
     if (!element || element.nodeType !== Node.ELEMENT_NODE) return undefined;
 
+    const tagName = (element.tagName || "").toLowerCase();
+    const type = (element.getAttribute("type") || "").toLowerCase();
+    const documentRef = element.ownerDocument || document;
+
     const evidence = {
       role: element.getAttribute("role") || null,
       accessibleName: null,
       accessibleNameSource: "none",
     };
 
-    const documentRef = element.ownerDocument || document;
+    const normalize = (text) => {
+      if (typeof text !== "string") return null;
+      const normalized = text.trim().replace(/\s+/g, " ");
+      if (!normalized) return null;
+      return normalized.length > 100 ? normalized.slice(0, 100) : normalized;
+    };
 
-    // 1. aria-label
-    const ariaLabel = element.getAttribute("aria-label");
-    if (ariaLabel) {
-      evidence.accessibleName = ariaLabel;
-      evidence.accessibleNameSource = "aria-label";
-      return evidence;
+    // 1. Infer role if missing (safe inference for native elements)
+    if (!evidence.role) {
+      if (tagName === "input") {
+        if (!type || ["text", "password", "email", "search", "tel", "url", "number"].includes(type)) {
+          evidence.role = "textbox";
+        } else if (type === "checkbox") {
+          evidence.role = "checkbox";
+        } else if (type === "radio") {
+          evidence.role = "radio";
+        } else if (["submit", "button", "reset", "image"].includes(type)) {
+          evidence.role = "button";
+        }
+      } else if (tagName === "textarea") {
+        evidence.role = "textbox";
+      } else if (tagName === "select") {
+        evidence.role = "combobox";
+      } else if (tagName === "button") {
+        evidence.role = "button";
+      } else if (tagName === "a" && element.hasAttribute("href")) {
+        evidence.role = "link";
+      }
     }
 
-    // 2. aria-labelledby
+    // 2. Resolve Accessible Name (W3C-lite priority)
+    
+    // 2.1. aria-label
+    const ariaLabel = element.getAttribute("aria-label");
+    if (ariaLabel) {
+      evidence.accessibleName = normalize(ariaLabel);
+      if (evidence.accessibleName) {
+        evidence.accessibleNameSource = "aria-label";
+        return evidence;
+      }
+    }
+
+    // 2.2. aria-labelledby
     const ariaLabelledBy = element.getAttribute("aria-labelledby");
     if (ariaLabelledBy) {
       const ids = ariaLabelledBy.split(/\s+/).filter(Boolean);
@@ -6251,25 +6287,77 @@ class AIRInterceptor {
 
       if (ids.length > 0) {
         const names = ids
-          .map((id) => documentRef.getElementById(id)?.textContent?.trim())
+          .map((id) => documentRef.getElementById(id)?.textContent)
           .filter(Boolean);
-        evidence.accessibleName = names.join(" ") || null;
+        evidence.accessibleName = normalize(names.join(" "));
       }
-      return evidence;
+      if (evidence.accessibleName) return evidence;
     }
 
-    // 3. label[for]
+    // 2.3. label[for]
     if (element.id) {
       try {
         const label = documentRef.querySelector(`label[for="${safeCssEscape(element.id)}"]`);
         if (label) {
-          evidence.labelText = label.textContent?.trim() || null;
-          evidence.accessibleName = evidence.labelText;
-          evidence.accessibleNameSource = "label-for";
-          evidence.isNativeLabelAssociation = true;
-          return evidence;
+          evidence.accessibleName = normalize(label.textContent);
+          if (evidence.accessibleName) {
+            evidence.accessibleNameSource = "label-for";
+            evidence.isNativeLabelAssociation = true;
+            return evidence;
+          }
         }
       } catch (e) {}
+    }
+
+    // 2.4. wrapped label
+    const wrappedLabel = element.closest("label");
+    if (wrappedLabel) {
+      evidence.accessibleName = normalize(wrappedLabel.textContent);
+      if (evidence.accessibleName) {
+        evidence.accessibleNameSource = "wrapped-label";
+        evidence.isNativeLabelAssociation = true;
+        return evidence;
+      }
+    }
+
+    // 2.5. title attribute
+    const title = element.getAttribute("title");
+    if (title) {
+      evidence.accessibleName = normalize(title);
+      if (evidence.accessibleName) {
+        evidence.accessibleNameSource = "title";
+        return evidence;
+      }
+    }
+
+    // 2.6. Native element text (button, link, explicit role)
+    const roleTextRoles = ['option', 'menuitem', 'button', 'link', 'tab', 'treeitem', 'checkbox', 'radio', 'row', 'gridcell'];
+    if (tagName === "button" || (tagName === "a" && element.hasAttribute("href"))) {
+      evidence.accessibleName = normalize(element.textContent);
+      if (evidence.accessibleName) {
+        evidence.accessibleNameSource = tagName === "button" ? "button-text" : "link-text";
+        return evidence;
+      }
+    }
+    
+    if (evidence.role && roleTextRoles.includes(evidence.role)) {
+      evidence.accessibleName = normalize(element.textContent);
+      if (evidence.accessibleName) {
+        evidence.accessibleNameSource = "role-text";
+        return evidence;
+      }
+    }
+
+    // 2.7. Placeholder (last resort for inputs)
+    if (["input", "textarea"].includes(tagName)) {
+      const placeholder = element.getAttribute("placeholder");
+      if (placeholder) {
+        evidence.accessibleName = normalize(placeholder);
+        if (evidence.accessibleName) {
+          evidence.accessibleNameSource = "placeholder";
+          return evidence;
+        }
+      }
     }
 
     return evidence;

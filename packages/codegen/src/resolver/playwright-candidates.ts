@@ -160,5 +160,36 @@ export function generatePlaywrightCandidates(
     warn(`Failed to extract accessibility candidates: ${err}`);
   }
 
+  // 3. Task 4: Bounded Field Hypotheses (Optional but requested)
+  try {
+    const bounded = fingerprint.boundedFieldContext;
+    if (bounded && bounded.isValid && bounded.fieldLabelText) {
+      const fieldLabelText = asNonEmptyString(bounded.fieldLabelText);
+      if (fieldLabelText) {
+        const evidence = fingerprint.accessibilityEvidence;
+        const nativeLabelSources = ['label-for', 'wrapped-label', 'aria-labelledby'];
+        
+        const hasNativeLabel = evidence && evidence.accessibleName && 
+                               evidence.accessibleNameSource && 
+                               nativeLabelSources.includes(evidence.accessibleNameSource);
+
+        if (!hasNativeLabel) {
+          candidates.push(buildCandidate(
+            {
+              kind: 'getByLabel',
+              value: fieldLabelText,
+              options: { exact: true }
+            },
+            'found-bounded-field-label-hypothesis',
+            'context',
+            ['playwright-native-label-from-bounded-field-not-native']
+          ));
+        }
+      }
+    }
+  } catch (err) {
+    warn(`Failed to extract bounded field candidates: ${err}`);
+  }
+
   return candidates;
 }

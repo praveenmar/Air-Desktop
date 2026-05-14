@@ -269,9 +269,39 @@ export interface PlaywrightLocatorSpec extends SelectorSpecBase {
 export interface PlaywrightNativeCandidate {
   spec: PlaywrightLocatorSpec;
   reason: string;
-  sourceEvidence: 'accessibilityEvidence' | 'attributes';
+  sourceEvidence: 'accessibilityEvidence' | 'attributes' | 'context';
   proofLevel: 'unvalidated';
   warningCodes: string[];
+}
+
+export interface EvaluatedPlaywrightNativeCandidate {
+  candidate: PlaywrightNativeCandidate;
+  status: 'valid' | 'blocked' | 'approximate';
+  matchCount: number;
+  visibleMatchCount: number;
+  isUnique: boolean;
+  isAmbiguous: boolean;
+  isGloballyAmbiguous: boolean;
+  rejectReason?: string;
+  warningCodes: string[];
+  validationSource: 'snapshot-approximation';
+}
+
+export interface PlaywrightNativeCandidateReportEntry {
+  locator: string;
+  engine: 'playwright-locator';
+  status: 'valid' | 'blocked' | 'approximate';
+  proofLevel: 'unvalidated';
+  validationSource: 'snapshot-approximation';
+  reason: string;
+  sourceEvidence: 'accessibilityEvidence' | 'attributes' | 'context';
+  matchCount: number;
+  visibleMatchCount: number;
+  isUnique: boolean;
+  isAmbiguous: boolean;
+  isGloballyAmbiguous: boolean;
+  warningCodes: string[];
+  rejectReason?: string;
 }
 
 export type SelectorSpec = 
@@ -590,6 +620,7 @@ export interface AccessibilityEvidence {
     | 'link-text'
     | 'placeholder'
     | 'title'
+    | 'role-text'
     | 'none';
   labelText?: string | null;
   labelledByIds?: string[];

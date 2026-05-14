@@ -223,4 +223,52 @@ describe('Playwright Native Candidate Generator', () => {
     generatePlaywrightCandidates(fingerprint);
     expect(fingerprint).toEqual(frozen);
   });
+
+  it('23. generates getByRole with name from role-text source', () => {
+    const fingerprint: FingerprintData = {
+      accessibilityEvidence: {
+        role: 'option',
+        accessibleName: 'Admin',
+        accessibleNameSource: 'role-text'
+      }
+    };
+    const candidates = generatePlaywrightCandidates(fingerprint);
+    const candidate = candidates.find(c => c.spec.chain[0].kind === 'getByRole');
+    expect(candidate?.spec.chain[0].options).toEqual({
+      name: 'Admin',
+      exact: true
+    });
+  });
+
+  it('24. generates getByLabel hypothesis from bounded field context', () => {
+    const fingerprint: FingerprintData = {
+      attributes: {},
+      boundedFieldContext: {
+        isValid: true,
+        fieldLabelText: 'Username'
+      }
+    };
+    const candidates = generatePlaywrightCandidates(fingerprint);
+    const candidate = candidates.find(c => c.spec.chain[0].kind === 'getByLabel');
+    expect(candidate).toBeDefined();
+    expect(candidate?.reason).toBe('found-bounded-field-label-hypothesis');
+    expect(candidate?.warningCodes).toContain('playwright-native-label-from-bounded-field-not-native');
+  });
+
+  it('25. suppresses bounded field label hypothesis if native label exists', () => {
+    const fingerprint: FingerprintData = {
+      accessibilityEvidence: {
+        accessibleName: 'Username',
+        accessibleNameSource: 'label-for'
+      },
+      boundedFieldContext: {
+        isValid: true,
+        fieldLabelText: 'Username'
+      }
+    };
+    const candidates = generatePlaywrightCandidates(fingerprint);
+    const getByLabelCandidates = candidates.filter(c => c.spec.chain[0].kind === 'getByLabel');
+    expect(getByLabelCandidates).toHaveLength(1);
+    expect(getByLabelCandidates[0].reason).not.toBe('found-bounded-field-label-hypothesis');
+  });
 });

@@ -374,6 +374,7 @@ function normalizeAccessibilityEvidence(raw: unknown): FingerprintData['accessib
     'link-text',
     'placeholder',
     'title',
+    'role-text',
     'none',
   ];
 

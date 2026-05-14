@@ -13,6 +13,7 @@ import type {
   SelectorProofLevel,
   SelectorSource,
   SelectorSpec,
+  PlaywrightNativeCandidateReportEntry,
 } from './types';
 
 export interface AirMethodMeta {
@@ -85,6 +86,7 @@ export interface AirMethodMeta {
   structuralFallbackLocator?: string;
   recoveredFromSelector?: string;
   warningCodes?: string[];
+  playwrightNativeCandidates?: PlaywrightNativeCandidateReportEntry[];
 }
 
 export interface AirMetadata {

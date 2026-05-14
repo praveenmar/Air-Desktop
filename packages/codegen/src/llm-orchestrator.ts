@@ -27,6 +27,10 @@ import {
   normalizeLlmSuggestions,
   resolveSelectorsForSession,
 } from './selector-resolver';
+import { generatePlaywrightCandidates } from './resolver/playwright-candidates';
+import { evaluatePlaywrightCandidates } from './resolver/playwright-evaluator';
+import { buildPlaywrightCandidateReport } from './resolver/playwright-candidate-report';
+import { PlaywrightNativeCandidateReportEntry } from './types';
 import type {
   LlmCorrectiveRetryRequest,
   LlmFallbackRequest,
@@ -307,6 +311,23 @@ export class LlmOrchestrator {
         ? generatedTriggerSpec.boundedField
         : undefined;
 
+      let playwrightNativeCandidates: PlaywrightNativeCandidateReportEntry[] | undefined;
+      try {
+        const snapshotSelection = snapshotCache.selectForStep?.(originalStep, 'action');
+        const snapshot = snapshotSelection?.snapshot;
+        if (originalStep.fingerprint && snapshot) {
+          const candidates = generatePlaywrightCandidates(originalStep.fingerprint);
+          const evaluated = evaluatePlaywrightCandidates(candidates, { root: snapshot });
+          playwrightNativeCandidates = buildPlaywrightCandidateReport(evaluated, { maxEntries: 10 });
+        }
+      } catch (err) {
+        // Safe reporting: do not fail codegen if candidate generation fails
+        console.warn('[AIR] [REPORT] Failed to generate Playwright native candidates for sidecar', {
+          step: originalStep.step,
+          error: err,
+        });
+      }
+
       sidecarMethods[methodName] = {
         step: originalStep.step,
         intent: originalStep.intent,
@@ -399,6 +420,7 @@ export class LlmOrchestrator {
           ...((((generationStep ?? originalStep).triggerSelectorSpec as any)?.triggerContext?.warningCodes) ?? []),
           ...(resolverForSidecar?.triggerWarningCodes ?? []),
         ])),
+        playwrightNativeCandidates,
       };
     }
 
