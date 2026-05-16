@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'module';
 import { JSDOM } from 'jsdom';
 import { AIREventSchema, PageSnapshotSchema } from '../types/events';
+import { CapturedSelectorCandidateSchema } from '../types/fingerprint';
 
 const require = createRequire(import.meta.url);
 const { AIRInterceptor } = require('../../packages/vscode-extension/interceptor.js') as {
@@ -324,5 +325,258 @@ describe('active-path schema survival', () => {
         isValid: true,
       }),
     );
+  });
+
+  it('accepts role-text accessibility evidence on fingerprints', () => {
+    const parsed = AIREventSchema.parse({
+      id: '66666666-6666-4666-8666-666666666666',
+      type: 'click',
+      timestamp: 1_700_000_000_040,
+      sessionId: 'session-66666666-6666-4666-8666-666666666666',
+      fingerprint: {
+        selector: '[role="option"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'div',
+        textExcerpt: 'Admin',
+        context: {
+          parentTag: 'div',
+          nearestContainerTag: 'div',
+        },
+        attributes: {
+          role: 'option',
+        },
+        accessibilityEvidence: {
+          role: 'option',
+          accessibleName: 'Admin',
+          accessibleNameSource: 'role-text',
+        },
+        attributesHash: 'hash-role-text',
+      },
+    });
+
+    expect((parsed.fingerprint as Record<string, unknown>)?.accessibilityEvidence).toEqual(
+      expect.objectContaining({
+        accessibleName: 'Admin',
+        accessibleNameSource: 'role-text',
+      }),
+    );
+  });
+
+  it('accepts valid fingerprint.selectorCandidates and preserves explicit raw/visible index fields', () => {
+    const parsed = AIREventSchema.parse({
+      id: '67676767-6767-4676-8676-676767676767',
+      type: 'click',
+      timestamp: 1_700_000_000_045,
+      sessionId: 'session-67676767-6767-4676-8676-676767676767',
+      fingerprint: {
+        selector: '[data-testid="save-profile"]',
+        selectorPriority: 'data-testid',
+        selectorRank: 1,
+        tagName: 'button',
+        textExcerpt: 'Save Profile',
+        context: {
+          parentTag: 'form',
+          nearestContainerTag: 'main',
+        },
+        attributes: {
+          'data-testid': 'save-profile',
+        },
+        selectorCandidates: [
+          {
+            selector: '[data-testid="save-profile"]',
+            engine: 'css',
+            family: 'primary',
+            strength: 'strong',
+            source: 'capture',
+            isPrimary: true,
+            matchCount: 1,
+            visibleMatchCount: 1,
+            positionInAllMatches: 0,
+            positionInVisibleMatches: 0,
+            warningCodes: ['captured-primary'],
+          },
+        ],
+        attributesHash: 'hash-selector-candidates',
+      },
+    });
+
+    expect((parsed.fingerprint as Record<string, unknown>)?.selectorCandidates).toEqual([
+      expect.objectContaining({
+        selector: '[data-testid="save-profile"]',
+        engine: 'css',
+        family: 'primary',
+        strength: 'strong',
+        source: 'capture',
+        isPrimary: true,
+        matchCount: 1,
+        visibleMatchCount: 1,
+        positionInAllMatches: 0,
+        positionInVisibleMatches: 0,
+        warningCodes: ['captured-primary'],
+      }),
+    ]);
+  });
+
+  it('treats invalid selectorCandidates as candidate-local failures without rejecting the full event', () => {
+    const invalidCandidate = {
+      selector: '.candidate',
+      engine: 'playwright',
+      family: 'primary',
+      strength: 'strong',
+      source: 'capture',
+    };
+    const validCandidate = {
+      selector: '[name="username"]',
+      engine: 'css',
+      family: 'name',
+      strength: 'strong',
+      source: 'capture',
+      warningCodes: ['recorded-name'],
+    };
+
+    expect(CapturedSelectorCandidateSchema.safeParse(invalidCandidate).success).toBe(false);
+
+    const parsed = AIREventSchema.parse({
+      id: '68686868-6868-4686-8686-686868686868',
+      type: 'input',
+      timestamp: 1_700_000_000_046,
+      sessionId: 'session-68686868-6868-4686-8686-686868686868',
+      trigger: 'change',
+      fingerprint: {
+        selector: '[name="username"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'input',
+        textExcerpt: null,
+        context: {
+          parentTag: 'form',
+          nearestContainerTag: 'form',
+        },
+        attributes: {
+          name: 'username',
+        },
+        selectorCandidates: [validCandidate, invalidCandidate],
+        attributesHash: 'hash-selector-candidate-filter',
+      },
+    });
+
+    expect(parsed.type).toBe('input');
+    expect((parsed.fingerprint as Record<string, unknown>)?.selectorCandidates).toEqual([
+      expect.objectContaining(validCandidate),
+    ]);
+  });
+
+  it('keeps legacy events without accessibilityEvidence schema-compatible', () => {
+    const parsed = AIREventSchema.parse({
+      id: '77777777-7777-4777-8777-777777777777',
+      type: 'click',
+      timestamp: 1_700_000_000_050,
+      sessionId: 'session-77777777-7777-4777-8777-777777777777',
+      fingerprint: {
+        selector: 'button[type="submit"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'button',
+        textExcerpt: 'Submit',
+        context: {
+          parentTag: 'form',
+          nearestContainerTag: 'form',
+        },
+        attributes: {
+          type: 'submit',
+        },
+        attributesHash: 'hash-no-a11y',
+      },
+    });
+
+    expect(parsed.type).toBe('click');
+    expect((parsed.fingerprint as Record<string, unknown>)?.accessibilityEvidence).toBeUndefined();
+  });
+
+  it('keeps legacy events without selectorCandidates schema-compatible', () => {
+    const parsed = AIREventSchema.parse({
+      id: '78787878-7878-4787-8787-787878787878',
+      type: 'click',
+      timestamp: 1_700_000_000_055,
+      sessionId: 'session-78787878-7878-4787-8787-787878787878',
+      fingerprint: {
+        selector: 'button[type="submit"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'button',
+        textExcerpt: 'Submit',
+        context: {
+          parentTag: 'form',
+          nearestContainerTag: 'form',
+        },
+        attributes: {
+          type: 'submit',
+        },
+        attributesHash: 'hash-no-selector-candidates',
+      },
+    });
+
+    expect(parsed.type).toBe('click');
+    expect((parsed.fingerprint as Record<string, unknown>)?.selectorCandidates).toBeUndefined();
+  });
+
+  it('rejects bare UUID session IDs while accepting session-prefixed IDs', () => {
+    const event = {
+      id: '88888888-8888-4888-8888-888888888888',
+      type: 'click' as const,
+      timestamp: 1_700_000_000_060,
+      pageUrl: 'https://app.test/dashboard',
+    };
+
+    const bareResult = AIREventSchema.safeParse({
+      ...event,
+      sessionId: '88888888-8888-4888-8888-888888888888',
+    });
+    const prefixedResult = AIREventSchema.safeParse({
+      ...event,
+      sessionId: 'session-88888888-8888-4888-8888-888888888888',
+    });
+
+    expect(bareResult.success).toBe(false);
+    expect(prefixedResult.success).toBe(true);
+    if (prefixedResult.success) {
+      expect(prefixedResult.data.sessionId).toBe('session-88888888-8888-4888-8888-888888888888');
+    }
+  });
+
+  it('accepts custom-select selection payloads with label, value, and index', () => {
+    const parsed = AIREventSchema.parse({
+      id: '99999999-9999-4999-8999-999999999999',
+      type: 'custom-select',
+      timestamp: 1_700_000_000_070,
+      sessionId: 'session-99999999-9999-4999-8999-999999999999',
+      selection: {
+        label: 'Admin',
+        value: 'Admin',
+        index: 1,
+      },
+      fingerprint: {
+        selector: '[role="option"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'div',
+        textExcerpt: 'Admin',
+        context: {
+          parentTag: 'div',
+          nearestContainerTag: 'div',
+        },
+        attributes: {
+          role: 'option',
+        },
+        attributesHash: 'hash-custom-select',
+      },
+    });
+
+    expect((parsed as Record<string, unknown>).selection).toEqual({
+      label: 'Admin',
+      value: 'Admin',
+      index: 1,
+    });
   });
 });

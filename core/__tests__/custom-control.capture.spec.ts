@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRequire } from 'module';
 import { JSDOM } from 'jsdom';
 import { AIREventSchema } from '../types/events';
@@ -6,6 +6,7 @@ import { AIREventSchema } from '../types/events';
 const require = createRequire(import.meta.url);
 const { AIRInterceptor } = require('../../packages/vscode-extension/interceptor.js') as {
   AIRInterceptor: {
+    new (config?: Record<string, unknown>): CustomControlHarness;
     prototype: Record<string, unknown>;
   };
 };
@@ -127,6 +128,10 @@ function makeSelectorProbe(): Record<string, unknown> {
   interceptor._isElementVisible = vi.fn((el: Element | null) => !!el);
   return interceptor;
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('selector generation dynamic class alignment', () => {
   it('prefers an exact placeholder over a focused state class', () => {
@@ -317,6 +322,71 @@ describe('input field semantic context enrichment', () => {
     });
   });
 
+  it('captures searchbox bounded context for search inputs without resolver changes', () => {
+    return withBrowserGlobals(`
+      <div class="field-row">
+        <label>Employee Search</label>
+        <input class="generic-input" type="search" />
+      </div>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target);
+
+      expect(fingerprint.boundedFieldContext).toEqual(expect.objectContaining({
+        fieldLabelText: 'Employee Search',
+        targetControlKind: 'searchbox',
+        isValid: true,
+      }));
+    });
+  });
+
+  it('captures contenteditable bounded context when the editable surface is labeled', () => {
+    return withBrowserGlobals(`
+      <div class="field-row">
+        <label>Notes</label>
+        <div class="editable-surface" contenteditable="true">Draft</div>
+      </div>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('.editable-surface') as HTMLDivElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target);
+
+      expect(fingerprint.boundedFieldContext).toEqual(expect.objectContaining({
+        fieldLabelText: 'Notes',
+        targetControlKind: 'contenteditable',
+        isValid: true,
+      }));
+    });
+  });
+
+  it('joins multi-id aria-labelledby text while ignoring missing and empty references', () => {
+    return withBrowserGlobals(`
+      <span id="primary-label">Primary</span>
+      <span id="empty-label">   </span>
+      <span id="secondary-label">Secondary</span>
+      <input class="generic-input" aria-labelledby="primary-label missing-id empty-label secondary-label" />
+    `, 'https://example.test/form', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target);
+
+      expect(fingerprint.accessibilityEvidence).toEqual(expect.objectContaining({
+        accessibleName: 'Primary Secondary',
+        accessibleNameSource: 'aria-labelledby',
+      }));
+      expect(fingerprint.accessibilityEvidence?.labelledByIds).toEqual([
+        'primary-label',
+        'missing-id',
+        'empty-label',
+        'secondary-label',
+      ]);
+    });
+  });
+
   it('captures distinct bounded trigger context for repeated custom select triggers', () => {
     return withBrowserGlobals(`
       <div class="field-row">
@@ -467,6 +537,11 @@ describe('custom-control capture heuristics', () => {
       const parsed = AIREventSchema.parse(event);
 
       expect(parsed.type).toBe('custom-menu-select');
+      expect((parsed as any).selection).toEqual({
+        label: 'Logout',
+        value: 'Logout',
+        index: 0,
+      });
       expect((parsed as any).fingerprint?.textExcerpt).toBe('Logout');
       expect((parsed as any).triggerFingerprint?.selector).toBe('.oxd-userdropdown-name');
       expect((parsed as any).meta.containerRole).toBe('menu');
@@ -509,6 +584,11 @@ describe('custom-control capture heuristics', () => {
         const event = interceptor.queueEvent.mock.calls[0][0];
         const parsed = AIREventSchema.parse(event);
         expect(parsed.type).toBe('custom-select');
+        expect((parsed as any).selection).toEqual({
+          label: 'Admin',
+          value: 'Admin',
+          index: 0,
+        });
         expect((parsed as any).fingerprint?.textExcerpt).toBe('Admin');
         expect((parsed as any).triggerFingerprint?.selector).toBe('.oxd-select-text');
         expect(interceptor.log).toHaveBeenCalledWith('PENDING_OPTION_FALLBACK_CONSUMED', expect.objectContaining({
@@ -693,5 +773,95 @@ describe('custom-control capture heuristics', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('omits malformed selection payloads without crashing custom-select capture', () => {
+    return withBrowserGlobals(`
+      <div class="oxd-select-text">
+        <div class="oxd-select-text-input">-- Select --</div>
+      </div>
+      <div role="listbox">
+        <div role="option">Admin</div>
+      </div>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeHarness();
+      const trigger = document.querySelector('.oxd-select-text') as Element;
+      const option = document.querySelector('[role="option"]') as Element;
+      interceptor._openDropdown = {
+        traceId: 'trace-combobox',
+        triggerEl: trigger,
+        triggerFingerprint: interceptor.generateFingerprint(trigger),
+        controlFamily: 'combobox',
+        openTimestamp: Date.now() - 25,
+      };
+
+      expect(() => (interceptor as any)._handleCustomDropdownSelection({
+        el: option,
+        label: '',
+        value: 'Admin',
+        index: -1,
+      }, { target: option })).not.toThrow();
+
+      expect(interceptor.queueEvent).toHaveBeenCalledTimes(1);
+      const event = interceptor.queueEvent.mock.calls[0][0];
+      const parsed = AIREventSchema.parse(event);
+      expect(parsed.type).toBe('custom-select');
+      expect((parsed as any).selection).toBeUndefined();
+      expect(interceptor.log).toHaveBeenCalledWith('CUSTOM_SELECT_SELECTION_SKIPPED', expect.objectContaining({
+        eventType: 'custom-select',
+        hasLabel: false,
+        hasValue: true,
+      }));
+    });
+  });
+});
+
+describe('interceptor session id contract', () => {
+  it('generates a session-prefixed fallback session id in non-strict mode', () => {
+    return withBrowserGlobals('<div></div>', 'https://example.test/admin', () => {
+      (window as any).__air_rawFetch = vi.fn();
+      const initSpy = vi.spyOn(AIRInterceptor.prototype as any, 'init').mockImplementation(() => undefined);
+      const uuidSpy = vi.spyOn(AIRInterceptor.prototype as any, 'generateUUID').mockReturnValue('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+
+      const interceptor = new AIRInterceptor({ debugMode: false }) as unknown as CustomControlHarness;
+
+      expect(interceptor.config.sessionId).toBe('session-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+      expect(window.sessionStorage.getItem('AIR_SESSION_ID')).toBe('session-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+
+      initSpy.mockRestore();
+      uuidSpy.mockRestore();
+    });
+  });
+
+  it('normalizes a legacy bare UUID from session storage once instead of double-prefixing', () => {
+    return withBrowserGlobals('<div></div>', 'https://example.test/admin', () => {
+      (window as any).__air_rawFetch = vi.fn();
+      window.sessionStorage.setItem('AIR_SESSION_ID', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+      const initSpy = vi.spyOn(AIRInterceptor.prototype as any, 'init').mockImplementation(() => undefined);
+
+      const interceptor = new AIRInterceptor({ debugMode: false }) as unknown as CustomControlHarness;
+
+      expect(interceptor.config.sessionId).toBe('session-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+      expect(window.sessionStorage.getItem('AIR_SESSION_ID')).toBe('session-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+
+      initSpy.mockRestore();
+    });
+  });
+
+  it('preserves an already-prefixed session id as-is', () => {
+    return withBrowserGlobals('<div></div>', 'https://example.test/admin', () => {
+      (window as any).__air_rawFetch = vi.fn();
+      const initSpy = vi.spyOn(AIRInterceptor.prototype as any, 'init').mockImplementation(() => undefined);
+
+      const interceptor = new AIRInterceptor({
+        debugMode: false,
+        sessionId: 'session-cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      }) as unknown as CustomControlHarness;
+
+      expect(interceptor.config.sessionId).toBe('session-cccccccc-cccc-4ccc-8ccc-cccccccccccc');
+      expect(window.sessionStorage.getItem('AIR_SESSION_ID')).toBe('session-cccccccc-cccc-4ccc-8ccc-cccccccccccc');
+
+      initSpy.mockRestore();
+    });
   });
 });

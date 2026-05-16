@@ -1801,6 +1801,152 @@ describe('LlmOrchestrator - sidecar resolver metadata', () => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
+  it('writes recordedSelectorCandidates to sidecar without changing generated TypeScript output', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'air-selector-candidates-sidecar-'));
+    const outputDirWithCandidates = path.join(tempRoot, 'with-candidates');
+    const outputDirWithoutCandidates = path.join(tempRoot, 'without-candidates');
+    const projectRoot = path.join(tempRoot, 'project');
+    fs.mkdirSync(outputDirWithCandidates, { recursive: true });
+    fs.mkdirSync(outputDirWithoutCandidates, { recursive: true });
+    fs.mkdirSync(projectRoot, { recursive: true });
+
+    const snapshot = new JSDOM(`<!doctype html><html><body>
+      <input data-testid="username-input" name="username" placeholder="Username" />
+    </body></html>`).window.document;
+
+    const baseFingerprint = {
+      selector: 'input[name="username"]',
+      selectorPriority: 'attribute' as const,
+      selectorRank: 3,
+      tagName: 'input',
+      textExcerpt: null,
+      attributes: {
+        name: 'username',
+        placeholder: 'Username',
+        'data-testid': 'username-input',
+      },
+      attributesHash: 'selector-candidates-sidecar-hash',
+    };
+
+    const sessionWithCandidates = createSession([
+      createStep({
+        step: 1,
+        action: 'input',
+        intent: 'input_username',
+        selector: 'input[name="username"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        sourceNodeId: 'node-1',
+        normalizedUrl: 'https://example.test/login',
+        value: 'Admin',
+        fingerprint: {
+          ...baseFingerprint,
+          selectorCandidates: [
+            {
+              selector: 'input[name="username"]',
+              engine: 'css',
+              family: 'primary',
+              strength: 'strong',
+              source: 'capture',
+              isPrimary: true,
+              matchCount: 1,
+              visibleMatchCount: 1,
+              positionInAllMatches: 0,
+              positionInVisibleMatches: 0,
+              warningCodes: ['recorded-primary'],
+            },
+          ],
+        },
+      }),
+    ], {
+      url: 'https://example.test/login',
+      stepCount: 1,
+    });
+
+    const sessionWithoutCandidates = createSession([
+      createStep({
+        step: 1,
+        action: 'input',
+        intent: 'input_username',
+        selector: 'input[name="username"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        sourceNodeId: 'node-1',
+        normalizedUrl: 'https://example.test/login',
+        value: 'Admin',
+        fingerprint: baseFingerprint,
+      }),
+    ], {
+      url: 'https://example.test/login',
+      stepCount: 1,
+    });
+
+    const callSpy = vi.spyOn(LlmOrchestrator as any, 'callGeminiApi')
+      .mockResolvedValue(JSON.stringify({
+        className: 'LoginPage',
+        methods: [
+          {
+            stepNumber: 1,
+            intent: 'input_username',
+            methodName: 'fillUsername',
+            playwrightAction: `locator('input[name="username"]').fill(value)`,
+          },
+        ],
+      }));
+
+    const generationOptions = {
+      snapshotCache: {
+        get(nodeId: string) {
+          return nodeId === 'node-1' ? snapshot : null;
+        },
+        getSource() {
+          return 'source-node-snapshot' as const;
+        },
+      },
+    };
+
+    await LlmOrchestrator.generatePageObjects(
+      sessionWithCandidates,
+      outputDirWithCandidates,
+      projectRoot,
+      generationOptions,
+    );
+    await LlmOrchestrator.generatePageObjects(
+      sessionWithoutCandidates,
+      outputDirWithoutCandidates,
+      projectRoot,
+      generationOptions,
+    );
+
+    const generatedWithCandidates = fs.readFileSync(path.join(outputDirWithCandidates, 'LoginPage.ts'), 'utf-8');
+    const generatedWithoutCandidates = fs.readFileSync(path.join(outputDirWithoutCandidates, 'LoginPage.ts'), 'utf-8');
+    const sidecarWithCandidates = JSON.parse(
+      fs.readFileSync(path.join(outputDirWithCandidates, 'LoginPage.air.json'), 'utf-8'),
+    );
+    const sidecarWithoutCandidates = JSON.parse(
+      fs.readFileSync(path.join(outputDirWithoutCandidates, 'LoginPage.air.json'), 'utf-8'),
+    );
+
+    expect(generatedWithCandidates).toBe(generatedWithoutCandidates);
+    expect(sidecarWithCandidates.methods.fillUsername.recordedSelectorCandidates).toEqual([
+      expect.objectContaining({
+        selector: 'input[name="username"]',
+        engine: 'css',
+        family: 'primary',
+        strength: 'strong',
+        source: 'capture',
+        isPrimary: true,
+        positionInAllMatches: 0,
+        positionInVisibleMatches: 0,
+      }),
+    ]);
+    expect(sidecarWithoutCandidates.methods.fillUsername.recordedSelectorCandidates).toBeUndefined();
+    expect(sidecarWithCandidates.methods.fillUsername.playwrightNativeCandidates).toBeUndefined();
+
+    callSpy.mockRestore();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
   it('writes corrective retry metadata into the sidecar resolver block', async () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'air-llm-retry-sidecar-'));
     const outputDir = path.join(tempRoot, 'out');

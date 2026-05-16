@@ -584,6 +584,40 @@ export interface FingerprintSelectorAmbiguity {
   isAmbiguous: boolean;
 }
 
+export type CapturedSelectorCandidateEngine = 'css' | 'text' | 'xpath';
+
+export type CapturedSelectorCandidateFamily =
+  | 'primary'
+  | 'test-id'
+  | 'id'
+  | 'name'
+  | 'placeholder'
+  | 'aria-label'
+  | 'href'
+  | 'role-attr'
+  | 'text'
+  | 'class'
+  | 'parent-scoped-css'
+  | 'tight-container-css';
+
+export type CapturedSelectorCandidateStrength = 'strong' | 'medium' | 'weak';
+
+export interface CapturedSelectorCandidate {
+  selector: string;
+  engine: CapturedSelectorCandidateEngine;
+  family: CapturedSelectorCandidateFamily;
+  strength: CapturedSelectorCandidateStrength;
+  source: 'capture';
+  isPrimary?: boolean;
+  matchCount?: number | null;
+  visibleMatchCount?: number | null;
+  positionInAllMatches?: number | null;
+  positionInVisibleMatches?: number | null;
+  usesDynamicClass?: boolean;
+  usesIndex?: boolean;
+  warningCodes?: string[];
+}
+
 export interface FingerprintBoundedContainerSelectorCandidate {
   selector: string;
   kind: string;
@@ -639,6 +673,7 @@ export interface FingerprintData {
     nearestContainerTag?: string | null;
   };
   attributes?: FingerprintAttributes;
+  selectorCandidates?: CapturedSelectorCandidate[];
   selectorAmbiguity?: FingerprintSelectorAmbiguity;
   boundedFieldContext?: FingerprintBoundedFieldContext;
   accessibilityEvidence?: AccessibilityEvidence;

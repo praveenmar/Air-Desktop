@@ -3,6 +3,7 @@ import type {
   BoundedFieldControlKind,
   BoundedFieldRelation,
   BoundedFieldSelectorSpec,
+  CapturedSelectorCandidate,
   EquivalentRendering,
   LabelContextRenderStatus,
   LabelContextSelectorSpec,
@@ -27,6 +28,7 @@ export interface AirMethodMeta {
   resolvedSelectorSpec?: SelectorSpec;
   selectorType?: SelectorPriority;
   actionType?: ActionType;
+  recordedSelectorCandidates?: CapturedSelectorCandidate[];
   fieldLabelText?: string;
   locatorFlavor?: 'css' | 'text' | 'xpath' | 'playwright' | 'unknown';
   emittedLocator?: string;

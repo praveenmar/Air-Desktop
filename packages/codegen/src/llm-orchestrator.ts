@@ -395,6 +395,9 @@ export class LlmOrchestrator {
         resolvedSelectorSpec: resolution?.resolvedSelectorSpec,
         selectorType: originalStep.selectorPriority,
         actionType: originalStep.action,
+        recordedSelectorCandidates: originalStep.fingerprint?.selectorCandidates?.length
+          ? originalStep.fingerprint.selectorCandidates
+          : undefined,
         fieldLabelText: typeof originalStep.fingerprint?.attributes?.fieldLabelText === 'string'
           ? originalStep.fingerprint.attributes.fieldLabelText
           : undefined,

@@ -164,6 +164,15 @@ describe('active-path end-to-end contract fixture', () => {
       ariaLabel: 'Save Profile',
       'aria-label': 'Save Profile',
     }));
+    expect(parsedClick.fingerprint?.selectorCandidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        selector: '[data-testid="save-profile"]',
+        engine: 'css',
+        family: 'primary',
+        positionInAllMatches: 0,
+        positionInVisibleMatches: 0,
+      }),
+    ]));
 
     expect(parsedOutcome.type).toBe('outcome');
     expect(parsedOutcome.interactionContext).toEqual(expect.objectContaining({
@@ -214,6 +223,15 @@ describe('active-path end-to-end contract fixture', () => {
       alt: 'Save Icon',
       value: 'Save',
     }));
+    expect(storedClickPayload.fingerprint.selectorCandidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        selector: '[data-testid="save-profile"]',
+        engine: 'css',
+        family: 'primary',
+        positionInAllMatches: 0,
+        positionInVisibleMatches: 0,
+      }),
+    ]));
 
     // Intentional graph policy: outcome pageSnapshot/pageState trim, but interactionContext is kept
     // because downstream D3.5/Sprint 5 diagnostics consume it.
@@ -267,6 +285,15 @@ describe('active-path end-to-end contract fixture', () => {
         alt: 'Save Icon',
         value: 'Save',
       }));
+      expect(session.steps[0].fingerprint?.selectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          selector: '[data-testid="save-profile"]',
+          engine: 'css',
+          family: 'primary',
+          positionInAllMatches: 0,
+          positionInVisibleMatches: 0,
+        }),
+      ]));
 
       const resolverMetadata = buildSprint5ResolverMetadata();
       const sidecar: AirMetadata = {

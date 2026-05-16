@@ -32,6 +32,73 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+function buildSessionFromEventRows(rows: Array<{
+  eventId: string;
+  eventType: string;
+  timestamp: number;
+  pageUrl: string;
+  traceId: string;
+  nodeId: string | null;
+  payload: string;
+}>) {
+  const fakeDb = {
+    prepare(sql: string) {
+      if (sql.includes('FROM sessions')) {
+        return {
+          get: () => ({
+            id: 'session-test',
+            started_at: 1_700_000_000_000,
+          }),
+        };
+      }
+
+      if (sql.includes('FROM events e')) {
+        return {
+          all: () => rows,
+        };
+      }
+
+      if (sql.includes('WHERE ed.fingerprint_hash IN')) {
+        return { all: () => [] };
+      }
+
+      if (sql.includes('WHERE ed.trigger_event_id IN')) {
+        return { all: () => [] };
+      }
+
+      if (sql.includes('SELECT control_signature AS controlSignature')) {
+        return { get: () => undefined };
+      }
+
+      if (sql.includes('FROM nodes')) {
+        return {
+          all: () => [],
+          get: () => undefined,
+        };
+      }
+
+      return {
+        get: () => undefined,
+        all: () => [],
+      };
+    },
+    close() {
+      return undefined;
+    },
+  };
+
+  const service = Object.create(CodegenService.prototype) as any;
+  service.db = fakeDb;
+  service.options = {
+    dbPath: ':memory:',
+    minConfidence: 0,
+    includeScrollSteps: false,
+    includeHoverSteps: false,
+  };
+
+  return (service as CodegenService).buildSession('session-test');
+}
+
 describe('CodegenService - Priority & Rank', () => {
   it('safely handles legacy DB rows missing a selectorPriority', () => {
     expect(normalizeSelectorPriority(undefined)).toBe('unknown');
@@ -770,6 +837,523 @@ describe('CodegenService - Step Metadata Preservation', () => {
     expect(session.steps[0].controlSignature).toBe('sig-profile-v1');
     expect(session.steps[0].fingerprint?.tagName).toBe('button');
     expect(session.steps[0].fingerprint?.parentSelector).toBe('#profile-form');
+  });
+
+  it('buildSession preserves role-text accessibility evidence on fingerprints', () => {
+    const eventPayload = JSON.stringify({
+      normalizedUrl: 'https://app.test/admin',
+      fingerprint: {
+        selector: '[role="option"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'div',
+        textExcerpt: 'Admin',
+        context: {
+          parentTag: 'div',
+          nearestContainerTag: 'div',
+        },
+        attributes: {
+          role: 'option',
+        },
+        accessibilityEvidence: {
+          role: 'option',
+          accessibleName: 'Admin',
+          accessibleNameSource: 'role-text',
+        },
+        attributesHash: 'role-text-hash',
+      },
+    });
+
+    const fakeDb = {
+      prepare(sql: string) {
+        if (sql.includes('FROM sessions')) {
+          return {
+            get: () => ({
+              id: 'session-test',
+              started_at: 1_700_000_000_000,
+            }),
+          };
+        }
+
+        if (sql.includes('FROM events e')) {
+          return {
+            all: () => ([
+              {
+                eventId: 'ev-role-text',
+                eventType: 'click',
+                timestamp: 1_700_000_000_100,
+                pageUrl: 'https://app.test/admin',
+                traceId: 'trace-role-text',
+                nodeId: 'node-1',
+                payload: eventPayload,
+              },
+            ]),
+          };
+        }
+
+        if (sql.includes('WHERE ed.fingerprint_hash IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('WHERE ed.trigger_event_id IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('SELECT control_signature AS controlSignature')) {
+          return { get: () => undefined };
+        }
+
+        if (sql.includes('FROM nodes')) {
+          return {
+            all: () => [],
+            get: () => undefined,
+          };
+        }
+
+        return {
+          get: () => undefined,
+          all: () => [],
+        };
+      },
+      close() {
+        return undefined;
+      },
+    };
+
+    const service = Object.create(CodegenService.prototype) as any;
+    service.db = fakeDb;
+    service.options = {
+      dbPath: ':memory:',
+      minConfidence: 0,
+      includeScrollSteps: false,
+      includeHoverSteps: false,
+    };
+
+    const session = (service as CodegenService).buildSession('session-test');
+    expect(session.steps).toHaveLength(1);
+    expect(session.steps[0].fingerprint?.accessibilityEvidence).toEqual(expect.objectContaining({
+      accessibleName: 'Admin',
+      accessibleNameSource: 'role-text',
+    }));
+  });
+
+  it('buildSession normalizes unknown accessibleNameSource values to none', () => {
+    const eventPayload = JSON.stringify({
+      normalizedUrl: 'https://app.test/admin',
+      fingerprint: {
+        selector: '[name="username"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'input',
+        textExcerpt: null,
+        context: {
+          parentTag: 'form',
+          nearestContainerTag: 'form',
+        },
+        attributes: {
+          name: 'username',
+        },
+        accessibilityEvidence: {
+          role: 'textbox',
+          accessibleName: 'Username',
+          accessibleNameSource: 'unexpected-source',
+        },
+        attributesHash: 'unknown-source-hash',
+      },
+    });
+
+    const fakeDb = {
+      prepare(sql: string) {
+        if (sql.includes('FROM sessions')) {
+          return {
+            get: () => ({
+              id: 'session-test',
+              started_at: 1_700_000_000_000,
+            }),
+          };
+        }
+
+        if (sql.includes('FROM events e')) {
+          return {
+            all: () => ([
+              {
+                eventId: 'ev-unknown-source',
+                eventType: 'input',
+                timestamp: 1_700_000_000_100,
+                pageUrl: 'https://app.test/admin',
+                traceId: 'trace-unknown-source',
+                nodeId: 'node-1',
+                payload: eventPayload,
+              },
+            ]),
+          };
+        }
+
+        if (sql.includes('WHERE ed.fingerprint_hash IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('WHERE ed.trigger_event_id IN')) {
+          return { all: () => [] };
+        }
+
+        if (sql.includes('SELECT control_signature AS controlSignature')) {
+          return { get: () => undefined };
+        }
+
+        if (sql.includes('FROM nodes')) {
+          return {
+            all: () => [],
+            get: () => undefined,
+          };
+        }
+
+        return {
+          get: () => undefined,
+          all: () => [],
+        };
+      },
+      close() {
+        return undefined;
+      },
+    };
+
+    const service = Object.create(CodegenService.prototype) as any;
+    service.db = fakeDb;
+    service.options = {
+      dbPath: ':memory:',
+      minConfidence: 0,
+      includeScrollSteps: false,
+      includeHoverSteps: false,
+    };
+
+    const session = (service as CodegenService).buildSession('session-test');
+    expect(session.steps).toHaveLength(1);
+    expect(session.steps[0].fingerprint?.accessibilityEvidence?.accessibleNameSource).toBe('none');
+  });
+
+  it('buildSession preserves valid selectorCandidates on fingerprints', () => {
+    const eventPayload = JSON.stringify({
+      normalizedUrl: 'https://app.test/login',
+      fingerprint: {
+        selector: '[name="username"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'input',
+        textExcerpt: null,
+        context: {
+          parentTag: 'form',
+          nearestContainerTag: 'form',
+        },
+        attributes: {
+          name: 'username',
+        },
+        selectorCandidates: [
+          {
+            selector: '[name="username"]',
+            engine: 'css',
+            family: 'primary',
+            strength: 'strong',
+            source: 'capture',
+            isPrimary: true,
+            matchCount: 1,
+            visibleMatchCount: 1,
+            positionInAllMatches: 0,
+            positionInVisibleMatches: 0,
+            warningCodes: ['recorded-primary'],
+          },
+        ],
+        attributesHash: 'selector-candidates-valid-hash',
+      },
+    });
+
+    const session = buildSessionFromEventRows([{
+      eventId: 'ev-selector-candidates',
+      eventType: 'input',
+      timestamp: 1_700_000_000_100,
+      pageUrl: 'https://app.test/login',
+      traceId: 'trace-selector-candidates',
+      nodeId: 'node-1',
+      payload: eventPayload,
+    }]);
+
+    expect(session.steps).toHaveLength(1);
+    expect(session.steps[0].fingerprint?.selectorCandidates).toEqual([
+      expect.objectContaining({
+        selector: '[name="username"]',
+        engine: 'css',
+        family: 'primary',
+        strength: 'strong',
+        source: 'capture',
+        isPrimary: true,
+        matchCount: 1,
+        visibleMatchCount: 1,
+        positionInAllMatches: 0,
+        positionInVisibleMatches: 0,
+        warningCodes: ['recorded-primary'],
+      }),
+    ]);
+  });
+
+  it('buildSession caps selectorCandidates at 8 and dedupes by engine + family + selector', () => {
+    const selectorCandidates = [
+      {
+        selector: '[name="username"]',
+        engine: 'css',
+        family: 'primary',
+        strength: 'strong',
+        source: 'capture',
+      },
+      {
+        selector: '[name="username"]',
+        engine: 'css',
+        family: 'primary',
+        strength: 'weak',
+        source: 'capture',
+        warningCodes: ['duplicate-should-drop'],
+      },
+      ...Array.from({ length: 9 }, (_, index) => ({
+        selector: `[data-testid="candidate-${index + 1}"]`,
+        engine: 'css' as const,
+        family: 'test-id' as const,
+        strength: index % 2 === 0 ? 'strong' as const : 'medium' as const,
+        source: 'capture' as const,
+      })),
+    ];
+
+    const eventPayload = JSON.stringify({
+      normalizedUrl: 'https://app.test/login',
+      fingerprint: {
+        selector: '[name="username"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'input',
+        textExcerpt: null,
+        context: {
+          parentTag: 'form',
+          nearestContainerTag: 'form',
+        },
+        attributes: {
+          name: 'username',
+        },
+        selectorCandidates,
+        attributesHash: 'selector-candidates-cap-hash',
+      },
+    });
+
+    const session = buildSessionFromEventRows([{
+      eventId: 'ev-selector-candidates-cap',
+      eventType: 'input',
+      timestamp: 1_700_000_000_101,
+      pageUrl: 'https://app.test/login',
+      traceId: 'trace-selector-candidates-cap',
+      nodeId: 'node-1',
+      payload: eventPayload,
+    }]);
+
+    expect(session.steps).toHaveLength(1);
+    expect(session.steps[0].fingerprint?.selectorCandidates).toHaveLength(8);
+    expect(session.steps[0].fingerprint?.selectorCandidates?.[0]).toEqual(
+      expect.objectContaining({
+        selector: '[name="username"]',
+        engine: 'css',
+        family: 'primary',
+      }),
+    );
+    expect(session.steps[0].fingerprint?.selectorCandidates?.filter(candidate =>
+      candidate.selector === '[name="username"]' &&
+      candidate.engine === 'css' &&
+      candidate.family === 'primary',
+    )).toHaveLength(1);
+    expect(session.steps[0].fingerprint?.selectorCandidates?.some(candidate =>
+      candidate.selector === '[data-testid="candidate-8"]',
+    )).toBe(false);
+  });
+
+  it('buildSession drops invalid selectorCandidates safely and omits empty normalized arrays', () => {
+    const eventPayload = JSON.stringify({
+      normalizedUrl: 'https://app.test/login',
+      fingerprint: {
+        selector: '[name="username"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'input',
+        textExcerpt: null,
+        context: {
+          parentTag: 'form',
+          nearestContainerTag: 'form',
+        },
+        attributes: {
+          name: 'username',
+        },
+        selectorCandidates: [
+          {
+            selector: '[name="username"]',
+            engine: 'css',
+            family: 'name',
+            strength: 'strong',
+            source: 'capture',
+          },
+          {
+            selector: '.bad-engine',
+            engine: 'playwright',
+            family: 'class',
+            strength: 'weak',
+            source: 'capture',
+          },
+          {
+            selector: '',
+            engine: 'css',
+            family: 'class',
+            strength: 'weak',
+            source: 'capture',
+          },
+        ],
+        attributesHash: 'selector-candidates-invalid-hash',
+      },
+    });
+
+    const noValidCandidatesPayload = JSON.stringify({
+      normalizedUrl: 'https://app.test/login',
+      fingerprint: {
+        selector: '[name="password"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'input',
+        textExcerpt: null,
+        context: {
+          parentTag: 'form',
+          nearestContainerTag: 'form',
+        },
+        attributes: {
+          name: 'password',
+        },
+        selectorCandidates: [
+          {
+            selector: '.bad-engine',
+            engine: 'playwright',
+            family: 'class',
+            strength: 'weak',
+            source: 'capture',
+          },
+        ],
+        attributesHash: 'selector-candidates-empty-hash',
+      },
+    });
+
+    const session = buildSessionFromEventRows([
+      {
+        eventId: 'ev-selector-candidates-invalid',
+        eventType: 'input',
+        timestamp: 1_700_000_000_102,
+        pageUrl: 'https://app.test/login',
+        traceId: 'trace-selector-candidates-invalid',
+        nodeId: 'node-1',
+        payload: eventPayload,
+      },
+      {
+        eventId: 'ev-selector-candidates-empty',
+        eventType: 'input',
+        timestamp: 1_700_000_000_103,
+        pageUrl: 'https://app.test/login',
+        traceId: 'trace-selector-candidates-empty',
+        nodeId: 'node-1',
+        payload: noValidCandidatesPayload,
+      },
+    ]);
+
+    expect(session.steps).toHaveLength(2);
+    expect(session.steps[0].fingerprint?.selectorCandidates).toEqual([
+      expect.objectContaining({
+        selector: '[name="username"]',
+        engine: 'css',
+        family: 'name',
+      }),
+    ]);
+    expect(session.steps[1].fingerprint?.selectorCandidates).toBeUndefined();
+  });
+
+  it('buildSession preserves selectorCandidates on triggerFingerprint for custom-control events', () => {
+    const customSelectPayload = JSON.stringify({
+      normalizedUrl: 'https://example.test/admin',
+      fingerprint: {
+        selector: '[role="option"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'div',
+        textExcerpt: 'Admin',
+        attributes: {
+          role: 'option',
+        },
+        selectorCandidates: [
+          {
+            selector: '[role="option"]',
+            engine: 'css',
+            family: 'primary',
+            strength: 'strong',
+            source: 'capture',
+          },
+        ],
+        attributesHash: 'hash-option-selector-candidates',
+      },
+      triggerFingerprint: {
+        selector: '.oxd-select-text',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'div',
+        textExcerpt: 'User Role',
+        attributes: {
+          role: 'combobox',
+        },
+        selectorCandidates: [
+          {
+            selector: '.oxd-select-text',
+            engine: 'css',
+            family: 'primary',
+            strength: 'weak',
+            source: 'capture',
+            usesDynamicClass: true,
+          },
+        ],
+        attributesHash: 'hash-trigger-selector-candidates',
+      },
+      selection: {
+        label: 'Admin',
+        value: 'Admin',
+        index: 0,
+      },
+      controlFamily: 'combobox',
+      meta: {
+        triggerSelector: '.oxd-select-text',
+      },
+    });
+
+    const session = buildSessionFromEventRows([{
+      eventId: 'ev-custom-select-selector-candidates',
+      eventType: 'custom-select',
+      timestamp: 1_700_000_000_104,
+      pageUrl: 'https://example.test/admin',
+      traceId: 'trace-custom-select-selector-candidates',
+      nodeId: 'node-1',
+      payload: customSelectPayload,
+    }]);
+
+    expect(session.steps).toHaveLength(1);
+    expect(session.steps[0].fingerprint?.selectorCandidates).toEqual([
+      expect.objectContaining({
+        selector: '[role="option"]',
+        engine: 'css',
+        family: 'primary',
+      }),
+    ]);
+    expect(session.steps[0].triggerFingerprint?.selectorCandidates).toEqual([
+      expect.objectContaining({
+        selector: '.oxd-select-text',
+        engine: 'css',
+        family: 'primary',
+        usesDynamicClass: true,
+      }),
+    ]);
   });
 
   it('buildSession preserves nestedContext fields used by snapshot selection', () => {
@@ -1735,6 +2319,7 @@ describe('CodegenService - Step Metadata Preservation', () => {
       selection: {
         label: 'Admin',
         value: 'Admin',
+        index: 0,
       },
       controlFamily: 'combobox',
       meta: {

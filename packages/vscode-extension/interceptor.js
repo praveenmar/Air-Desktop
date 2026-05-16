@@ -356,6 +356,7 @@ class AIRInterceptor {
     let currentSessionId = config.sessionId;
     let strictMode = false;
     let configServerUrl = null;
+    let sessionIdDebugMeta = null;
 
     // Read injected runtime config first (set by main process).
     if (typeof window !== "undefined" && window.__AIR_CONFIG__) {
@@ -368,7 +369,14 @@ class AIRInterceptor {
     // Non-strict only: allow sessionStorage fallback.
     if (!currentSessionId && !strictMode) {
       const storedSessionId = this._safeGetStorage("session", "AIR_SESSION_ID");
-      if (storedSessionId) currentSessionId = storedSessionId;
+      const normalizedStoredSessionId = this._normalizeSessionId(storedSessionId);
+      if (storedSessionId && normalizedStoredSessionId && normalizedStoredSessionId !== storedSessionId) {
+        sessionIdDebugMeta = {
+          kind: "normalized",
+          source: "session_storage",
+        };
+      }
+      if (normalizedStoredSessionId) currentSessionId = normalizedStoredSessionId;
     }
 
     if (strictMode && !currentSessionId) {
@@ -376,21 +384,34 @@ class AIRInterceptor {
       this.disabled = true;
       return;
     }
-
     // Generate and persist only for non-strict fallback mode.
     if (!currentSessionId) {
-      currentSessionId = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(
-        /[xy]/g,
-        (c) => {
-          const r = (Math.random() * 16) | 0;
-          return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
-        },
-      );
+      currentSessionId = this._createFallbackSessionId();
+      sessionIdDebugMeta = {
+        kind: "generated",
+        source: "non_strict_fallback",
+      };
 
       if (!strictMode) {
         this._safeSetStorage("session", "AIR_SESSION_ID", currentSessionId);
       }
     } else if (!strictMode) {
+      const normalizedSessionId = this._normalizeSessionId(currentSessionId);
+      if (normalizedSessionId) {
+        if (normalizedSessionId !== currentSessionId) {
+          sessionIdDebugMeta = {
+            kind: "normalized",
+            source: "non_strict_input",
+          };
+        }
+        currentSessionId = normalizedSessionId;
+      } else {
+        currentSessionId = this._createFallbackSessionId();
+        sessionIdDebugMeta = {
+          kind: "generated",
+          source: "invalid_non_strict_input",
+        };
+      }
       this._safeSetStorage("session", "AIR_SESSION_ID", currentSessionId);
     }
 
@@ -479,6 +500,18 @@ class AIRInterceptor {
       corsEnabled: config.corsEnabled ?? true,
       tabId: resolvedTab.tabId,
     };
+
+    if (sessionIdDebugMeta?.kind === "normalized") {
+      this.log("AIR_SESSION_ID_NORMALIZED", {
+        source: sessionIdDebugMeta.source,
+        sessionId: currentSessionId,
+      });
+    } else if (sessionIdDebugMeta?.kind === "generated") {
+      this.log("AIR_SESSION_ID_GENERATED", {
+        source: sessionIdDebugMeta.source,
+        sessionId: currentSessionId,
+      });
+    }
 
     // ------------------------------------------------------------
     // 3. INTERNAL STATE & QUEUES (Restored)
@@ -678,6 +711,24 @@ class AIRInterceptor {
       this._markStorageUnavailable(error);
       return false;
     }
+  }
+
+  _looksLikeSessionId(value) {
+    return typeof value === "string" && /^session-[a-f0-9-]+$/i.test(value);
+  }
+
+  _looksLikeBareUuid(value) {
+    return typeof value === "string" && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(value);
+  }
+
+  _normalizeSessionId(value) {
+    if (this._looksLikeSessionId(value)) return value;
+    if (this._looksLikeBareUuid(value)) return `session-${value}`;
+    return null;
+  }
+
+  _createFallbackSessionId() {
+    return `session-${this.generateUUID()}`;
   }
 
   _getTabIdStorageKey() {
@@ -4844,6 +4895,54 @@ class AIRInterceptor {
   // ──────────────────────────────────────────────────────────────
 
   /**
+   * Build a schema-compatible selection payload for semantic custom controls.
+   * Returns undefined when capture truth is incomplete so downstream behavior
+   * remains backward compatible instead of emitting malformed selection data.
+   */
+  _buildSelectionPayload(optionData, eventType = null) {
+    if (!optionData || typeof optionData !== "object") {
+      this.log("CUSTOM_SELECT_SELECTION_SKIPPED", {
+        eventType,
+        reason: "missing_option_data",
+        hasLabel: false,
+        hasValue: false,
+        index: null,
+      });
+      return undefined;
+    }
+
+    const label = this._normalizeFieldSemanticText(optionData.label, 200);
+    const value = this._normalizeFieldSemanticText(optionData.value, 200);
+    const index = Number.isInteger(optionData.index) && optionData.index >= 0
+      ? optionData.index
+      : null;
+
+    if (!label || !value || index === null) {
+      this.log("CUSTOM_SELECT_SELECTION_SKIPPED", {
+        eventType,
+        reason: "incomplete_option_data",
+        hasLabel: !!label,
+        hasValue: !!value,
+        index,
+      });
+      return undefined;
+    }
+
+    this.log("CUSTOM_SELECT_SELECTION_EMITTED", {
+      eventType,
+      hasLabel: true,
+      hasValue: true,
+      index,
+    });
+
+    return {
+      label,
+      value,
+      index,
+    };
+  }
+
+  /**
    * Called (via rAF) after a trigger click.
    * If aria-expanded is now "true" (or a panel appeared in the DOM),
    * we open a tracking session and watch for the option panel.
@@ -4981,6 +5080,7 @@ class AIRInterceptor {
       containerRole === "menu" ||
       controlFamily === "menu";
     const eventType = isMenuSelection ? EventType.CUSTOM_MENU_SELECT : EventType.CUSTOM_SELECT;
+    const selection = this._buildSelectionPayload(optionData, eventType);
 
     this.log("✅ Custom dropdown option selected", { label, value, index });
 
@@ -5034,6 +5134,7 @@ class AIRInterceptor {
       schemaVersion: "air:v2",
       controlFamily,
       optionRole: optionRole || undefined,
+      ...(selection ? { selection } : {}),
       // ── Relationship back to the trigger element ──
       triggerFingerprint: triggerFp,
       // ── Option element identity ──
@@ -6154,14 +6255,24 @@ class AIRInterceptor {
   _collectBoundedFieldContext(element, selectorResult) {
     if (!element || element.nodeType !== Node.ELEMENT_NODE) return undefined;
     const tagName = element.tagName.toLowerCase();
-    const role = element.getAttribute("role");
+    const role = (element.getAttribute("role") || "").toLowerCase();
+    const inputType = (element.getAttribute("type") || "").toLowerCase();
+    const contentEditableAttr = (element.getAttribute("contenteditable") || "").toLowerCase();
+    const hasContentEditableAttr = element.hasAttribute("contenteditable");
+    const isContentEditable = element.isContentEditable || (hasContentEditableAttr && contentEditableAttr !== "false");
 
     // Determine control kind
     let targetControlKind = null;
-    if (["input", "textarea", "select"].includes(tagName)) {
+    if (tagName === "input" && inputType === "search") {
+      targetControlKind = "searchbox";
+    } else if (["input", "textarea", "select"].includes(tagName)) {
       targetControlKind = tagName;
+    } else if (role === "searchbox") {
+      targetControlKind = "searchbox";
     } else if (role === "combobox") {
       targetControlKind = "combobox";
+    } else if (isContentEditable) {
+      targetControlKind = "contenteditable";
     } else if (
       element.getAttribute("aria-haspopup") === "listbox" ||
       element.classList.contains("oxd-select-text") ||
@@ -6206,7 +6317,7 @@ class AIRInterceptor {
     let visibleControlCountInContainer = 1;
     let competingControlCount = 0;
     if (container) {
-      const controls = Array.from(container.querySelectorAll("input, textarea, select, [role='combobox'], [aria-haspopup='listbox'], .select-trigger, .oxd-select-text"));
+      const controls = Array.from(container.querySelectorAll("input, textarea, select, [role='searchbox'], [role='combobox'], [contenteditable]:not([contenteditable='false']), [aria-haspopup='listbox'], .select-trigger, .oxd-select-text"));
       const visibleControls = controls.filter((c) => this._isElementVisible(c));
       visibleControlCountInContainer = visibleControls.length;
       competingControlCount = visibleControlCountInContainer - 1;

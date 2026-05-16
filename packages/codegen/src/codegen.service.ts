@@ -38,6 +38,7 @@ import {
   ActionType,
   SelectorPriority,
   AssertionType,
+  CapturedSelectorCandidate,
   FingerprintData,
   NestedContextData,
   SelectorSpec,
@@ -65,6 +66,32 @@ export const SELECTOR_RANK_MAP: Record<string, number> = {
   chained: 10,
   unknown: 10,
 };
+
+const MAX_RECORDED_SELECTOR_CANDIDATES = 8;
+const VALID_CAPTURED_SELECTOR_CANDIDATE_ENGINES = new Set<CapturedSelectorCandidate['engine']>([
+  'css',
+  'text',
+  'xpath',
+]);
+const VALID_CAPTURED_SELECTOR_CANDIDATE_FAMILIES = new Set<CapturedSelectorCandidate['family']>([
+  'primary',
+  'test-id',
+  'id',
+  'name',
+  'placeholder',
+  'aria-label',
+  'href',
+  'role-attr',
+  'text',
+  'class',
+  'parent-scoped-css',
+  'tight-container-css',
+]);
+const VALID_CAPTURED_SELECTOR_CANDIDATE_STRENGTHS = new Set<CapturedSelectorCandidate['strength']>([
+  'strong',
+  'medium',
+  'weak',
+]);
 
 function escapeCssString(value: string): string {
   return value
@@ -233,6 +260,94 @@ function normalizeFingerprintAttributes(raw: unknown): FingerprintData['attribut
   }
 
   return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function normalizeNonNegativeInteger(raw: unknown): number | null | undefined {
+  if (raw === null) return null;
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0) return undefined;
+  return raw;
+}
+
+function normalizeCapturedSelectorCandidate(raw: unknown): CapturedSelectorCandidate | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const source = raw as Record<string, unknown>;
+  const selector = typeof source.selector === 'string' ? source.selector.trim() : '';
+  const engine = typeof source.engine === 'string' ? source.engine : undefined;
+  const family = typeof source.family === 'string' ? source.family : undefined;
+  const strength = typeof source.strength === 'string' ? source.strength : undefined;
+  const captureSource = typeof source.source === 'string' ? source.source : undefined;
+
+  if (!selector) return null;
+  if (!engine || !VALID_CAPTURED_SELECTOR_CANDIDATE_ENGINES.has(engine as CapturedSelectorCandidate['engine'])) {
+    return null;
+  }
+  if (!family || !VALID_CAPTURED_SELECTOR_CANDIDATE_FAMILIES.has(family as CapturedSelectorCandidate['family'])) {
+    return null;
+  }
+  if (!strength || !VALID_CAPTURED_SELECTOR_CANDIDATE_STRENGTHS.has(strength as CapturedSelectorCandidate['strength'])) {
+    return null;
+  }
+  if (captureSource !== 'capture') return null;
+
+  const warningCodes = Array.isArray(source.warningCodes)
+    ? Array.from(new Set(
+        source.warningCodes
+          .filter((code): code is string => typeof code === 'string')
+          .map(code => code.trim())
+          .filter(Boolean),
+      ))
+    : undefined;
+
+  const candidate: CapturedSelectorCandidate = {
+    selector,
+    engine: engine as CapturedSelectorCandidate['engine'],
+    family: family as CapturedSelectorCandidate['family'],
+    strength: strength as CapturedSelectorCandidate['strength'],
+    source: 'capture',
+  };
+
+  if (typeof source.isPrimary === 'boolean') candidate.isPrimary = source.isPrimary;
+  if (typeof source.usesDynamicClass === 'boolean') candidate.usesDynamicClass = source.usesDynamicClass;
+  if (typeof source.usesIndex === 'boolean') candidate.usesIndex = source.usesIndex;
+
+  const matchCount = normalizeNonNegativeInteger(source.matchCount);
+  if (matchCount !== undefined) candidate.matchCount = matchCount;
+
+  const visibleMatchCount = normalizeNonNegativeInteger(source.visibleMatchCount);
+  if (visibleMatchCount !== undefined) candidate.visibleMatchCount = visibleMatchCount;
+
+  const positionInAllMatches = normalizeNonNegativeInteger(source.positionInAllMatches);
+  if (positionInAllMatches !== undefined) candidate.positionInAllMatches = positionInAllMatches;
+
+  const positionInVisibleMatches = normalizeNonNegativeInteger(source.positionInVisibleMatches);
+  if (positionInVisibleMatches !== undefined) candidate.positionInVisibleMatches = positionInVisibleMatches;
+
+  if (warningCodes && warningCodes.length > 0) {
+    candidate.warningCodes = warningCodes;
+  }
+
+  return candidate;
+}
+
+function normalizeSelectorCandidates(raw: unknown): FingerprintData['selectorCandidates'] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+
+  const normalized: CapturedSelectorCandidate[] = [];
+  const seen = new Set<string>();
+
+  for (const entry of raw) {
+    const candidate = normalizeCapturedSelectorCandidate(entry);
+    if (!candidate) continue;
+
+    const dedupeKey = `${candidate.engine}::${candidate.family}::${candidate.selector}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+
+    normalized.push(candidate);
+    if (normalized.length >= MAX_RECORDED_SELECTOR_CANDIDATES) break;
+  }
+
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function normalizeSelectorAmbiguity(raw: unknown): FingerprintData['selectorAmbiguity'] | undefined {
@@ -427,6 +542,7 @@ function normalizeFingerprint(raw: unknown): FingerprintData | null {
       }
       : undefined,
     attributes,
+    selectorCandidates: normalizeSelectorCandidates(fingerprint.selectorCandidates),
     selectorAmbiguity: normalizeSelectorAmbiguity(fingerprint.selectorAmbiguity),
     boundedFieldContext: normalizeBoundedFieldContext(fingerprint.boundedFieldContext),
     accessibilityEvidence: normalizeAccessibilityEvidence(fingerprint.accessibilityEvidence),
