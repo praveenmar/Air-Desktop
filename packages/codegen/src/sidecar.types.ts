@@ -85,6 +85,23 @@ export interface AirMethodMeta {
   cleanChildSelector?: string;
   structuralFallbackLocator?: string;
   recoveredFromSelector?: string;
+  emittedWeakFallback?: boolean;
+  weakFallbackReason?: string;
+  weakFallbackSelector?: string;
+  weakFallbackLocator?: string;
+  weakFallbackIndex?: number | null;
+  weakFallbackIndexKind?: 'visible';
+  weakFallbackUsedVisibleFilter?: boolean;
+  weakFallbackMatchCount?: number | null;
+  weakFallbackVisibleMatchCount?: number | null;
+  weakFallbackSource?:
+    | 'resolved-selector'
+    | 'recorded-selector'
+    | 'trigger-selector'
+    | 'plain-locator'
+    | 'first-fallback'
+    | 'indexed-fallback';
+  weakFallbackWarnings?: string[];
   warningCodes?: string[];
   playwrightNativeCandidates?: PlaywrightNativeCandidateReportEntry[];
 }

@@ -3,6 +3,7 @@ import * as path from 'path';
 import { CodegenSession, CodegenStep } from './types';
 import type {
   BoundedFieldSelectorSpec,
+  FingerprintSelectorAmbiguity,
   LabelContextRenderStatus,
   LabelContextSelectorSpec,
   TriggerContextSelectorSpec,
@@ -14,6 +15,7 @@ import { FlowReviewService } from './flow-review.service';
 import {
   canRenderSelectorSpecConfidently,
   getSelectorSpecRenderingWarnings,
+  inferSelectorEngine,
   pickPreferredEquivalentRendering,
   renderLocatorExpressionFromEquivalentRendering,
   renderLocatorExpressionFromSelectorSpec,
@@ -95,6 +97,17 @@ interface EmittedMethod {
   boundedFieldControlKind?: AirMethodMeta['boundedFieldControlKind'];
   boundedFieldMatchedContainerSummary?: string | null;
   boundedFieldOriginalSelector?: string | null;
+  emittedWeakFallback?: boolean;
+  weakFallbackReason?: string;
+  weakFallbackSelector?: string;
+  weakFallbackLocator?: string;
+  weakFallbackIndex?: number | null;
+  weakFallbackIndexKind?: AirMethodMeta['weakFallbackIndexKind'];
+  weakFallbackUsedVisibleFilter?: boolean;
+  weakFallbackMatchCount?: number | null;
+  weakFallbackVisibleMatchCount?: number | null;
+  weakFallbackSource?: AirMethodMeta['weakFallbackSource'];
+  weakFallbackWarnings?: string[];
   extraWarningComments?: string[];
   extraWarningCodes?: string[];
 }
@@ -109,6 +122,49 @@ interface AssertionHelperSeed {
 interface ValueParameter {
   name: string;
   defaultValue: string;
+}
+
+type WeakFallbackSource = NonNullable<AirMethodMeta['weakFallbackSource']>;
+type WeakFallbackIndexKind = NonNullable<AirMethodMeta['weakFallbackIndexKind']>;
+
+interface WeakFallbackSelectorCandidate {
+  selector?: string | null;
+  selectorSpec?: CodegenStep['selectorSpec'];
+  recordedAmbiguity?: FingerprintSelectorAmbiguity;
+  validationMatchCount?: number | null;
+  validationVisibleMatchCount?: number | null;
+  selectorOrigin: 'resolved-selector' | 'recorded-selector' | 'trigger-selector';
+}
+
+interface WeakFallbackRenderResult {
+  locatorExpression: string;
+  selector: string;
+  index: number | null;
+  indexKind: WeakFallbackIndexKind | null;
+  usedVisibleFilter: boolean;
+  matchCount: number | null;
+  visibleMatchCount: number | null;
+  recordedMatchCount: number | null;
+  recordedVisibleMatchCount: number | null;
+  reason: string;
+  source: WeakFallbackSource;
+  warnings: string[];
+}
+
+interface WeakFallbackBuildFailure {
+  debugReason: string;
+}
+
+interface WeakFallbackActionRenderResult {
+  lines: string[];
+  fullAction: string;
+  methodParams: string;
+}
+
+interface CustomControlOptionFallbackRenderResult {
+  lines: string[];
+  fullAction: string;
+  warningLines: string[];
 }
 
 export interface GeneratePageObjectsOptions {
@@ -413,6 +469,17 @@ export class LlmOrchestrator {
         cleanChildSelector: emittedMethod.cleanChildSelector ?? undefined,
         structuralFallbackLocator: emittedMethod.structuralFallbackLocator ?? undefined,
         recoveredFromSelector: emittedMethod.recoveredFromSelector ?? undefined,
+        emittedWeakFallback: emittedMethod.emittedWeakFallback,
+        weakFallbackReason: emittedMethod.weakFallbackReason,
+        weakFallbackSelector: emittedMethod.weakFallbackSelector,
+        weakFallbackLocator: emittedMethod.weakFallbackLocator,
+        weakFallbackIndex: emittedMethod.weakFallbackIndex,
+        weakFallbackIndexKind: emittedMethod.weakFallbackIndexKind,
+        weakFallbackUsedVisibleFilter: emittedMethod.weakFallbackUsedVisibleFilter,
+        weakFallbackMatchCount: emittedMethod.weakFallbackMatchCount,
+        weakFallbackVisibleMatchCount: emittedMethod.weakFallbackVisibleMatchCount,
+        weakFallbackSource: emittedMethod.weakFallbackSource,
+        weakFallbackWarnings: emittedMethod.weakFallbackWarnings,
         warningCodes: Array.from(new Set([
           ...(emittedMethod.emittedLocatorWarnings ?? []),
           ...(emittedMethod.extraWarningCodes ?? []),
@@ -470,6 +537,17 @@ export class ${parsedResponse.className} extends AirBasePage {
           triggerWarningCodes: meta.triggerWarningCodes ?? [],
           emittedLocator: meta.emittedLocator ?? null,
           emittedLocatorWarnings: meta.emittedLocatorWarnings ?? [],
+          emittedWeakFallback: meta.emittedWeakFallback ?? false,
+          weakFallbackReason: meta.weakFallbackReason ?? null,
+          weakFallbackSelector: meta.weakFallbackSelector ?? null,
+          weakFallbackLocator: meta.weakFallbackLocator ?? null,
+          weakFallbackIndex: meta.weakFallbackIndex ?? null,
+          weakFallbackIndexKind: meta.weakFallbackIndexKind ?? null,
+          weakFallbackUsedVisibleFilter: meta.weakFallbackUsedVisibleFilter ?? false,
+          weakFallbackMatchCount: meta.weakFallbackMatchCount ?? null,
+          weakFallbackVisibleMatchCount: meta.weakFallbackVisibleMatchCount ?? null,
+          weakFallbackSource: meta.weakFallbackSource ?? null,
+          weakFallbackWarnings: meta.weakFallbackWarnings ?? [],
           labelContextRenderStatus: meta.labelContextRenderStatus ?? null,
           labelContextRenderReason: meta.labelContextRenderReason ?? null,
           triggerContextRenderStatus: meta.triggerContextRenderStatus ?? null,
@@ -1024,6 +1102,474 @@ ${methodsContent.join('\n\n')}
     ];
   }
 
+  private static isStructuredSelectorSpec(
+    selectorSpec?: CodegenStep['selectorSpec'],
+  ): boolean {
+    return (
+      selectorSpec?.engine === 'label-context' ||
+      selectorSpec?.engine === 'trigger-context' ||
+      selectorSpec?.engine === 'bounded-field' ||
+      selectorSpec?.engine === 'scoped'
+    );
+  }
+
+  private static looksLikeRenderedLocatorExpression(selector: string): boolean {
+    return /^(?:locator|getBy(?:TestId|Role|Label|Placeholder|Text))\(/.test(selector.trim());
+  }
+
+  private static matchRecordedAmbiguityToSelector(
+    selector: string,
+    ambiguity?: FingerprintSelectorAmbiguity | null,
+  ): FingerprintSelectorAmbiguity | undefined {
+    if (!ambiguity) return undefined;
+    const originalSelector = this.normalizeSelectorKey(ambiguity.originalSelector || '');
+    const candidateSelector = this.normalizeSelectorKey(selector);
+    if (!originalSelector || !candidateSelector) return undefined;
+    return originalSelector === candidateSelector ? ambiguity : undefined;
+  }
+
+  private static buildWeakFallbackBaseLocatorExpr(
+    selector?: string | null,
+    selectorSpec?: CodegenStep['selectorSpec'],
+  ): { selector: string; locatorExpression: string; supportsVisibleFilter: boolean } | null {
+    const normalized = (selector || selectorSpec?.selector || '').trim();
+    if (!normalized) return null;
+    if (this.looksLikeRenderedLocatorExpression(normalized)) {
+      return {
+        selector: normalized,
+        locatorExpression: normalized,
+        supportsVisibleFilter: false,
+      };
+    }
+    if (this.isStructuredSelectorSpec(selectorSpec)) return null;
+    return {
+      selector: normalized,
+      locatorExpression: `locator(${JSON.stringify(normalized)})`,
+      supportsVisibleFilter: this.canApplyVisibleFilterToWeakFallbackSelector(normalized, selectorSpec),
+    };
+  }
+
+  private static canApplyVisibleFilterToWeakFallbackSelector(
+    selector: string,
+    selectorSpec?: CodegenStep['selectorSpec'],
+  ): boolean {
+    const normalized = (selector || '').trim();
+    if (!normalized) return false;
+    if (this.looksLikeRenderedLocatorExpression(normalized)) return false;
+    if (this.isStructuredSelectorSpec(selectorSpec)) return false;
+
+    const engine = selectorSpec?.engine ?? inferSelectorEngine(normalized);
+    if (engine !== 'css') return false;
+    if (/^(?:css|xpath|text|id|nth|visible|internal)=/i.test(normalized)) return false;
+    if (normalized.includes('>>')) return false;
+    if (normalized.includes(',')) return false;
+    return true;
+  }
+
+  private static buildVisibleFilteredWeakFallbackLocatorExpression(
+    selector: string,
+    selectorSpec?: CodegenStep['selectorSpec'],
+  ): string | null {
+    if (!this.canApplyVisibleFilterToWeakFallbackSelector(selector, selectorSpec)) return null;
+    const normalized = selector.trim();
+    const visibleSelector = /:visible\b/.test(normalized) ? normalized : `${normalized}:visible`;
+    return `locator(${JSON.stringify(visibleSelector)})`;
+  }
+
+  private static buildVisibleIndexedWeakFallbackLocator(args: {
+    selector: string;
+    selectorSpec?: CodegenStep['selectorSpec'];
+    baseLocatorExpression: string;
+    index: number;
+    supportsVisibleFilter: boolean;
+    warnings: string[];
+  }): { locatorExpression: string; usedVisibleFilter: boolean } {
+    if (args.supportsVisibleFilter) {
+      const visibleFilteredLocatorExpression = this.buildVisibleFilteredWeakFallbackLocatorExpression(
+        args.selector,
+        args.selectorSpec,
+      );
+      if (visibleFilteredLocatorExpression) {
+        return {
+          locatorExpression: `${visibleFilteredLocatorExpression}.nth(${args.index})`,
+          usedVisibleFilter: true,
+        };
+      }
+    }
+
+    args.warnings.push(
+      'AIR WARNING: Recorded index is based on visible matches; raw nth may be unsafe if hidden matches exist.',
+    );
+    return {
+      locatorExpression: `${args.baseLocatorExpression}.nth(${args.index})`,
+      usedVisibleFilter: false,
+    };
+  }
+
+  private static describeWeakFallbackReason(args: {
+    proofLevel?: string | null;
+    renderStatus?: string | null;
+    trigger?: boolean;
+    blockedReason?: string | null;
+  }): string {
+    if (args.trigger) {
+      if (args.blockedReason === 'custom-control-trigger-target-binding-ambiguous') {
+        return 'trigger selector was ambiguous during recording.';
+      }
+      if (args.renderStatus === 'blocked-unsafe-render') {
+        return 'trigger selector was not safe for confident rendering.';
+      }
+      if (args.blockedReason) {
+        return `trigger selector fallback was required (${this.cleanForComment(args.blockedReason)}).`;
+      }
+      return 'trigger selector was not confidently validated.';
+    }
+
+    switch (args.proofLevel) {
+      case 'blocked':
+        return 'selector was blocked for confident codegen.';
+      case 'unvalidated':
+        return 'selector was not confidently validated.';
+      case 'inferred_unproven':
+        return 'selector was inferred but not proven.';
+      case 'weak_but_usable':
+        return 'selector was marked weak and AIR is preserving the recorded selector.';
+      default:
+        if (args.renderStatus === 'blocked-unsafe-render') {
+          return 'selector rendering was blocked as unsafe.';
+        }
+        if (args.renderStatus === 'proof-only-no-clean-render') {
+          return 'selector proof did not have a clean render path.';
+        }
+        return 'selector was ambiguous or not confidently validated.';
+    }
+  }
+
+  private static buildWeakFallbackLocatorExpression(args: {
+    methodName: string;
+    reason: string;
+    candidates: WeakFallbackSelectorCandidate[];
+  }): WeakFallbackRenderResult | WeakFallbackBuildFailure {
+    const candidateFailures: string[] = [];
+
+    for (const candidate of args.candidates) {
+      const base = this.buildWeakFallbackBaseLocatorExpr(candidate.selector, candidate.selectorSpec);
+      if (!base) {
+        const sourceLabel = candidate.selectorOrigin.replace(/-/g, ' ');
+        const selectorLabel = (candidate.selector || candidate.selectorSpec?.selector || '').trim();
+        candidateFailures.push(
+          selectorLabel
+            ? `${sourceLabel} selector "${this.cleanForComment(selectorLabel)}" could not be rendered as a locator`
+            : `no ${sourceLabel} selector available`,
+        );
+        continue;
+      }
+
+      const recordedAmbiguity = this.matchRecordedAmbiguityToSelector(base.selector, candidate.recordedAmbiguity);
+      const recordedMatchCount = typeof recordedAmbiguity?.matchCount === 'number'
+        ? recordedAmbiguity.matchCount
+        : null;
+      const recordedVisibleMatchCount = typeof recordedAmbiguity?.visibleMatchCount === 'number'
+        ? recordedAmbiguity.visibleMatchCount
+        : null;
+      const positionInMatches = typeof recordedAmbiguity?.positionInMatches === 'number'
+        ? recordedAmbiguity.positionInMatches
+        : null;
+      const validationMatchCount = typeof candidate.validationMatchCount === 'number'
+        ? candidate.validationMatchCount
+        : null;
+      const validationVisibleMatchCount = typeof candidate.validationVisibleMatchCount === 'number'
+        ? candidate.validationVisibleMatchCount
+        : null;
+      const matchCount = recordedMatchCount ?? validationMatchCount;
+      const visibleMatchCount = recordedVisibleMatchCount ?? validationVisibleMatchCount;
+      const warnings: string[] = [];
+
+      let locatorExpression = base.locatorExpression;
+      let source: WeakFallbackSource;
+      let indexKind: WeakFallbackIndexKind | null = null;
+      let usedVisibleFilter = false;
+      if (
+        !this.hasCardinalityScope(locatorExpression) &&
+        typeof positionInMatches === 'number' &&
+        positionInMatches >= 0 &&
+        (visibleMatchCount ?? 0) > 1
+      ) {
+        const visibleIndexedLocator = this.buildVisibleIndexedWeakFallbackLocator({
+          selector: base.selector,
+          selectorSpec: candidate.selectorSpec,
+          baseLocatorExpression: locatorExpression,
+          index: positionInMatches,
+          supportsVisibleFilter: base.supportsVisibleFilter,
+          warnings,
+        });
+        locatorExpression = visibleIndexedLocator.locatorExpression;
+        indexKind = 'visible';
+        usedVisibleFilter = visibleIndexedLocator.usedVisibleFilter;
+        source = 'indexed-fallback';
+      } else if (
+        !this.hasCardinalityScope(locatorExpression) &&
+        (visibleMatchCount ?? 0) > 1
+      ) {
+        locatorExpression = `${locatorExpression}.first()`;
+        source = 'first-fallback';
+        warnings.push('No recorded index was available. AIR used first() as a best-effort fallback.');
+      } else if (matchCount == null && visibleMatchCount == null) {
+        source = 'plain-locator';
+        warnings.push('Match count was unavailable when AIR emitted this fallback.');
+      } else {
+        source = candidate.selectorOrigin;
+      }
+
+        return {
+        locatorExpression,
+        selector: base.selector,
+        index: positionInMatches,
+        indexKind,
+        usedVisibleFilter,
+        matchCount,
+        visibleMatchCount,
+        recordedMatchCount,
+        recordedVisibleMatchCount,
+        reason: args.reason,
+        source,
+        warnings,
+      };
+    }
+
+    const failureDetail = candidateFailures.length
+      ? candidateFailures.join('; ')
+      : 'no recorded selector or trigger selector available';
+    return {
+      debugReason: `AIR could not build weak fallback for method ${args.methodName}: ${failureDetail}.`,
+    };
+  }
+
+  private static renderAirWeakSelectorWarning(args: {
+    fallback: WeakFallbackRenderResult;
+    proofLevel?: string | null;
+    renderStatus?: string | null;
+  }): string[] {
+    const lines = [
+      `// AIR WARNING: Weak selector fallback.`,
+      `// Reason: ${this.cleanForComment(args.fallback.reason)}`,
+      `// Selector: ${JSON.stringify(args.fallback.selector)}`,
+      `// Match count during recording: ${args.fallback.recordedMatchCount ?? 'unavailable'}`,
+      `// Visible match count during recording: ${args.fallback.recordedVisibleMatchCount ?? 'unavailable'}`,
+    ];
+
+    if (args.fallback.recordedMatchCount == null && args.fallback.matchCount != null) {
+      lines.push(`// Match count during validation: ${args.fallback.matchCount}`);
+    }
+    if (
+      args.fallback.recordedVisibleMatchCount == null &&
+      args.fallback.visibleMatchCount != null
+    ) {
+      lines.push(`// Visible match count during validation: ${args.fallback.visibleMatchCount}`);
+    }
+
+    if (typeof args.fallback.index === 'number' && args.fallback.index >= 0) {
+      lines.push(`// Recorded index used: ${args.fallback.index}`);
+    } else if (args.fallback.source === 'first-fallback') {
+      lines.push(`// No recorded index was available. AIR used first() as a best-effort fallback.`);
+    } else {
+      lines.push(`// Recorded index used: unavailable`);
+    }
+
+    if (args.proofLevel) {
+      lines.push(`// Proof level: ${args.proofLevel}`);
+    }
+    if (args.renderStatus) {
+      lines.push(`// Render status: ${args.renderStatus}`);
+    }
+    for (const warning of args.fallback.warnings) {
+      if (
+        warning === 'No recorded index was available. AIR used first() as a best-effort fallback.' ||
+        warning === 'Match count was unavailable when AIR emitted this fallback.'
+      ) {
+        continue;
+      }
+      lines.push(`// ${this.cleanForComment(warning)}`);
+    }
+    lines.push(`// Review recommended if flaky. Prefer adding a stable data-testid.`);
+    return lines;
+  }
+
+  private static renderWeakFallbackAction(args: {
+    step: CodegenStep;
+    selector: string;
+    locatorExpression: string;
+    methodName: string;
+    popupAware: boolean;
+    operationOverride?: ParsedLocatorAction['operation'];
+    overrideArgs?: string;
+    targetVariableName?: string;
+  }): WeakFallbackActionRenderResult | WeakFallbackBuildFailure {
+    const deterministic = args.operationOverride
+      ? {
+          locatorExpr: args.locatorExpression,
+          operation: args.operationOverride,
+          args: args.overrideArgs ?? '',
+        }
+      : this.buildDeterministicLocatorAction(args.step, args.selector);
+    if (!deterministic) {
+      return {
+        debugReason: `AIR could not build weak fallback for method ${args.methodName}: action "${args.step.action}" has no deterministic fallback renderer.`,
+      };
+    }
+
+    const action = {
+      ...deterministic,
+      locatorExpr: args.locatorExpression,
+    };
+
+    let invocationArgs = action.args;
+    let methodParams = '';
+    if (
+      ['fill', 'type', 'selectOption'].includes(action.operation) &&
+      (args.step.action === 'input' || args.step.action === 'custom-select' || args.step.action === 'custom-menu-select')
+    ) {
+      const valueParam = this.inferValueParameter(args.step);
+      methodParams = `${valueParam.name}: string = ${JSON.stringify(valueParam.defaultValue)}`;
+      invocationArgs = valueParam.name;
+    }
+
+    const invocation = `${action.operation}(${invocationArgs})`;
+    const fullAction = `this.page.${action.locatorExpr}.${invocation}`;
+    const popupAwareOperation = args.popupAware && ['click', 'dblclick', 'tap'].includes(action.operation);
+    const targetVariableName = args.targetVariableName || 'target';
+
+    if (popupAwareOperation) {
+      return {
+        methodParams,
+        fullAction,
+        lines: [
+          `const context = this.page.context();`,
+          `const popupPromise = context.waitForEvent('page', { timeout: 1500 }).catch(() => null);`,
+          `const ${targetVariableName} = this.page.${action.locatorExpr};`,
+          `await ${targetVariableName}.waitFor({ state: 'visible', timeout: 5000 });`,
+          `await ${targetVariableName}.${invocation};`,
+          `const popupPage = await popupPromise;`,
+          `if (popupPage) {`,
+          `  await popupPage.waitForLoadState('domcontentloaded');`,
+          `  this.page = popupPage;`,
+          `}`,
+        ],
+      };
+    }
+
+    return {
+      methodParams,
+      fullAction,
+      lines: [
+        `const ${targetVariableName} = this.page.${action.locatorExpr};`,
+        `await ${targetVariableName}.waitFor({ state: 'visible', timeout: 5000 });`,
+        `await ${targetVariableName}.${invocation};`,
+      ],
+    };
+  }
+
+  private static buildWeakCustomControlOptionAction(args: {
+    step: CodegenStep;
+    methodName: string;
+    optionLocatorExpr: string | null;
+  }): CustomControlOptionFallbackRenderResult | WeakFallbackBuildFailure {
+    const optionSelector = (
+      args.step.optionResolvedSelector ||
+      args.step.optionSelector ||
+      args.step.selector ||
+      ''
+    ).trim();
+    const optionSelectorSpec = args.step.optionSelectorSpec;
+
+    if (args.optionLocatorExpr) {
+      const actionRender = this.renderWeakFallbackAction({
+        step: args.step,
+        selector: optionSelector || args.optionLocatorExpr,
+        locatorExpression: args.optionLocatorExpr,
+        methodName: args.methodName,
+        popupAware: false,
+        operationOverride: 'click',
+        targetVariableName: 'optionTarget',
+      });
+      if (!('lines' in actionRender)) {
+        return actionRender;
+      }
+
+      const warningLines = [
+        `// AIR WARNING: Weak trigger selector fallback.`,
+        `// AIR preserved the recorded option selection below.`,
+      ];
+      if (optionSelectorSpec && !canRenderSelectorSpecConfidently(optionSelectorSpec)) {
+        warningLines.push(
+          `// AIR WARNING: Option selector is also weak. AIR is preserving the recorded option selector below.`,
+        );
+      }
+
+      return {
+        lines: actionRender.lines,
+        fullAction: actionRender.fullAction,
+        warningLines,
+      };
+    }
+
+    const optionRoleName = (args.step.optionText || args.step.optionValue || '').trim();
+    if (optionRoleName) {
+      const actionRender = this.renderWeakFallbackAction({
+        step: args.step,
+        selector: optionRoleName,
+        locatorExpression: `getByRole("option", { name: ${JSON.stringify(optionRoleName)}, exact: true })`,
+        methodName: args.methodName,
+        popupAware: false,
+        operationOverride: 'click',
+        targetVariableName: 'optionTarget',
+      });
+      if (!('lines' in actionRender)) {
+        return actionRender;
+      }
+
+      return {
+        lines: actionRender.lines,
+        fullAction: actionRender.fullAction,
+        warningLines: [
+          `// AIR WARNING: Weak trigger selector fallback.`,
+          `// AIR preserved the recorded option selection below.`,
+          `// AIR WARNING: Recorded option selector was unavailable. AIR reconstructed the option click using role/name evidence.`,
+        ],
+      };
+    }
+
+    const optionText = (args.step.optionText || '').trim();
+    if (optionText) {
+      const actionRender = this.renderWeakFallbackAction({
+        step: args.step,
+        selector: optionText,
+        locatorExpression: `locator("[role=\\"option\\"]").filter({ hasText: ${JSON.stringify(optionText)} })`,
+        methodName: args.methodName,
+        popupAware: false,
+        operationOverride: 'click',
+        targetVariableName: 'optionTarget',
+      });
+      if (!('lines' in actionRender)) {
+        return actionRender;
+      }
+
+      return {
+        lines: actionRender.lines,
+        fullAction: actionRender.fullAction,
+        warningLines: [
+          `// AIR WARNING: Weak trigger selector fallback.`,
+          `// AIR preserved the recorded option selection below.`,
+          `// AIR WARNING: Recorded option selector was unavailable. AIR reconstructed the option click using [role="option"] text filtering.`,
+        ],
+      };
+    }
+
+    return {
+      debugReason: `AIR could not reconstruct option selection for method ${args.methodName}: no recorded option selector, option label/value, or option text available.`,
+    };
+  }
+
   private static classifyLabelContextRenderStatus(
     labelContext?: LabelContextSelectorSpec | null,
   ): LabelContextRenderStatus | undefined {
@@ -1072,6 +1618,7 @@ ${methodsContent.join('\n\n')}
     const renderConfidently = resolvedSelectorSpec
       ? canRenderSelectorSpecConfidently(resolvedSelectorSpec)
       : !!selectorUsed;
+    const canUsePreferredEquivalentRendering = !!preferredEquivalentLocatorExpr;
     const emittedLocatorEngine = preferredRendering?.engine ?? resolvedSelectorSpec?.engine ?? 'unknown';
     const emittedLocatorProofLevel = preferredRendering?.proofLevel ?? resolvedSelectorSpec?.proofLevel ?? 'unknown';
     const emittedLocatorSource = preferredRendering ? 'resolver' : (resolvedSelectorSpec?.source ?? (usedSelectorSpec ? 'unknown' : 'legacy-fallback'));
@@ -1140,16 +1687,17 @@ ${methodsContent.join('\n\n')}
     const triggerRenderBlocked =
       triggerContextRenderStatus === 'blocked-unsafe-render' ||
       triggerWarningCodes.includes('custom-control-trigger-target-binding-ambiguous');
-    const isCompressedCustomSelect =
-      step.action === 'custom-select' &&
+    const isCompressedCustomControlSelection =
+      (step.action === 'custom-select' || step.action === 'custom-menu-select') &&
       Array.isArray(step.compressedFromEvents) &&
-      step.compressedFromEvents.length >= 2 &&
+      step.compressedFromEvents.length >= 2;
+    const isCompressedCustomSelect =
+      isCompressedCustomControlSelection &&
+      Array.isArray(step.compressedFromEvents) &&
       !!triggerLocatorExpr &&
       !!optionLocatorExpr;
     const blockedCompressedCustomSelect =
-      step.action === 'custom-select' &&
-      Array.isArray(step.compressedFromEvents) &&
-      step.compressedFromEvents.length >= 2 &&
+      isCompressedCustomControlSelection &&
       (
         triggerRenderBlocked ||
         (!!step.triggerSelectorSpec && !triggerLocatorExpr)
@@ -1181,7 +1729,7 @@ ${methodsContent.join('\n\n')}
     if (
       effective &&
       resolvedSelectorSpec &&
-      renderConfidently &&
+      (renderConfidently || canUsePreferredEquivalentRendering) &&
       preferredLocatorExpr &&
       effective.locatorExpr !== preferredLocatorExpr
     ) {
@@ -1208,20 +1756,105 @@ ${methodsContent.join('\n\n')}
     let lines: string[] = [];
     let fullAction = `this.page.${trimmedAction}`;
     let methodParams = '';
+    let weakFallback: WeakFallbackRenderResult | null = null;
+    const extraWarningCodes = weakCompressedCustomSelect ? ['custom-control-trigger-weak-fallback'] : [];
+    const nonConfidentRenderStatus = labelContextRenderStatus ?? boundedFieldRenderStatus ?? null;
+    let selectorUsedForOutput = selectorUsed;
 
     if (blockedCompressedCustomSelect) {
-      fallbackReason = 'custom-control-trigger-blocked-unsafe-render';
       const optionLabel = step.optionText || step.optionValue || step.intent || `step ${step.step}`;
       const blockedReason = triggerWarningCodes[0] || triggerContextRenderReason || 'custom-control-trigger-blocked';
-      const originalTriggerSelector = step.triggerSelector || step.triggerResolvedSelector || '';
-      const blockedMessage = `AIR could not prove a safe trigger selector for custom-select ${optionLabel}`;
-      fullAction = `throw new Error(${JSON.stringify(blockedMessage)})`;
-      lines = [
-        `// TODO[AIR]: Cannot safely open custom control for "${this.cleanForComment(optionLabel)}".`,
-        `// Reason: ${this.cleanForComment(blockedReason)}.`,
-        `// Original trigger selector "${this.cleanForComment(originalTriggerSelector)}" was blocked because it may match multiple controls.`,
-        `throw new Error(${JSON.stringify(blockedMessage)});`,
-      ];
+      const weakTriggerFallback = this.buildWeakFallbackLocatorExpression({
+        methodName,
+        reason: this.describeWeakFallbackReason({
+          trigger: true,
+          renderStatus: triggerContextRenderStatus,
+          blockedReason,
+        }),
+        candidates: [
+          {
+            selector: step.triggerResolvedSelector,
+            selectorSpec: step.triggerSelectorSpec,
+            recordedAmbiguity: step.triggerFingerprint?.selectorAmbiguity,
+            selectorOrigin: 'trigger-selector',
+          },
+          {
+            selector: step.triggerSelector,
+            recordedAmbiguity: step.triggerFingerprint?.selectorAmbiguity,
+            selectorOrigin: 'trigger-selector',
+          },
+        ],
+      });
+
+      if ('locatorExpression' in weakTriggerFallback) {
+        const actionRender = this.renderWeakFallbackAction({
+          step,
+          selector: weakTriggerFallback.selector,
+          locatorExpression: weakTriggerFallback.locatorExpression,
+          methodName,
+          popupAware,
+          operationOverride: 'click',
+          targetVariableName: 'triggerTarget',
+        });
+        if ('lines' in actionRender) {
+          const optionActionRender = this.buildWeakCustomControlOptionAction({
+            step,
+            methodName,
+            optionLocatorExpr,
+          });
+          if ('lines' in optionActionRender) {
+            weakFallback = weakTriggerFallback;
+            fallbackReason = 'custom-control-trigger-weak-fallback';
+            extraWarningCodes.push('custom-control-trigger-weak-fallback');
+            selectorUsedForOutput = weakTriggerFallback.selector;
+            fullAction = `${actionRender.fullAction}; ${optionActionRender.fullAction}`;
+            methodParams = actionRender.methodParams;
+            lines = [
+              ...this.renderAirWeakSelectorWarning({
+                fallback: weakTriggerFallback,
+                renderStatus: triggerContextRenderStatus ?? null,
+              }),
+              ...actionRender.lines,
+              ...optionActionRender.warningLines,
+              ...optionActionRender.lines,
+            ];
+          } else {
+            fallbackReason = 'custom-control-trigger-blocked-unsafe-render';
+            const optionSelectionFailureMessage = `AIR unresolved ${step.action} step ${step.step}: option selection could not be reconstructed after weak trigger fallback.`;
+            fullAction = `throw new Error(${JSON.stringify(optionSelectionFailureMessage)})`;
+            lines = [
+              ...this.renderAirWeakSelectorWarning({
+                fallback: weakTriggerFallback,
+                renderStatus: triggerContextRenderStatus ?? null,
+              }),
+              `// AIR WARNING: Weak trigger selector fallback.`,
+              `// AIR WARNING: AIR could not reconstruct the option selection for "${this.cleanForComment(optionLabel)}".`,
+              `// Debug: ${this.cleanForComment(optionActionRender.debugReason)}`,
+              `throw new Error(${JSON.stringify(optionSelectionFailureMessage)});`,
+            ];
+          }
+        } else {
+          fallbackReason = 'custom-control-trigger-blocked-unsafe-render';
+          const blockedMessage = `AIR could not prove a safe trigger selector for custom-select ${optionLabel}`;
+          fullAction = `throw new Error(${JSON.stringify(blockedMessage)})`;
+          lines = [
+            `// TODO[AIR]: Cannot safely open custom control for "${this.cleanForComment(optionLabel)}".`,
+            `// Reason: ${this.cleanForComment(blockedReason)}.`,
+            `// Debug: ${this.cleanForComment(actionRender.debugReason)}`,
+            `throw new Error(${JSON.stringify(blockedMessage)});`,
+          ];
+        }
+      } else {
+        fallbackReason = 'custom-control-trigger-blocked-unsafe-render';
+        const blockedMessage = `AIR could not prove a safe trigger selector for custom-select ${optionLabel}`;
+        fullAction = `throw new Error(${JSON.stringify(blockedMessage)})`;
+        lines = [
+          `// TODO[AIR]: Cannot safely open custom control for "${this.cleanForComment(optionLabel)}".`,
+          `// Reason: ${this.cleanForComment(blockedReason)}.`,
+          `// Debug: ${this.cleanForComment(weakTriggerFallback.debugReason)}`,
+          `throw new Error(${JSON.stringify(blockedMessage)});`,
+        ];
+      }
     } else if (isCompressedCustomSelect && renderConfidently) {
       fullAction = `this.page.${triggerLocatorExpr}.click(); this.page.${optionLocatorExpr}.click()`;
       lines = [
@@ -1233,7 +1866,7 @@ ${methodsContent.join('\n\n')}
         `await optionTarget.click();`,
       ];
       fallbackReason = 'compressed-custom-control-select';
-    } else if (effective && renderConfidently) {
+    } else if (effective && (renderConfidently || canUsePreferredEquivalentRendering)) {
       const scopedLocator = this.withCardinalityScope(effective.locatorExpr);
       let invocationArgs = effective.args;
       if (
@@ -1272,14 +1905,75 @@ ${methodsContent.join('\n\n')}
         lines.push(`await target.${invocation};`);
       }
     } else if (resolvedSelectorSpec && !renderConfidently) {
-      fallbackReason = fallbackReason ?? `selector-spec-${resolvedSelectorSpec.proofLevel}`;
-      const blockedMessage = `AIR unresolved step ${step.step}: selector proof level "${resolvedSelectorSpec.proofLevel}" is not safe for confident codegen.`;
-      fullAction = `throw new Error(${JSON.stringify(blockedMessage)})`;
-      lines = [
-        `// TODO[AIR]: Selector is ${resolvedSelectorSpec.proofLevel} and was not emitted as a confident action.`,
-        `// Intended selector: ${this.cleanForComment(selectorUsed)} | engine=${resolvedSelectorSpec.engine} | source=${resolvedSelectorSpec.source}`,
-        `throw new Error(${JSON.stringify(blockedMessage)});`,
-      ];
+      const weakSelectorFallback = this.buildWeakFallbackLocatorExpression({
+        methodName,
+        reason: this.describeWeakFallbackReason({
+          proofLevel: resolvedSelectorSpec.proofLevel,
+          renderStatus: nonConfidentRenderStatus,
+        }),
+        candidates: [
+          {
+            selector: resolvedSelectorSpec.selector || resolvedSelector || step.resolvedSelector || step.selector,
+            selectorSpec: resolvedSelectorSpec,
+            recordedAmbiguity: step.fingerprint?.selectorAmbiguity,
+            validationMatchCount: resolverMetadata?.matchCount ?? null,
+            validationVisibleMatchCount: resolverMetadata?.effectiveMatchCount ?? null,
+            selectorOrigin: 'resolved-selector',
+          },
+          {
+            selector: step.selectorSpec?.selector ?? step.fingerprint?.selectorAmbiguity?.originalSelector ?? step.selector,
+            selectorSpec: step.selectorSpec,
+            recordedAmbiguity: step.fingerprint?.selectorAmbiguity,
+            selectorOrigin: 'recorded-selector',
+          },
+        ],
+      });
+
+      if ('locatorExpression' in weakSelectorFallback) {
+        const actionRender = this.renderWeakFallbackAction({
+          step,
+          selector: weakSelectorFallback.selector,
+          locatorExpression: weakSelectorFallback.locatorExpression,
+          methodName,
+          popupAware,
+        });
+        if ('lines' in actionRender) {
+          weakFallback = weakSelectorFallback;
+          fallbackReason = fallbackReason ?? `selector-spec-${resolvedSelectorSpec.proofLevel}-weak-fallback`;
+          extraWarningCodes.push('weak-selector-fallback');
+          selectorUsedForOutput = weakSelectorFallback.selector;
+          fullAction = actionRender.fullAction;
+          methodParams = actionRender.methodParams;
+          lines = [
+            ...this.renderAirWeakSelectorWarning({
+              fallback: weakSelectorFallback,
+              proofLevel: resolvedSelectorSpec.proofLevel,
+              renderStatus: nonConfidentRenderStatus,
+            }),
+            ...actionRender.lines,
+          ];
+        } else {
+          fallbackReason = fallbackReason ?? `selector-spec-${resolvedSelectorSpec.proofLevel}`;
+          const blockedMessage = `AIR unresolved step ${step.step}: selector proof level "${resolvedSelectorSpec.proofLevel}" is not safe for confident codegen.`;
+          fullAction = `throw new Error(${JSON.stringify(blockedMessage)})`;
+          lines = [
+            `// TODO[AIR]: Selector is ${resolvedSelectorSpec.proofLevel} and was not emitted as a confident action.`,
+            `// Intended selector: ${this.cleanForComment(selectorUsed)} | engine=${resolvedSelectorSpec.engine} | source=${resolvedSelectorSpec.source}`,
+            `// Debug: ${this.cleanForComment(actionRender.debugReason)}`,
+            `throw new Error(${JSON.stringify(blockedMessage)});`,
+          ];
+        }
+      } else {
+        fallbackReason = fallbackReason ?? `selector-spec-${resolvedSelectorSpec.proofLevel}`;
+        const blockedMessage = `AIR unresolved step ${step.step}: selector proof level "${resolvedSelectorSpec.proofLevel}" is not safe for confident codegen.`;
+        fullAction = `throw new Error(${JSON.stringify(blockedMessage)})`;
+        lines = [
+          `// TODO[AIR]: Selector is ${resolvedSelectorSpec.proofLevel} and was not emitted as a confident action.`,
+          `// Intended selector: ${this.cleanForComment(selectorUsed)} | engine=${resolvedSelectorSpec.engine} | source=${resolvedSelectorSpec.source}`,
+          `// Debug: ${this.cleanForComment(weakSelectorFallback.debugReason)}`,
+          `throw new Error(${JSON.stringify(blockedMessage)});`,
+        ];
+      }
     } else if (!trimmedAction) {
       fallbackReason = 'empty-llm-action';
       fullAction = 'this.page.waitForTimeout(0)';
@@ -1313,7 +2007,7 @@ ${methodsContent.join('\n\n')}
 
     const methodLines = [
       `  // AIR step ${step.step} | action=${step.action} | selectorType=${selectorType} | resolvedBy=${resolvedBy} | score=${score}`,
-      `  // selector: ${this.cleanForComment(selectorUsed)} | warnings: ${this.cleanForComment(warnings)}`,
+      `  // selector: ${this.cleanForComment(selectorUsedForOutput)} | warnings: ${this.cleanForComment(warnings)}`,
       `  async ${methodName}(${methodParams}) {`,
       ...inlineWarningLines,
       `    try {`,
@@ -1329,8 +2023,10 @@ ${methodsContent.join('\n\n')}
       methodCode: methodLines.join('\n'),
       fullAction,
       fallbackReason,
-      selectorUsed,
-      emittedLocator: blockedCompressedCustomSelect ? null : (renderConfidently ? preferredLocatorExpr : null),
+      selectorUsed: selectorUsedForOutput,
+      emittedLocator: blockedCompressedCustomSelect
+        ? null
+        : ((renderConfidently || canUsePreferredEquivalentRendering) ? preferredLocatorExpr : null),
       emittedLocatorEngine,
       emittedLocatorProofLevel,
       emittedLocatorSource,
@@ -1364,8 +2060,19 @@ ${methodsContent.join('\n\n')}
       boundedFieldControlKind,
       boundedFieldMatchedContainerSummary,
       boundedFieldOriginalSelector,
+      emittedWeakFallback: weakFallback ? true : undefined,
+      weakFallbackReason: weakFallback?.reason,
+      weakFallbackSelector: weakFallback?.selector,
+      weakFallbackLocator: weakFallback?.locatorExpression,
+      weakFallbackIndex: weakFallback ? weakFallback.index : undefined,
+      weakFallbackIndexKind: weakFallback?.indexKind ?? undefined,
+      weakFallbackUsedVisibleFilter: weakFallback?.indexKind ? weakFallback.usedVisibleFilter : undefined,
+      weakFallbackMatchCount: weakFallback ? weakFallback.matchCount : undefined,
+      weakFallbackVisibleMatchCount: weakFallback ? weakFallback.visibleMatchCount : undefined,
+      weakFallbackSource: weakFallback?.source,
+      weakFallbackWarnings: weakFallback?.warnings,
       extraWarningComments: this.buildStructuralFallbackWarningComments(labelContext),
-      extraWarningCodes: weakCompressedCustomSelect ? ['custom-control-trigger-weak-fallback'] : [],
+      extraWarningCodes,
     };
   }
 

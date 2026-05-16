@@ -135,6 +135,36 @@ describe('LlmOrchestrator - emission safety', () => {
     expect(emitted.methodCode).not.toContain('getByRole');
   });
 
+  it('keeps strong selector output unchanged without weak AIR warning comments', () => {
+    const step = createStep({
+      action: 'input',
+      intent: 'input_username',
+      selector: 'input[name="username"]',
+      selectorPriority: 'attribute',
+      value: 'Admin',
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'fillUsername',
+      `locator('input[name="username"]').fill('Admin')`,
+      step.selector,
+      {
+        selector: 'input[name="username"]',
+        engine: 'css',
+        source: 'resolver',
+        proofLevel: 'semantic_validated',
+      },
+    );
+
+    expect(emitted.methodCode).toContain(`const target = this.page.locator("input[name=\\"username\\"]");`);
+    expect(emitted.methodCode).toContain('await target.fill(username);');
+    expect(emitted.methodCode).not.toContain('AIR WARNING: Weak selector fallback');
+    expect(emitted.emittedWeakFallback).toBeUndefined();
+    expect(emitted.weakFallbackIndexKind).toBeUndefined();
+    expect(emitted.weakFallbackUsedVisibleFilter).toBeUndefined();
+  });
+
   it('uses resolvedSelectorSpec before raw resolvedSelector when they differ', () => {
     const step = createStep({
       action: 'click',
@@ -411,7 +441,7 @@ describe('LlmOrchestrator - emission safety', () => {
     expect(emitted.triggerContextRenderStatus).toBe('proven-structural-fallback');
   });
 
-  it('does not emit a raw ambiguous trigger click when trigger render status is blocked', () => {
+  it('emits a weak trigger fallback and preserves option click when custom-control trigger rendering is blocked', () => {
     const step = createStep({
       action: 'custom-select',
       intent: 'select_admin',
@@ -419,14 +449,27 @@ describe('LlmOrchestrator - emission safety', () => {
       selectorPriority: 'attribute',
       selectorRank: 3,
       controlFamily: 'combobox',
-      triggerSelector: '.select-trigger',
+      triggerSelector: '.oxd-select-text',
       triggerSelectorPriority: 'class',
       triggerSelectorSpec: {
-        selector: '.select-trigger',
+        selector: '.oxd-select-text',
         engine: 'css',
         source: 'interceptor',
         proofLevel: 'recorded',
         rank: 7,
+      },
+      triggerFingerprint: {
+        selector: '.oxd-select-text',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        selectorAmbiguity: {
+          originalSelector: '.oxd-select-text',
+          matchCount: 2,
+          visibleMatchCount: 2,
+          positionInMatches: 0,
+          isUnique: false,
+          isAmbiguous: true,
+        },
       },
       optionSelector: '[role="option"]',
       optionText: 'Admin',
@@ -469,13 +512,98 @@ describe('LlmOrchestrator - emission safety', () => {
       },
     );
 
-    expect(emitted.methodCode).toContain('// TODO[AIR]: Cannot safely open custom control for "Admin".');
-    expect(emitted.methodCode).toContain('custom-control-trigger-target-binding-ambiguous');
-    expect(emitted.methodCode).toContain('throw new Error(');
-    expect(emitted.methodCode).not.toContain('locator(".select-trigger").click()');
-    expect(emitted.fallbackReason).toBe('custom-control-trigger-blocked-unsafe-render');
+    expect(emitted.methodCode).toContain('// AIR WARNING: Weak selector fallback.');
+    expect(emitted.methodCode).toContain('// Reason: trigger selector was ambiguous during recording.');
+    expect(emitted.methodCode).toContain('// Selector: ".oxd-select-text"');
+    expect(emitted.methodCode).toContain('// Visible match count during recording: 2');
+    expect(emitted.methodCode).toContain('// Recorded index used: 0');
+    expect(emitted.methodCode).toContain('const triggerTarget = this.page.locator(".oxd-select-text:visible").nth(0);');
+    expect(emitted.methodCode).toContain(`await triggerTarget.waitFor({ state: 'visible', timeout: 5000 });`);
+    expect(emitted.methodCode).toContain('await triggerTarget.click();');
+    expect(emitted.methodCode).toContain('// AIR WARNING: Weak trigger selector fallback.');
+    expect(emitted.methodCode).toContain('// AIR preserved the recorded option selection below.');
+    expect(emitted.methodCode).toContain('const optionTarget = this.page.locator("[role=\\"option\\"]");');
+    expect(emitted.methodCode).toContain('await optionTarget.click();');
+    expect(emitted.methodCode).not.toContain('throw new Error(');
+    expect(emitted.methodCode).not.toContain('// TODO[AIR]');
+    expect(emitted.fallbackReason).toBe('custom-control-trigger-weak-fallback');
     expect(emitted.emittedLocator).toBeNull();
+    expect(emitted.emittedWeakFallback).toBe(true);
+    expect(emitted.weakFallbackSelector).toBe('.oxd-select-text');
+    expect(emitted.weakFallbackIndex).toBe(0);
+    expect(emitted.weakFallbackIndexKind).toBe('visible');
+    expect(emitted.weakFallbackUsedVisibleFilter).toBe(true);
     expect(emitted.triggerContextRenderStatus).toBe('blocked-unsafe-render');
+  });
+
+  it('keeps blocked compressed custom-select explicit when AIR cannot reconstruct option selection', () => {
+    const step = createStep({
+      action: 'custom-select',
+      intent: 'select_admin',
+      selector: '',
+      selectorPriority: 'attribute',
+      selectorRank: 3,
+      controlFamily: 'combobox',
+      triggerSelector: '.oxd-select-text',
+      triggerSelectorPriority: 'class',
+      triggerSelectorSpec: {
+        selector: '.oxd-select-text',
+        engine: 'css',
+        source: 'interceptor',
+        proofLevel: 'recorded',
+        rank: 7,
+      },
+      triggerFingerprint: {
+        selector: '.oxd-select-text',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        selectorAmbiguity: {
+          originalSelector: '.oxd-select-text',
+          matchCount: 2,
+          visibleMatchCount: 2,
+          positionInMatches: 0,
+          isUnique: false,
+          isAmbiguous: true,
+        },
+      },
+      compressedFromEvents: ['ev-open', 'ev-select'],
+      value: 'Admin',
+      optionSelector: '',
+      optionText: '',
+      optionValue: '',
+      optionSelectorSpec: undefined,
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'selectAdmin',
+      `locator('[role="option"]').click()`,
+      '',
+      undefined,
+      {
+        resolvedSelector: '',
+        resolvedBy: 'kept-original',
+        bestScore: 0.4,
+        effectiveMatchCount: 2,
+        snapshotSource: 'event-local-pageState',
+        validationMethod: 'css-query-static-visibility-element-ranking-v1',
+        llmAttempted: false,
+        llmAccepted: false,
+        llmAlternative: null,
+        rejectReason: null,
+        warningCodes: [],
+        resolverVersion: 1,
+        triggerContextRenderStatus: 'blocked-unsafe-render',
+        triggerContextRenderReason: 'target_missing',
+        triggerWarningCodes: ['custom-control-trigger-target-binding-ambiguous'],
+      },
+    );
+
+    expect(emitted.methodCode).toContain('// AIR WARNING: Weak trigger selector fallback.');
+    expect(emitted.methodCode).toContain('AIR could not reconstruct the option selection for "select_admin".');
+    expect(emitted.methodCode).toContain('throw new Error(');
+    expect(emitted.methodCode).not.toContain('await triggerTarget.click();');
+    expect(emitted.fallbackReason).toBe('custom-control-trigger-blocked-unsafe-render');
   });
 
   it('renders wrapped label-context proof as a safe chained locator instead of getByLabel', () => {
@@ -784,57 +912,277 @@ describe('LlmOrchestrator - emission safety', () => {
     expect(emitted.methodCode).toContain(`const target = this.page.locator("button[type=\\"submit\\"]");`);
   });
 
-  it('does not generate confident action for blocked selectors', () => {
+  it('emits runnable weak fallback code for weak input selectors', () => {
     const step = createStep({
-      action: 'click',
-      intent: 'click_submit',
-      selector: 'button',
-    });
-
-    const emitted = (LlmOrchestrator as any).buildMethodCode(
-      step,
-      'clickSubmit',
-      `locator('button').click()`,
-      'button',
-      {
-        selector: 'button',
-        engine: 'css',
-        source: 'resolver',
-        proofLevel: 'blocked',
-        rejectReason: 'snapshot_target_missing',
+      action: 'input',
+      intent: 'input_username',
+      selector: '.oxd-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      value: 'Admin',
+      fingerprint: {
+        selector: '.oxd-input',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        selectorAmbiguity: {
+          originalSelector: '.oxd-input',
+          matchCount: 2,
+          visibleMatchCount: 2,
+          positionInMatches: 1,
+          isUnique: false,
+          isAmbiguous: true,
+        },
       },
-    );
-
-    expect(emitted.methodCode).toContain('// TODO[AIR]: Selector is blocked');
-    expect(emitted.methodCode).toContain('throw new Error(');
-    expect(emitted.methodCode).not.toContain('await target.click()');
-    expect(emitted.emittedLocator).toBeNull();
-  });
-
-  it('does not generate confident action for unvalidated selectors', () => {
-    const step = createStep({
-      action: 'click',
-      intent: 'click_submit',
-      selector: 'button',
     });
 
     const emitted = (LlmOrchestrator as any).buildMethodCode(
       step,
-      'clickSubmit',
-      `locator('button').click()`,
-      'button',
+      'fillUsername',
+      `locator('.oxd-input').fill('Admin')`,
+      '.oxd-input',
       {
-        selector: 'button',
+        selector: '.oxd-input',
         engine: 'css',
         source: 'resolver',
         proofLevel: 'unvalidated',
       },
     );
 
-    expect(emitted.methodCode).toContain('// TODO[AIR]: Selector is unvalidated');
-    expect(emitted.methodCode).toContain('throw new Error(');
-    expect(emitted.methodCode).not.toContain('await target.click()');
+    expect(emitted.methodCode).toContain('// AIR WARNING: Weak selector fallback.');
+    expect(emitted.methodCode).toContain('// Selector: ".oxd-input"');
+    expect(emitted.methodCode).toContain('// Match count during recording: 2');
+    expect(emitted.methodCode).toContain('// Visible match count during recording: 2');
+    expect(emitted.methodCode).toContain('// Recorded index used: 1');
+    expect(emitted.methodCode).toContain('const target = this.page.locator(".oxd-input:visible").nth(1);');
+    expect(emitted.methodCode).toContain(`await target.waitFor({ state: 'visible', timeout: 5000 });`);
+    expect(emitted.methodCode).toContain('await target.fill(username);');
+    expect(emitted.methodCode).not.toContain('// TODO[AIR]');
+    expect(emitted.methodCode).not.toContain('throw new Error(');
     expect(emitted.emittedLocator).toBeNull();
+    expect(emitted.emittedWeakFallback).toBe(true);
+    expect(emitted.weakFallbackSelector).toBe('.oxd-input');
+    expect(emitted.weakFallbackIndex).toBe(1);
+    expect(emitted.weakFallbackIndexKind).toBe('visible');
+    expect(emitted.weakFallbackUsedVisibleFilter).toBe(true);
+    expect(emitted.weakFallbackVisibleMatchCount).toBe(2);
+  });
+
+  it('emits runnable weak fallback code for weak click selectors', () => {
+    const step = createStep({
+      action: 'click',
+      intent: 'click_some_button',
+      selector: '.some-button',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.some-button',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        selectorAmbiguity: {
+          originalSelector: '.some-button',
+          matchCount: 3,
+          visibleMatchCount: 3,
+          positionInMatches: 2,
+          isUnique: false,
+          isAmbiguous: true,
+        },
+      },
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'clickSomeButton',
+      `locator('.some-button').click()`,
+      '.some-button',
+      {
+        selector: '.some-button',
+        engine: 'css',
+        source: 'resolver',
+        proofLevel: 'blocked',
+      },
+    );
+
+    expect(emitted.methodCode).toContain('// AIR WARNING: Weak selector fallback.');
+    expect(emitted.methodCode).toContain('// Selector: ".some-button"');
+    expect(emitted.methodCode).toContain('// Visible match count during recording: 3');
+    expect(emitted.methodCode).toContain('// Recorded index used: 2');
+    expect(emitted.methodCode).toContain('const target = this.page.locator(".some-button:visible").nth(2);');
+    expect(emitted.methodCode).toContain(`await target.waitFor({ state: 'visible', timeout: 5000 });`);
+    expect(emitted.methodCode).toContain('await target.click();');
+    expect(emitted.methodCode).not.toContain('// TODO[AIR]');
+    expect(emitted.methodCode).not.toContain('throw new Error(');
+    expect(emitted.emittedLocator).toBeNull();
+    expect(emitted.emittedWeakFallback).toBe(true);
+    expect(emitted.weakFallbackSelector).toBe('.some-button');
+    expect(emitted.weakFallbackIndex).toBe(2);
+    expect(emitted.weakFallbackIndexKind).toBe('visible');
+    expect(emitted.weakFallbackUsedVisibleFilter).toBe(true);
+  });
+
+  it('keeps raw nth with an explicit warning when visible-index filtering cannot be safely applied', () => {
+    const renderedLocator = 'getByRole("textbox", { name: "Username", exact: true })';
+    const step = createStep({
+      action: 'input',
+      intent: 'input_username',
+      selector: renderedLocator,
+      selectorPriority: 'other',
+      selectorRank: 7,
+      value: 'Admin',
+      fingerprint: {
+        selector: renderedLocator,
+        selectorPriority: 'other',
+        selectorRank: 7,
+        selectorAmbiguity: {
+          originalSelector: renderedLocator,
+          matchCount: 3,
+          visibleMatchCount: 2,
+          positionInMatches: 1,
+          isUnique: false,
+          isAmbiguous: true,
+        },
+      },
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'fillUsername',
+      `${renderedLocator}.fill('Admin')`,
+      renderedLocator,
+      {
+        selector: renderedLocator,
+        engine: 'playwright',
+        source: 'resolver',
+        proofLevel: 'unvalidated',
+      },
+    );
+
+    expect(emitted.methodCode).toContain('const target = this.page.getByRole("textbox", { name: "Username", exact: true }).nth(1);');
+    expect(emitted.methodCode).toContain('AIR WARNING: Recorded index is based on visible matches; raw nth may be unsafe if hidden matches exist.');
+    expect(emitted.weakFallbackIndexKind).toBe('visible');
+    expect(emitted.weakFallbackUsedVisibleFilter).toBe(false);
+    expect(emitted.weakFallbackWarnings ?? []).toContain(
+      'AIR WARNING: Recorded index is based on visible matches; raw nth may be unsafe if hidden matches exist.',
+    );
+  });
+
+  it('uses first() when AIR knows there were multiple matches but no recorded index', () => {
+    const step = createStep({
+      action: 'click',
+      intent: 'click_some_button',
+      selector: '.some-button',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.some-button',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        selectorAmbiguity: {
+          originalSelector: '.some-button',
+          matchCount: 4,
+          visibleMatchCount: 2,
+          positionInMatches: null,
+          isUnique: false,
+          isAmbiguous: true,
+        },
+      },
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'clickSomeButton',
+      `locator('.some-button').click()`,
+      '.some-button',
+      {
+        selector: '.some-button',
+        engine: 'css',
+        source: 'resolver',
+        proofLevel: 'unvalidated',
+      },
+    );
+
+    expect(emitted.methodCode).toContain('const target = this.page.locator(".some-button").first();');
+    expect(emitted.methodCode).toContain('No recorded index was available. AIR used first() as a best-effort fallback.');
+    expect(emitted.methodCode).toContain(`await target.waitFor({ state: 'visible', timeout: 5000 });`);
+    expect(emitted.weakFallbackSource).toBe('first-fallback');
+    expect(emitted.weakFallbackIndex).toBeNull();
+  });
+
+  it('uses a plain locator when selector match counts are unavailable', () => {
+    const step = createStep({
+      action: 'click',
+      intent: 'click_submit',
+      selector: '.unknown-button',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.unknown-button',
+        selectorPriority: 'class',
+        selectorRank: 7,
+      },
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'clickSubmit',
+      `locator('.unknown-button').click()`,
+      '.unknown-button',
+      {
+        selector: '.unknown-button',
+        engine: 'css',
+        source: 'resolver',
+        proofLevel: 'blocked',
+      },
+    );
+
+    expect(emitted.methodCode).toContain('const target = this.page.locator(".unknown-button");');
+    expect(emitted.methodCode).toContain('// Match count during recording: unavailable');
+    expect(emitted.methodCode).toContain('// Visible match count during recording: unavailable');
+    expect(emitted.methodCode).toContain(`await target.waitFor({ state: 'visible', timeout: 5000 });`);
+    expect(emitted.methodCode).not.toContain('.first()');
+    expect(emitted.methodCode).not.toContain('.nth(');
+    expect(emitted.weakFallbackSource).toBe('plain-locator');
+  });
+
+  it('keeps TODO and throw when AIR has no usable selector for weak fallback', () => {
+    const step = createStep({
+      action: 'click',
+      intent: 'click_submit',
+      selector: '',
+      selectorPriority: 'unknown',
+      selectorSpec: undefined,
+      fingerprint: undefined,
+    });
+
+    const emitted = (LlmOrchestrator as any).buildMethodCode(
+      step,
+      'clickSubmit',
+      `locator('button').click()`,
+      'bounded-field("Submit" within div.form-row -> button)',
+      {
+        selector: 'bounded-field("Submit" within div.form-row -> button)',
+        engine: 'bounded-field',
+        source: 'resolver',
+        proofLevel: 'blocked',
+        boundedField: {
+          source: 'snapshot-bounded-field',
+          labelText: 'Submit',
+          target: {
+            selector: 'button',
+            engine: 'css',
+            source: 'resolver',
+            proofLevel: 'blocked',
+          },
+          controlKind: 'custom-trigger',
+          relation: 'bounded-container',
+          renderStatus: 'blocked-unsafe-render',
+        },
+      },
+    );
+
+    expect(emitted.methodCode).toContain('// TODO[AIR]: Selector is blocked');
+    expect(emitted.methodCode).toContain('throw new Error(');
+    expect(emitted.methodCode).toContain('AIR could not build weak fallback for method clickSubmit');
+    expect(emitted.emittedWeakFallback).toBeUndefined();
   });
 
   it('uses legacy selector fallback with explicit warning when selector spec is missing', () => {
@@ -1581,6 +1929,198 @@ describe('LlmOrchestrator - sidecar resolver metadata', () => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
+  it('persists weak fallback sidecar metadata without marking strong selectors as weak', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'air-weak-fallback-sidecar-'));
+    const outputDir = path.join(tempRoot, 'out');
+    const projectRoot = path.join(tempRoot, 'project');
+    fs.mkdirSync(outputDir, { recursive: true });
+    fs.mkdirSync(projectRoot, { recursive: true });
+
+    const session = createSession([
+      createStep({
+        step: 1,
+        action: 'input',
+        intent: 'input_username',
+        selector: '.oxd-input',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        value: 'Admin',
+        pageUrl: 'https://example.test/login',
+        normalizedUrl: 'https://example.test/login',
+        fingerprint: {
+          selector: '.oxd-input',
+          selectorPriority: 'class',
+          selectorRank: 7,
+          tagName: 'input',
+          selectorAmbiguity: {
+            originalSelector: '.oxd-input',
+            matchCount: 2,
+            visibleMatchCount: 2,
+            positionInMatches: 1,
+            isUnique: false,
+            isAmbiguous: true,
+          },
+          attributes: {
+            name: 'username',
+          },
+        },
+      }),
+      createStep({
+        step: 2,
+        action: 'click',
+        intent: 'click_submit',
+        selector: 'button[type="submit"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        pageUrl: 'https://example.test/login',
+        normalizedUrl: 'https://example.test/login',
+      }),
+    ], {
+      url: 'https://example.test/login',
+      stepCount: 2,
+    });
+
+    const callSpy = vi.spyOn(LlmOrchestrator as any, 'callGeminiApi')
+      .mockResolvedValueOnce(JSON.stringify({
+        className: 'LoginPage',
+        methods: [
+          {
+            stepNumber: 1,
+            intent: 'input_username',
+            methodName: 'fillUsername',
+            playwrightAction: `locator('.oxd-input').fill('Admin')`,
+          },
+          {
+            stepNumber: 2,
+            intent: 'click_submit',
+            methodName: 'clickSubmit',
+            playwrightAction: `locator('button[type="submit"]').click()`,
+          },
+        ],
+      }));
+
+    const resolveSpy = vi.spyOn(selectorResolverModule, 'resolveSelectorsForSession')
+      .mockResolvedValueOnce({
+        resolutions: [
+          {
+            stepNumber: 1,
+            originalSelector: '.oxd-input',
+            resolvedSelector: '.oxd-input',
+            selectorSpec: {
+              selector: '.oxd-input',
+              engine: 'css',
+              source: 'interceptor',
+              proofLevel: 'recorded',
+              rank: 7,
+            },
+            resolvedSelectorSpec: {
+              selector: '.oxd-input',
+              engine: 'css',
+              source: 'resolver',
+              proofLevel: 'unvalidated',
+              rank: 7,
+            },
+            resolverMetadata: {
+              resolvedSelector: '.oxd-input',
+              resolvedBy: 'kept-original',
+              bestScore: 0.41,
+              effectiveMatchCount: 2,
+              matchCount: 2,
+              snapshotSource: 'event-local-pageState',
+              validationMethod: 'css-query-static-visibility-element-ranking-v1',
+              llmAttempted: false,
+              llmAccepted: false,
+              llmAlternative: null,
+              rejectReason: null,
+              warningCodes: ['unvalidated-selector'],
+              resolverVersion: 1,
+            },
+          },
+          {
+            stepNumber: 2,
+            originalSelector: 'button[type="submit"]',
+            resolvedSelector: 'button[type="submit"]',
+            selectorSpec: {
+              selector: 'button[type="submit"]',
+              engine: 'css',
+              source: 'interceptor',
+              proofLevel: 'recorded',
+              rank: 3,
+            },
+            resolvedSelectorSpec: {
+              selector: 'button[type="submit"]',
+              engine: 'css',
+              source: 'resolver',
+              proofLevel: 'semantic_validated',
+              rank: 3,
+            },
+            resolverMetadata: {
+              resolvedSelector: 'button[type="submit"]',
+              resolvedBy: 'kept-original',
+              bestScore: 0.92,
+              effectiveMatchCount: 1,
+              matchCount: 1,
+              snapshotSource: 'event-local-pageState',
+              validationMethod: 'css-query-static-visibility-element-ranking-v1',
+              llmAttempted: false,
+              llmAccepted: false,
+              llmAlternative: null,
+              rejectReason: null,
+              warningCodes: [],
+              resolverVersion: 1,
+            },
+          },
+        ],
+        unresolvedStepNumbers: [],
+        llmAttemptedStepNumbers: [],
+        llmAcceptedStepNumbers: [],
+      } as any);
+
+    await LlmOrchestrator.generatePageObjects(
+      session,
+      outputDir,
+      projectRoot,
+      {
+        resolverConfig: {
+          enableLLMFallback: false,
+        },
+        snapshotCache: {
+          get() {
+            return null;
+          },
+          getSource() {
+            return 'unavailable';
+          },
+        },
+      },
+    );
+
+    const code = fs.readFileSync(path.join(outputDir, 'LoginPage.ts'), 'utf-8');
+    const sidecar = JSON.parse(
+      fs.readFileSync(path.join(outputDir, 'LoginPage.air.json'), 'utf-8'),
+    );
+
+    expect(code).toContain('// AIR WARNING: Weak selector fallback.');
+    expect(code).toContain('const target = this.page.locator(".oxd-input:visible").nth(1);');
+    expect(sidecar.methods.fillUsername).toEqual(expect.objectContaining({
+      emittedWeakFallback: true,
+      weakFallbackReason: 'selector was not confidently validated.',
+      weakFallbackSelector: '.oxd-input',
+      weakFallbackLocator: 'locator(".oxd-input:visible").nth(1)',
+      weakFallbackIndex: 1,
+      weakFallbackIndexKind: 'visible',
+      weakFallbackUsedVisibleFilter: true,
+      weakFallbackMatchCount: 2,
+      weakFallbackVisibleMatchCount: 2,
+      weakFallbackSource: 'indexed-fallback',
+    }));
+    expect(sidecar.methods.clickSubmit.emittedWeakFallback).toBeUndefined();
+
+    resolveSpy.mockRestore();
+    callSpy.mockRestore();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
   it('preserves exact resolvedSelectorSpec in sidecar when emitting getByTestId equivalent rendering', async () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'air-equiv-sidecar-'));
     const outputDir = path.join(tempRoot, 'out');
@@ -1958,14 +2498,27 @@ describe('LlmOrchestrator - sidecar resolver metadata', () => {
         pageUrl: 'https://example.test/admin',
         normalizedUrl: 'https://example.test/admin',
         controlFamily: 'combobox',
-        triggerSelector: '.select-trigger',
+        triggerSelector: '.oxd-select-text',
         triggerSelectorPriority: 'class',
         triggerSelectorSpec: {
-          selector: '.select-trigger',
+          selector: '.oxd-select-text',
           engine: 'css',
           source: 'interceptor',
           proofLevel: 'recorded',
           rank: 7,
+        },
+        triggerFingerprint: {
+          selector: '.oxd-select-text',
+          selectorPriority: 'class',
+          selectorRank: 7,
+          selectorAmbiguity: {
+            originalSelector: '.oxd-select-text',
+            matchCount: 2,
+            visibleMatchCount: 2,
+            positionInMatches: 0,
+            isUnique: false,
+            isAmbiguous: true,
+          },
         },
         optionSelector: '[role="option"]',
         optionText: 'Admin',
@@ -2070,13 +2623,31 @@ describe('LlmOrchestrator - sidecar resolver metadata', () => {
       fs.readFileSync(path.join(outputDir, 'AdminPage.air.json'), 'utf-8'),
     );
 
-    expect(code).toContain('// TODO[AIR]: Cannot safely open custom control for "Admin".');
-    expect(code).not.toContain('locator(".select-trigger").click()');
+    expect(code).toContain('// AIR WARNING: Weak selector fallback.');
+    expect(code).toContain('const triggerTarget = this.page.locator(".oxd-select-text:visible").nth(0);');
+    expect(code).toContain(`await triggerTarget.waitFor({ state: 'visible', timeout: 5000 });`);
+    expect(code).toContain('await triggerTarget.click();');
+    expect(code).toContain('// AIR WARNING: Weak trigger selector fallback.');
+    expect(code).toContain('// AIR preserved the recorded option selection below.');
+    expect(code).toContain('const optionTarget = this.page.locator("[role=\\"option\\"]");');
+    expect(code).toContain('await optionTarget.click();');
+    expect(code).not.toContain('throw new Error(');
     expect(sidecar.methods.selectAdmin).toEqual(expect.objectContaining({
+      emittedWeakFallback: true,
+      weakFallbackReason: 'trigger selector was ambiguous during recording.',
+      weakFallbackSelector: '.oxd-select-text',
+      weakFallbackLocator: 'locator(".oxd-select-text:visible").nth(0)',
+      weakFallbackIndex: 0,
+      weakFallbackIndexKind: 'visible',
+      weakFallbackUsedVisibleFilter: true,
+      weakFallbackMatchCount: 2,
+      weakFallbackVisibleMatchCount: 2,
+      weakFallbackSource: 'indexed-fallback',
       triggerContextRenderStatus: 'blocked-unsafe-render',
       triggerContextRenderReason: 'target_missing',
       triggerWarningCodes: ['custom-control-trigger-target-binding-ambiguous'],
     }));
+    expect(sidecar.methods.selectAdmin.weakFallbackWarnings ?? []).toEqual([]);
     expect(sidecar.methods.selectAdmin.warningCodes).toContain('custom-control-trigger-target-binding-ambiguous');
 
     resolveSpy.mockRestore();
