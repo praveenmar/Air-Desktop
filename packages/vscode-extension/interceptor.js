@@ -169,6 +169,58 @@ const AIR_CFG = {
   debugMode: true
 };
 
+const MAX_CAPTURED_SELECTOR_CANDIDATES = 8;
+const MAX_SELECTOR_VISIBLE_INDEX_MATCHES = 100;
+const MAX_TIGHT_CONTAINER_DEPTH = 8;
+const MAX_TIGHT_CONTAINER_CONTROL_LIKE_DESCENDANTS = 4;
+const TIGHT_CONTAINER_INPUT_LIKE_SELECTOR = [
+  'input:not([type="hidden"])',
+  'textarea',
+  'select',
+  '[role="textbox"]',
+  '[role="combobox"]',
+  '[role="searchbox"]',
+  '[role="spinbutton"]',
+  '[contenteditable]:not([contenteditable="false"])',
+].join(', ');
+const TIGHT_CONTAINER_TRIGGER_LIKE_SELECTOR = [
+  'select',
+  '[role="combobox"]',
+  'button[aria-haspopup]',
+  '[role="button"][aria-haspopup]',
+  '[aria-haspopup="listbox"]',
+  '[aria-haspopup="combobox"]',
+  '[tabindex][aria-haspopup]',
+].join(', ');
+const TIGHT_CONTAINER_BROAD_TAGS = new Set([
+  'html',
+  'body',
+  'main',
+  'section',
+  'article',
+  'nav',
+  'table',
+  'tbody',
+  'thead',
+]);
+const SELECTOR_CANDIDATE_HOT_PATH_EVENT_TYPES = new Set([
+  'hover',
+  'scroll',
+  'network',
+  'outcome',
+]);
+const SELECTOR_CANDIDATE_ADVANCED_EVENT_TYPES = new Set([
+  EventType.CLICK,
+  'submit',
+  EventType.CUSTOM_CONTROL_OPEN,
+  EventType.CUSTOM_SELECT,
+  EventType.CUSTOM_MENU_SELECT,
+]);
+const COMMITTED_INPUT_SELECTOR_CANDIDATE_TRIGGERS = new Set([
+  'blur',
+  'change',
+]);
+
 const SELECTOR_RANK_MAP = {
   'data-testid': 1,
   id: 2,
@@ -268,6 +320,19 @@ function isStableHref(href) {
   if (!normalized) return false;
   if (/^(?:#|javascript:|mailto:|tel:)/i.test(normalized)) return false;
   return true;
+}
+
+function getSafeElementClassString(element) {
+  if (!element || typeof element.getAttribute !== 'function') return '';
+  const className = element.getAttribute('class');
+  return typeof className === 'string' ? className : '';
+}
+
+function getSafeElementClassTokens(element) {
+  return getSafeElementClassString(element)
+    .split(/\s+/)
+    .map((token) => String(token || '').trim())
+    .filter(Boolean);
 }
 
 function scoreClassCandidate(token) {
@@ -4438,7 +4503,10 @@ class AIRInterceptor {
     const resolvedTargetInfo = this._resolveNestedContext(null, target, eventId);
     const effectiveTarget = resolvedTargetInfo.target || target;
     const nestedContext = resolvedTargetInfo.nestedContext;
-    const fingerprint = this.generateFingerprint(effectiveTarget);
+    const fingerprint = this.generateFingerprint(effectiveTarget, {
+      eventType: EventType.INPUT,
+      trigger,
+    });
     const rawValue    = effectiveTarget.value || "";
     const isSensitive = this.isSensitiveField(effectiveTarget);
     const hasPII      = this.containsPII(rawValue);
@@ -5111,7 +5179,10 @@ class AIRInterceptor {
     );
     const nestedContext = resolvedTargetInfo.nestedContext;
     const optionTarget = resolvedTargetInfo.target || el;
-    const optionFingerprint = this.generateFingerprint(optionTarget);
+    const optionFingerprint = this.generateFingerprint(optionTarget, {
+      eventType,
+      trigger: "option-click",
+    });
     const snapshotTarget = optionTarget || session?.triggerEl || this._getComposedEventTarget(clickEvent) || null;
     const subtreeSnapshot = snapshotTarget
       ? this._captureSubtreeSnapshot(snapshotTarget)
@@ -5506,7 +5577,10 @@ class AIRInterceptor {
     const probableTrigger = this._resolveCustomDropdownTrigger(clickTarget);
     if (probableTrigger) {
       // Capture the trigger fingerprint NOW, before the DOM mutates
-      const triggerFingerprint = this.generateFingerprint(probableTrigger);
+      const triggerFingerprint = this.generateFingerprint(probableTrigger, {
+        eventType: EventType.CUSTOM_CONTROL_OPEN,
+        trigger: "trigger-click",
+      });
       const handledAsCustomControl = await this._handlePotentialCustomControlTrigger(
         probableTrigger,
         triggerFingerprint,
@@ -5580,7 +5654,10 @@ class AIRInterceptor {
       });
     }
 
-    const fingerprint = this.generateFingerprint(target);
+    const fingerprint = this.generateFingerprint(target, {
+      eventType: EventType.CLICK,
+      trigger: "click",
+    });
     const seek = this.detectSeekStrategy(target);
     const startUrl = window.location.href;
 
@@ -6082,7 +6159,10 @@ class AIRInterceptor {
       ? (target.closest("form") || target)
       : target;
     const captureTarget = formTarget && formTarget.tagName ? formTarget : null;
-    const fingerprint = this.generateFingerprint(captureTarget);
+    const fingerprint = this.generateFingerprint(captureTarget, {
+      eventType: "submit",
+      trigger: "submit",
+    });
     const reusedTraceId = captureTarget && captureTarget.tagName === "FORM"
       ? this._consumeRecentSubmitTrace(captureTarget)
       : null;
@@ -6144,7 +6224,7 @@ class AIRInterceptor {
   // FINGERPRINT GENERATION (4-Layer)
   // ============================================================
 
-  generateFingerprint(element) {
+  generateFingerprint(element, eventContext = undefined) {
     if (!element) return null;
 
     // Debug logging
@@ -6161,6 +6241,19 @@ class AIRInterceptor {
     const boundedFieldContext = this._collectBoundedFieldContext(element, selectorResult);
     const accessibilityEvidence = this._collectAccessibilityEvidence(element);
     const attributesHash = this.hashAttributes(attributes);
+    let selectorCandidates;
+
+    try {
+      selectorCandidates = this._collectSelectorCandidates(element, selectorResult, eventContext);
+    } catch (error) {
+      this.log("SELECTOR_CANDIDATE_DROPPED_INVALID", {
+        eventType: typeof eventContext?.eventType === "string" ? eventContext.eventType : null,
+        trigger: typeof eventContext?.trigger === "string" ? eventContext.trigger : null,
+        reason: "collection_failed",
+        message: error?.message || String(error),
+      });
+      selectorCandidates = undefined;
+    }
 
     if (this.config.debugMode) {
       console.log("Selector generated:", selectorResult.selector);
@@ -6184,11 +6277,1275 @@ class AIRInterceptor {
       textExcerpt,
       context,
       attributes,
+      ...(selectorCandidates && selectorCandidates.length > 0 ? { selectorCandidates } : {}),
       selectorAmbiguity,
       boundedFieldContext,
       accessibilityEvidence,
       attributesHash,
     };
+  }
+
+  _resolveSelectorCandidateCollectionMode(eventContext) {
+    const eventType = typeof eventContext?.eventType === "string" ? eventContext.eventType : null;
+    const trigger = typeof eventContext?.trigger === "string" ? eventContext.trigger : null;
+
+    if (!eventType) return "off";
+    if (SELECTOR_CANDIDATE_HOT_PATH_EVENT_TYPES.has(eventType)) return "off";
+
+    if (eventType === EventType.INPUT) {
+      if (trigger === "input:progress") return "off";
+      if (COMMITTED_INPUT_SELECTOR_CANDIDATE_TRIGGERS.has(trigger)) return "advanced";
+      return "primary-only";
+    }
+
+    if (SELECTOR_CANDIDATE_ADVANCED_EVENT_TYPES.has(eventType)) {
+      return "advanced";
+    }
+
+    return "primary-only";
+  }
+
+  _collectSelectorCandidates(element, selectorResult, eventContext) {
+    const selector = typeof selectorResult?.selector === "string" ? selectorResult.selector.trim() : "";
+    if (!element || !selector) return undefined;
+
+    const eventType = typeof eventContext?.eventType === "string" ? eventContext.eventType : null;
+    const trigger = typeof eventContext?.trigger === "string" ? eventContext.trigger : null;
+    const mode = this._resolveSelectorCandidateCollectionMode(eventContext);
+    const targetTag = element.tagName?.toLowerCase?.() || null;
+
+    if (mode === "off") {
+      if (eventType && (SELECTOR_CANDIDATE_HOT_PATH_EVENT_TYPES.has(eventType) || trigger === "input:progress")) {
+        this.log("SELECTOR_CANDIDATES_SKIPPED_HOT_PATH", {
+          eventType,
+          trigger,
+          targetTag,
+          sessionId: this.config?.sessionId || null,
+          tabId: this.config?.tabId || null,
+        });
+      }
+      return undefined;
+    }
+
+    const candidates = [];
+    const seenSelectors = new Set();
+    let capLogged = false;
+    const pushCandidate = (candidateInput) => {
+      if (!candidateInput || typeof candidateInput.selector !== "string") {
+        this.log("SELECTOR_CANDIDATE_DROPPED_INVALID", {
+          eventType,
+          trigger,
+          targetTag,
+          family: candidateInput?.family || null,
+          reason: "missing_selector",
+        });
+        return;
+      }
+
+      const normalizedSelector = candidateInput.selector.trim();
+      if (!normalizedSelector) {
+        this.log("SELECTOR_CANDIDATE_DROPPED_INVALID", {
+          eventType,
+          trigger,
+          targetTag,
+          family: candidateInput.family || null,
+          reason: "empty_selector",
+        });
+        return;
+      }
+
+      if (candidates.length >= MAX_CAPTURED_SELECTOR_CANDIDATES) {
+        if (!capLogged) {
+          this.log("SELECTOR_CANDIDATE_CAP_REACHED", {
+            eventType,
+            trigger,
+            targetTag,
+            cap: MAX_CAPTURED_SELECTOR_CANDIDATES,
+            sessionId: this.config?.sessionId || null,
+            tabId: this.config?.tabId || null,
+          });
+          capLogged = true;
+        }
+        return;
+      }
+
+      const engine = candidateInput.engine || "css";
+      const family = typeof candidateInput.family === "string" ? candidateInput.family : "";
+      const dedupeKey = `${engine}::${family}::${normalizedSelector}`;
+      if (seenSelectors.has(dedupeKey)) return;
+
+      const finalized = this._finalizeSelectorCandidate(element, selectorResult, {
+        ...candidateInput,
+        selector: normalizedSelector,
+      });
+      if (!finalized) {
+        this.log("SELECTOR_CANDIDATE_DROPPED_INVALID", {
+          eventType,
+          trigger,
+          targetTag,
+          family: candidateInput.family || null,
+          selector: normalizedSelector,
+          reason: "finalize_failed",
+        });
+        return;
+      }
+
+      seenSelectors.add(dedupeKey);
+      candidates.push(finalized);
+    };
+
+    pushCandidate(this._buildPrimarySelectorCandidate(element, selectorResult));
+
+    if (mode !== "advanced") {
+      return candidates.length > 0 ? candidates : undefined;
+    }
+
+    if (element.isConnected === false) {
+      this.log("SELECTOR_CANDIDATES_SKIPPED_DETACHED_TARGET", {
+        eventType,
+        trigger,
+        targetTag,
+        sessionId: this.config?.sessionId || null,
+        tabId: this.config?.tabId || null,
+      });
+      return candidates.length > 0 ? candidates : undefined;
+    }
+
+    for (const candidate of this._collectStableAttributeSelectorCandidates(element)) {
+      pushCandidate(candidate);
+    }
+
+    pushCandidate(this._collectStableClassCandidate(element));
+    pushCandidate(this._collectParentScopedCssCandidate(element, selectorResult));
+    pushCandidate(this._collectTightContainerCandidate(element, selectorResult, eventContext));
+
+    if (candidates.length > 0) {
+      this.log("SELECTOR_CANDIDATES_CAPTURED", {
+        eventType,
+        trigger,
+        targetTag,
+        candidateCount: candidates.length,
+        families: candidates.map((candidate) => candidate.family),
+        sessionId: this.config?.sessionId || null,
+        tabId: this.config?.tabId || null,
+      });
+    }
+
+    return candidates.length > 0 ? candidates : undefined;
+  }
+
+  _buildPrimarySelectorCandidate(element, selectorResult) {
+    const selector = typeof selectorResult?.selector === "string" ? selectorResult.selector.trim() : "";
+    if (!selector) return null;
+
+    const engine = selectorResult?.priority === "text"
+      ? "text"
+      : ((selectorResult?.priority === "xpath" || selector.startsWith("//") || selector.startsWith("xpath=") || /^id\(".*"\)$/i.test(selector))
+        ? "xpath"
+        : "css");
+
+    const classToken = selectorResult?.priority === "class"
+      ? this._findClassTokenForSelector(element, selector)
+      : null;
+    const classAnalysis = classToken ? this._analyzeClassToken(classToken) : null;
+    const warningCodes = [];
+    if (classAnalysis?.usesDynamicClass) warningCodes.push("dynamic-class");
+    if (classAnalysis?.isFramework) warningCodes.push("framework-class");
+
+    return {
+      selector,
+      engine,
+      family: "primary",
+      source: "capture",
+      isPrimary: true,
+      usesDynamicClass: classAnalysis?.usesDynamicClass || undefined,
+      usesIndex: this._selectorUsesIndex(selector),
+      warningCodes,
+      priorityHint: selectorResult?.priority || null,
+    };
+  }
+
+  _collectStableAttributeSelectorCandidates(element) {
+    const tagName = element.tagName?.toLowerCase?.() || null;
+    if (!tagName) return [];
+
+    const candidates = [];
+    const push = (selector, family) => {
+      if (!selector) return;
+      candidates.push({
+        selector,
+        engine: "css",
+        family,
+        source: "capture",
+      });
+    };
+
+    const dataTestId = element.getAttribute("data-testid");
+    if (dataTestId) {
+      push(`[data-testid="${escapeCssString(dataTestId)}"]`, "test-id");
+    }
+
+    for (const attrName of ["data-cy", "data-qa"]) {
+      const attrValue = element.getAttribute(attrName);
+      if (!attrValue) continue;
+      push(`${tagName}[${attrName}="${escapeCssString(attrValue)}"]`, "test-id");
+    }
+
+    if (element.id && !this._isLikelyDynamicId(element.id)) {
+      push(`#${safeCssEscape(element.id)}`, "id");
+    }
+
+    const name = element.getAttribute("name");
+    if (name) {
+      push(`${tagName}[name="${escapeCssString(name)}"]`, "name");
+    }
+
+    const ariaLabel = element.getAttribute("aria-label");
+    if (ariaLabel) {
+      push(`${tagName}[aria-label="${escapeCssString(ariaLabel)}"]`, "aria-label");
+    }
+
+    const placeholder = element.getAttribute("placeholder");
+    if (placeholder && ["input", "textarea"].includes(tagName)) {
+      push(`${tagName}[placeholder="${escapeCssString(placeholder)}"]`, "placeholder");
+    }
+
+    const href = element.getAttribute("href");
+    if (tagName === "a" && isStableHref(href)) {
+      push(`${tagName}[href="${escapeCssString(href)}"]`, "href");
+    }
+
+    return candidates;
+  }
+
+  _collectStableClassCandidate(element) {
+    const classCandidate = this._getBestStableClassCandidate(element);
+    if (!classCandidate) return null;
+
+    return {
+      selector: `.${safeCssEscape(classCandidate.token)}`,
+      engine: "css",
+      family: "class",
+      source: "capture",
+      usesDynamicClass: classCandidate.usesDynamicClass || undefined,
+      warningCodes: classCandidate.warningCodes,
+    };
+  }
+
+  _collectParentScopedCssCandidate(element, selectorResult) {
+    const parent = element?.parentElement;
+    if (!parent) return null;
+
+    const parentSelector = this._buildStableParentSelector(parent);
+    if (!parentSelector) return null;
+
+    const childSelector = this._buildSimpleParentScopedChildSelector(element, selectorResult);
+    if (!childSelector) return null;
+
+    return {
+      selector: `${parentSelector} > ${childSelector}`,
+      engine: "css",
+      family: "parent-scoped-css",
+      source: "capture",
+      usesIndex: this._selectorUsesIndex(childSelector),
+    };
+  }
+
+  _collectTightContainerCandidate(element, selectorResult, eventContext) {
+    const eventType = typeof eventContext?.eventType === "string" ? eventContext.eventType : null;
+    const trigger = typeof eventContext?.trigger === "string" ? eventContext.trigger : null;
+    const targetTag = element?.tagName?.toLowerCase?.() || null;
+    const modeResult = this._resolveTightContainerTargetAndMode(element);
+
+    if (!modeResult?.target || !modeResult?.mode) {
+      return null;
+    }
+
+    const discovery = this._discoverTightContainerContext(modeResult.target, modeResult.mode, {
+      eventType,
+      trigger,
+      targetTag,
+    });
+
+    if (discovery?.shadowBoundaryCrossed) {
+      this.log("SHADOW_BOUNDARY_CROSSED_DURING_CANDIDATE_CAPTURE", {
+        eventType,
+        trigger,
+        targetTag,
+        mode: discovery.mode,
+        blockedReason: discovery.blockedReason || null,
+        sessionId: this.config?.sessionId || null,
+        tabId: this.config?.tabId || null,
+      });
+    }
+
+    if (discovery?.status === "blocked") {
+      const logEvent = discovery.blockedReason === "detached-target"
+        ? "TIGHT_CONTAINER_DETACHED_TARGET"
+        : "TIGHT_CONTAINER_BLOCKED";
+      this.log(logEvent, {
+        eventType,
+        trigger,
+        targetTag,
+        mode: discovery.mode || modeResult.mode,
+        depth: discovery.depth ?? null,
+        controlCount: discovery.controlCount ?? null,
+        blockedReason: discovery.blockedReason || null,
+        shadowBoundaryCrossed: !!discovery.shadowBoundaryCrossed,
+        sessionId: this.config?.sessionId || null,
+        tabId: this.config?.tabId || null,
+      });
+      return null;
+    }
+
+    if (discovery?.status !== "found") {
+      if (discovery?.warningCodes?.includes("inside-shadow-dom")) {
+        this.log("TIGHT_CONTAINER_CANDIDATE_SKIPPED", {
+          eventType,
+          trigger,
+          targetTag,
+          mode: discovery.mode || modeResult.mode,
+          blockedReason: discovery.blockedReason || "no-tight-container",
+          shadowBoundaryCrossed: !!discovery.shadowBoundaryCrossed,
+          sessionId: this.config?.sessionId || null,
+          tabId: this.config?.tabId || null,
+        });
+      }
+      return null;
+    }
+
+    this.log("TIGHT_CONTAINER_FOUND", {
+      eventType,
+      trigger,
+      targetTag,
+      mode: discovery.mode,
+      depth: discovery.depth,
+      controlCount: discovery.controlCount,
+      shadowBoundaryCrossed: !!discovery.shadowBoundaryCrossed,
+      sessionId: this.config?.sessionId || null,
+      tabId: this.config?.tabId || null,
+    });
+
+    const candidateResult = this._buildTightContainerSelectorCandidate(
+      modeResult.target,
+      selectorResult,
+      discovery,
+      modeResult.originalTarget === modeResult.target,
+    );
+
+    if (!candidateResult?.candidate) {
+      this.log("TIGHT_CONTAINER_CANDIDATE_SKIPPED", {
+        eventType,
+        trigger,
+        targetTag,
+        mode: discovery.mode,
+        depth: discovery.depth,
+        blockedReason: candidateResult?.blockedReason || "candidate-build-failed",
+        shadowBoundaryCrossed: !!discovery.shadowBoundaryCrossed,
+        sessionId: this.config?.sessionId || null,
+        tabId: this.config?.tabId || null,
+      });
+      return null;
+    }
+
+    this.log("TIGHT_CONTAINER_CANDIDATE_CAPTURED", {
+      eventType,
+      trigger,
+      targetTag,
+      mode: discovery.mode,
+      depth: discovery.depth,
+      controlCount: discovery.controlCount,
+      shadowBoundaryCrossed: !!discovery.shadowBoundaryCrossed,
+      sessionId: this.config?.sessionId || null,
+      tabId: this.config?.tabId || null,
+    });
+
+    return candidateResult.candidate;
+  }
+
+  _resolveTightContainerTargetAndMode(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
+
+    const directMode = this._resolveTightContainerMode(element);
+    if (directMode) {
+      return {
+        target: element,
+        mode: directMode,
+        originalTarget: element,
+      };
+    }
+
+    const tagName = element.tagName?.toLowerCase?.() || "";
+    if (tagName !== "label") return null;
+
+    const associatedControl = this._resolveLabelAssociatedControl(element);
+    const associatedMode = this._resolveTightContainerMode(associatedControl);
+    if (!associatedControl || !associatedMode) return null;
+
+    return {
+      target: associatedControl,
+      mode: associatedMode,
+      originalTarget: element,
+    };
+  }
+
+  _resolveLabelAssociatedControl(labelElement) {
+    if (!labelElement || labelElement.nodeType !== Node.ELEMENT_NODE) return null;
+    if (labelElement.control && labelElement.control.nodeType === Node.ELEMENT_NODE) {
+      return labelElement.control;
+    }
+
+    const forId = labelElement.getAttribute("for");
+    if (!forId) return null;
+
+    const root = typeof labelElement.getRootNode === "function"
+      ? labelElement.getRootNode()
+      : null;
+    if (root && typeof root.getElementById === "function") {
+      const rootMatch = root.getElementById(forId);
+      if (rootMatch) return rootMatch;
+    }
+
+    return labelElement.ownerDocument?.getElementById?.(forId) || null;
+  }
+
+  _resolveTightContainerMode(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
+
+    const tagName = element.tagName?.toLowerCase?.() || "";
+    const role = (element.getAttribute?.("role") || "").toLowerCase();
+    const inputType = (element.getAttribute?.("type") || "").toLowerCase();
+    const ariaHasPopup = (element.getAttribute?.("aria-haspopup") || "").toLowerCase();
+    const contentEditableAttr = (element.getAttribute?.("contenteditable") || "").toLowerCase();
+    const hasContentEditableAttr = !!element.hasAttribute?.("contenteditable");
+    const isContentEditable = !!element.isContentEditable || (hasContentEditableAttr && contentEditableAttr !== "false");
+
+    if (tagName === "input" && inputType === "hidden") return null;
+    if (tagName === "input" || tagName === "textarea" || tagName === "select") return "input-like";
+    if (role === "textbox" || role === "combobox" || role === "searchbox" || role === "spinbutton") return "input-like";
+    if (isContentEditable) return "input-like";
+
+    if (
+      tagName === "select" ||
+      role === "combobox" ||
+      (role === "button" && !!ariaHasPopup) ||
+      ariaHasPopup === "listbox" ||
+      ariaHasPopup === "combobox" ||
+      ((tagName === "button" || element.hasAttribute?.("tabindex")) && !!ariaHasPopup)
+    ) {
+      return "trigger-like";
+    }
+
+    return null;
+  }
+
+  _discoverTightContainerContext(target, mode, logContext = undefined) {
+    const eventType = typeof logContext?.eventType === "string" ? logContext.eventType : null;
+    const trigger = typeof logContext?.trigger === "string" ? logContext.trigger : null;
+    const targetTag = typeof logContext?.targetTag === "string"
+      ? logContext.targetTag
+      : (target?.tagName?.toLowerCase?.() || null);
+
+    if (!target || target.nodeType !== Node.ELEMENT_NODE || target.isConnected === false) {
+      return {
+        status: "blocked",
+        container: null,
+        parentSelector: null,
+        childSelector: null,
+        candidateSelector: null,
+        depth: null,
+        mode,
+        controlCount: null,
+        shadowBoundaryCrossed: false,
+        warningCodes: ["detached-target"],
+        blockedReason: "detached-target",
+      };
+    }
+
+    const targetRoot = typeof target.getRootNode === "function"
+      ? target.getRootNode()
+      : null;
+    const shadowRootCtor = (typeof ShadowRoot !== "undefined" && ShadowRoot)
+      || target?.ownerDocument?.defaultView?.ShadowRoot
+      || null;
+    const insideShadowDom = !!(shadowRootCtor && targetRoot instanceof shadowRootCtor);
+    if (insideShadowDom && targetRoot?.mode !== "open") {
+      return {
+        status: "blocked",
+        container: null,
+        parentSelector: null,
+        childSelector: null,
+        candidateSelector: null,
+        depth: null,
+        mode,
+        controlCount: null,
+        shadowBoundaryCrossed: false,
+        warningCodes: ["inside-shadow-dom"],
+        blockedReason: "unsupported-shadow-root",
+      };
+    }
+
+    let current = this._getComposedParentElement(target);
+    let depth = 0;
+    let shadowBoundaryCrossed = false;
+    const warningCodes = insideShadowDom ? ["inside-shadow-dom"] : [];
+
+    while (current && depth <= MAX_TIGHT_CONTAINER_DEPTH) {
+      if (current.shadowBoundaryCrossed) {
+        shadowBoundaryCrossed = true;
+        if (!warningCodes.includes("shadow-boundary-crossed")) {
+          warningCodes.push("shadow-boundary-crossed");
+        }
+      }
+
+      const currentElement = current.parentElement;
+      if (!currentElement || currentElement.nodeType !== Node.ELEMENT_NODE) break;
+
+      const tagName = currentElement.tagName?.toLowerCase?.() || "";
+      if (tagName === "html" || tagName === "body") {
+        return {
+          status: "blocked",
+          container: null,
+          parentSelector: null,
+          childSelector: null,
+          candidateSelector: null,
+          depth,
+          mode,
+          controlCount: null,
+          shadowBoundaryCrossed,
+          warningCodes,
+          blockedReason: "broad-container",
+        };
+      }
+
+      if (TIGHT_CONTAINER_BROAD_TAGS.has(tagName)) {
+        return {
+          status: "blocked",
+          container: null,
+          parentSelector: null,
+          childSelector: null,
+          candidateSelector: null,
+          depth,
+          mode,
+          controlCount: null,
+          shadowBoundaryCrossed,
+          warningCodes,
+          blockedReason: "broad-container",
+        };
+      }
+
+      const controls = this._getFastVisibleControlLikeDescendants(currentElement, mode);
+      const controlCount = controls.length;
+
+      if (tagName === "form" && !(controlCount === 1 && controls[0] === target)) {
+        return {
+          status: "blocked",
+          container: null,
+          parentSelector: null,
+          childSelector: null,
+          candidateSelector: null,
+          depth,
+          mode,
+          controlCount,
+          shadowBoundaryCrossed,
+          warningCodes,
+          blockedReason: "broad-container",
+        };
+      }
+
+      if (controls.length === 1 && controls[0] === target) {
+        const parentSelectorPreview = this._buildTightContainerParentSelector(currentElement);
+        if (!parentSelectorPreview) {
+          current = this._getComposedParentElement(currentElement);
+          depth += 1;
+          continue;
+        }
+
+        return {
+          status: "found",
+          container: currentElement,
+          parentSelector: parentSelectorPreview,
+          childSelector: null,
+          candidateSelector: null,
+          depth,
+          mode,
+          controlCount,
+          shadowBoundaryCrossed,
+          warningCodes,
+          blockedReason: null,
+          targetRoot,
+          containerRoot: typeof currentElement.getRootNode === "function"
+            ? currentElement.getRootNode()
+            : null,
+        };
+      }
+
+      if (controls.length > MAX_TIGHT_CONTAINER_CONTROL_LIKE_DESCENDANTS) {
+        return {
+          status: "blocked",
+          container: currentElement,
+          parentSelector: null,
+          childSelector: null,
+          candidateSelector: null,
+          depth,
+          mode,
+          controlCount,
+          shadowBoundaryCrossed,
+          warningCodes,
+          blockedReason: "container-too-broad",
+          targetRoot,
+          containerRoot: typeof currentElement.getRootNode === "function"
+            ? currentElement.getRootNode()
+            : null,
+        };
+      }
+
+      if (controls.includes(target) && controls.length > 1) {
+        return {
+          status: "blocked",
+          container: currentElement,
+          parentSelector: null,
+          childSelector: null,
+          candidateSelector: null,
+          depth,
+          mode,
+          controlCount,
+          shadowBoundaryCrossed,
+          warningCodes,
+          blockedReason: "multiple-control-like-targets",
+          targetRoot,
+          containerRoot: typeof currentElement.getRootNode === "function"
+            ? currentElement.getRootNode()
+            : null,
+        };
+      }
+
+      current = this._getComposedParentElement(currentElement);
+      depth += 1;
+    }
+
+    return {
+      status: "not-found",
+      container: null,
+      parentSelector: null,
+      childSelector: null,
+      candidateSelector: null,
+      depth,
+      mode,
+      controlCount: null,
+      shadowBoundaryCrossed,
+      warningCodes,
+      blockedReason: "no-tight-container",
+    };
+  }
+
+  _getComposedParentElement(node) {
+    if (!node || typeof node !== "object") return null;
+
+    if (node.assignedSlot) {
+      return {
+        parentElement: node.assignedSlot,
+        shadowBoundaryCrossed: true,
+      };
+    }
+
+    if (node.parentElement) {
+      return {
+        parentElement: node.parentElement,
+        shadowBoundaryCrossed: false,
+      };
+    }
+
+    const root = typeof node.getRootNode === "function"
+      ? node.getRootNode()
+      : null;
+    const shadowRootCtor = (typeof ShadowRoot !== "undefined" && ShadowRoot)
+      || node?.ownerDocument?.defaultView?.ShadowRoot
+      || null;
+    if (root && shadowRootCtor && root instanceof shadowRootCtor) {
+      if (root.mode === "open" && root.host) {
+        return {
+          parentElement: root.host,
+          shadowBoundaryCrossed: true,
+        };
+      }
+
+      return {
+        parentElement: null,
+        shadowBoundaryCrossed: true,
+      };
+    }
+
+    return null;
+  }
+
+  _getFastVisibleControlLikeDescendants(container, mode) {
+    if (!container || container.nodeType !== Node.ELEMENT_NODE) return [];
+
+    const selector = mode === "trigger-like"
+      ? TIGHT_CONTAINER_TRIGGER_LIKE_SELECTOR
+      : TIGHT_CONTAINER_INPUT_LIKE_SELECTOR;
+
+    try {
+      return Array.from(container.querySelectorAll(selector))
+        .filter((candidate) => this._isFastVisibleForCandidateDiscovery(candidate))
+        .slice(0, MAX_TIGHT_CONTAINER_CONTROL_LIKE_DESCENDANTS + 1);
+    } catch {
+      return [];
+    }
+  }
+
+  _isFastVisibleForCandidateDiscovery(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
+    if (element.isConnected === false) return false;
+    if (element.hidden) return false;
+    if (element.getAttribute?.("aria-hidden") === "true") return false;
+
+    const tagName = element.tagName?.toLowerCase?.() || "";
+    const inputType = (element.getAttribute?.("type") || "").toLowerCase();
+    if (tagName === "input" && inputType === "hidden") return false;
+
+    const inlineStyle = element.style || null;
+    if (inlineStyle) {
+      if (inlineStyle.display === "none" || inlineStyle.visibility === "hidden") return false;
+    }
+
+    return true;
+  }
+
+  _buildTightContainerSelectorCandidate(target, selectorResult, discovery, canReusePrimarySelector = true) {
+    if (!target || discovery?.status !== "found" || !discovery.container) {
+      return {
+        candidate: null,
+        blockedReason: discovery?.blockedReason || "no-tight-container",
+      };
+    }
+
+    const targetRoot = discovery.targetRoot || (typeof target.getRootNode === "function" ? target.getRootNode() : null);
+    const containerRoot = discovery.containerRoot || (typeof discovery.container.getRootNode === "function" ? discovery.container.getRootNode() : null);
+    if (discovery.shadowBoundaryCrossed && targetRoot && containerRoot && targetRoot !== containerRoot) {
+      return {
+        candidate: null,
+        blockedReason: "shadow-boundary-crossed",
+      };
+    }
+
+    const parentSelector = discovery.parentSelector || this._buildTightContainerParentSelector(discovery.container);
+    if (!parentSelector) {
+      return {
+        candidate: null,
+        blockedReason: "generic-parent-selector",
+      };
+    }
+
+    const childSelector = this._buildTightContainerChildSelector(target, selectorResult, discovery.mode, canReusePrimarySelector);
+    if (!childSelector) {
+      return {
+        candidate: null,
+        blockedReason: "no-clean-child-selector",
+      };
+    }
+
+    const warningCodes = Array.isArray(discovery.warningCodes)
+      ? [...discovery.warningCodes]
+      : [];
+
+    return {
+      candidate: {
+        selector: `${parentSelector} ${childSelector}`,
+        engine: "css",
+        family: "tight-container-css",
+        source: "capture",
+        usesIndex: this._selectorUsesIndex(childSelector),
+        warningCodes,
+        queryTarget: target,
+      },
+      blockedReason: null,
+    };
+  }
+
+  _buildTightContainerParentSelector(container) {
+    const tagName = container?.tagName?.toLowerCase?.() || null;
+    if (!tagName) return null;
+
+    const dataTestId = container.getAttribute("data-testid");
+    if (dataTestId) {
+      return `[data-testid="${escapeCssString(dataTestId)}"]`;
+    }
+
+    for (const attrName of ["data-cy", "data-qa"]) {
+      const attrValue = container.getAttribute(attrName);
+      if (!attrValue) continue;
+      return `${tagName}[${attrName}="${escapeCssString(attrValue)}"]`;
+    }
+
+    if (container.id && !this._isLikelyDynamicId(container.id)) {
+      return `#${safeCssEscape(container.id)}`;
+    }
+
+    const classCandidate = this._getBestStableClassCandidate(container);
+    if (classCandidate?.token) {
+      return `.${safeCssEscape(classCandidate.token)}`;
+    }
+
+    return null;
+  }
+
+  _buildTightContainerChildSelector(element, selectorResult, mode, canReusePrimarySelector = true) {
+    const tagName = element?.tagName?.toLowerCase?.() || null;
+    if (!tagName) return null;
+
+    const dataTestId = element.getAttribute("data-testid");
+    if (dataTestId) {
+      return `${tagName}[data-testid="${escapeCssString(dataTestId)}"]`;
+    }
+
+    for (const attrName of ["data-cy", "data-qa"]) {
+      const attrValue = element.getAttribute(attrName);
+      if (!attrValue) continue;
+      return `${tagName}[${attrName}="${escapeCssString(attrValue)}"]`;
+    }
+
+    const inputType = (element.getAttribute("type") || "").toLowerCase();
+    const role = (element.getAttribute("role") || "").toLowerCase();
+    const ariaHasPopup = (element.getAttribute("aria-haspopup") || "").toLowerCase();
+    const contentEditableAttr = (element.getAttribute("contenteditable") || "").toLowerCase();
+    const hasContentEditableAttr = element.hasAttribute("contenteditable");
+    const isContentEditable = element.isContentEditable || (hasContentEditableAttr && contentEditableAttr !== "false");
+
+    if (tagName === "input" && inputType === "search") {
+      return 'input[type="search"]';
+    }
+
+    if (element.getAttribute("name")) {
+      return `${tagName}[name="${escapeCssString(element.getAttribute("name"))}"]`;
+    }
+
+    if (element.getAttribute("aria-label")) {
+      return `${tagName}[aria-label="${escapeCssString(element.getAttribute("aria-label"))}"]`;
+    }
+
+    if (element.getAttribute("placeholder") && ["input", "textarea"].includes(tagName)) {
+      return `${tagName}[placeholder="${escapeCssString(element.getAttribute("placeholder"))}"]`;
+    }
+
+    if (mode === "input-like" && (role === "textbox" || role === "combobox" || role === "searchbox" || role === "spinbutton")) {
+      return `${tagName}[role="${escapeCssString(role)}"]`;
+    }
+
+    if (mode === "input-like" && isContentEditable) {
+      return `${tagName}[contenteditable="true"]`;
+    }
+
+    if (mode === "trigger-like") {
+      if (role === "combobox") {
+        return `${tagName}[role="combobox"]`;
+      }
+      if (role === "button" && ariaHasPopup) {
+        return `${tagName}[role="button"][aria-haspopup="${escapeCssString(ariaHasPopup)}"]`;
+      }
+      if (ariaHasPopup === "listbox" || ariaHasPopup === "combobox") {
+        return `${tagName}[aria-haspopup="${escapeCssString(ariaHasPopup)}"]`;
+      }
+      if (tagName === "select") {
+        return "select";
+      }
+    }
+
+    const classCandidate = this._getBestStableClassCandidate(element);
+    if (classCandidate?.token) {
+      return `${tagName}.${safeCssEscape(classCandidate.token)}`;
+    }
+
+    if (
+      canReusePrimarySelector &&
+      typeof selectorResult?.selector === "string" &&
+      selectorResult.priority !== "text" &&
+      selectorResult.priority !== "xpath" &&
+      this._isSimpleCssSelector(selectorResult.selector)
+    ) {
+      return selectorResult.selector;
+    }
+
+    if (["input", "textarea", "select", "button"].includes(tagName)) {
+      return tagName;
+    }
+
+    return null;
+  }
+
+  _buildStableParentSelector(parent) {
+    const tagName = parent?.tagName?.toLowerCase?.() || null;
+    if (!tagName) return null;
+
+    const dataTestId = parent.getAttribute("data-testid");
+    if (dataTestId) {
+      return `[data-testid="${escapeCssString(dataTestId)}"]`;
+    }
+
+    for (const attrName of ["data-cy", "data-qa"]) {
+      const attrValue = parent.getAttribute(attrName);
+      if (!attrValue) continue;
+      return `${tagName}[${attrName}="${escapeCssString(attrValue)}"]`;
+    }
+
+    if (parent.id && !this._isLikelyDynamicId(parent.id)) {
+      return `#${safeCssEscape(parent.id)}`;
+    }
+
+    const classCandidate = this._getBestStableClassCandidate(parent);
+    if (classCandidate?.token) {
+      return `.${safeCssEscape(classCandidate.token)}`;
+    }
+
+    return null;
+  }
+
+  _buildSimpleParentScopedChildSelector(element, selectorResult) {
+    const tagName = element?.tagName?.toLowerCase?.() || null;
+    if (!tagName) return null;
+
+    const dataTestId = element.getAttribute("data-testid");
+    if (dataTestId) {
+      return `${tagName}[data-testid="${escapeCssString(dataTestId)}"]`;
+    }
+
+    for (const attrName of ["data-cy", "data-qa"]) {
+      const attrValue = element.getAttribute(attrName);
+      if (!attrValue) continue;
+      return `${tagName}[${attrName}="${escapeCssString(attrValue)}"]`;
+    }
+
+    if (element.getAttribute("name")) {
+      return `${tagName}[name="${escapeCssString(element.getAttribute("name"))}"]`;
+    }
+
+    if (element.getAttribute("aria-label")) {
+      return `${tagName}[aria-label="${escapeCssString(element.getAttribute("aria-label"))}"]`;
+    }
+
+    if (element.getAttribute("placeholder") && ["input", "textarea"].includes(tagName)) {
+      return `${tagName}[placeholder="${escapeCssString(element.getAttribute("placeholder"))}"]`;
+    }
+
+    const classCandidate = this._getBestStableClassCandidate(element);
+    if (classCandidate?.token) {
+      return `${tagName}.${safeCssEscape(classCandidate.token)}`;
+    }
+
+    if (
+      typeof selectorResult?.selector === "string" &&
+      selectorResult.priority !== "text" &&
+      selectorResult.priority !== "xpath" &&
+      this._isSimpleCssSelector(selectorResult.selector)
+    ) {
+      return selectorResult.selector;
+    }
+
+    return tagName;
+  }
+
+  _getBestStableClassCandidate(element) {
+    const classes = getSafeElementClassTokens(element);
+    if (classes.length === 0) return null;
+
+    const ranked = classes
+      .map((token) => ({
+        token,
+        analysis: this._analyzeClassToken(token),
+        score: scoreClassCandidate(token),
+      }))
+      .filter((entry) => !/^MuiInputBase-input$/i.test(entry.token))
+      .filter((entry) => !entry.analysis.usesDynamicClass)
+      .filter((entry) => !entry.analysis.isGenericShell)
+      .sort((left, right) => {
+        if (right.score.score !== left.score.score) return right.score.score - left.score.score;
+        if (left.score.penalty !== right.score.penalty) return left.score.penalty - right.score.penalty;
+        if (right.score.bonus !== left.score.bonus) return right.score.bonus - left.score.bonus;
+        return left.token.length - right.token.length;
+      });
+
+    if (ranked.length === 0) return null;
+    if (ranked[0].score.score < -6) return null;
+
+    const warningCodes = [];
+    if (ranked[0].analysis.isFramework) warningCodes.push("framework-class");
+
+    return {
+      token: ranked[0].token,
+      usesDynamicClass: ranked[0].analysis.usesDynamicClass,
+      warningCodes: warningCodes.length > 0 ? warningCodes : undefined,
+    };
+  }
+
+  _analyzeClassToken(token) {
+    const normalized = String(token || "").trim();
+    return {
+      isUtility: isUtilityClassToken(normalized),
+      isState: isStateClassToken(normalized),
+      isFramework: isFrameworkClassToken(normalized),
+      isHashedRandom: isHashedRandomClassToken(normalized),
+      isCssInJs: isCssInJsClassToken(normalized),
+      isGenericShell: isGenericShellClassToken(normalized),
+      usesDynamicClass:
+        isUtilityClassToken(normalized) ||
+        isStateClassToken(normalized) ||
+        isHashedRandomClassToken(normalized) ||
+        isCssInJsClassToken(normalized),
+    };
+  }
+
+  _findClassTokenForSelector(element, selector) {
+    if (!element || typeof selector !== "string" || !selector.startsWith(".")) return null;
+    const selectorToken = selector.slice(1);
+    for (const token of getSafeElementClassTokens(element)) {
+      if (safeCssEscape(token) === selectorToken) {
+        return token;
+      }
+    }
+    return null;
+  }
+
+  _selectorUsesIndex(selector) {
+    return /:nth-(?:of-type|child)\(/i.test(String(selector || ""));
+  }
+
+  _isLikelyDynamicId(id) {
+    if (!id) return true;
+    return (
+      /^\d/.test(id) ||
+      /^react-/i.test(id) ||
+      /[0-9a-f]{8}-[0-9a-f]{4}/i.test(id) ||
+      /^:[a-z0-9]+:$/i.test(id) ||
+      /\d{5,}/.test(id) ||
+      /^(?:css|sc)-[a-zA-Z0-9]+$/.test(id)
+    );
+  }
+
+  _isSimpleCssSelector(selector) {
+    const normalized = String(selector || "").trim();
+    if (!normalized) return false;
+    if (normalized.includes(",")) return false;
+    if (normalized.startsWith("text=") || normalized.startsWith("xpath=") || normalized.startsWith("//")) return false;
+    return !/[>+~](?![^\[]*\])/.test(normalized) && !/\s{1,}/.test(normalized);
+  }
+
+  _finalizeSelectorCandidate(element, selectorResult, candidateInput) {
+    if (!candidateInput || !candidateInput.selector) return null;
+
+    const queryMetadata = candidateInput.skipQuery
+      ? null
+      : this._collectSelectorCandidateQueryMetadata(
+        candidateInput.queryTarget || element,
+        candidateInput.selector,
+        candidateInput.engine,
+      );
+
+    const warningCodes = Array.isArray(candidateInput.warningCodes)
+      ? [...candidateInput.warningCodes]
+      : [];
+
+    if (queryMetadata?.warningCodes?.length) {
+      warningCodes.push(...queryMetadata.warningCodes);
+    }
+
+    const candidate = {
+      selector: candidateInput.selector,
+      engine: candidateInput.engine,
+      family: candidateInput.family,
+      strength: this._resolveSelectorCandidateStrength(candidateInput, queryMetadata, selectorResult),
+      source: "capture",
+    };
+
+    if (candidateInput.isPrimary) candidate.isPrimary = true;
+    if (typeof candidateInput.usesDynamicClass === "boolean") candidate.usesDynamicClass = candidateInput.usesDynamicClass;
+    if (typeof candidateInput.usesIndex === "boolean") {
+      candidate.usesIndex = candidateInput.usesIndex;
+    } else if (this._selectorUsesIndex(candidateInput.selector)) {
+      candidate.usesIndex = true;
+    }
+
+    if (queryMetadata) {
+      if (queryMetadata.matchCount !== undefined) candidate.matchCount = queryMetadata.matchCount;
+      if (queryMetadata.visibleMatchCount !== undefined) candidate.visibleMatchCount = queryMetadata.visibleMatchCount;
+      if (queryMetadata.positionInAllMatches !== undefined) candidate.positionInAllMatches = queryMetadata.positionInAllMatches;
+      if (queryMetadata.positionInVisibleMatches !== undefined) candidate.positionInVisibleMatches = queryMetadata.positionInVisibleMatches;
+    }
+
+    const normalizedWarnings = Array.from(new Set(warningCodes.filter((code) => typeof code === "string" && code.trim())));
+    if (normalizedWarnings.length > 0) {
+      candidate.warningCodes = normalizedWarnings;
+    }
+
+    return candidate;
+  }
+
+  _resolveSelectorCandidateStrength(candidateInput, queryMetadata, selectorResult) {
+    const matchCount = typeof queryMetadata?.matchCount === "number" ? queryMetadata.matchCount : null;
+    const visibleMatchCount = typeof queryMetadata?.visibleMatchCount === "number" ? queryMetadata.visibleMatchCount : null;
+    const isUnique = matchCount === 1 && (visibleMatchCount === null || visibleMatchCount <= 1);
+
+    if (candidateInput.family === "primary") {
+      const priorityHint = candidateInput.priorityHint || selectorResult?.priority || null;
+      if (priorityHint === "data-testid" || priorityHint === "id") {
+        return isUnique ? "strong" : "medium";
+      }
+      if (priorityHint === "attribute") {
+        if (/\[(?:data-testid|data-cy|data-qa|name|href)=/i.test(candidateInput.selector)) {
+          return isUnique ? "strong" : "medium";
+        }
+        if (/\[(?:placeholder|aria-label|aria-labelledby|title|autocomplete)=/i.test(candidateInput.selector)) {
+          return isUnique ? "strong" : "medium";
+        }
+        return isUnique ? "medium" : "weak";
+      }
+      if (priorityHint === "text") return isUnique ? "medium" : "weak";
+      if (priorityHint === "class") return candidateInput.usesDynamicClass ? "weak" : (isUnique ? "medium" : "weak");
+      return "weak";
+    }
+
+    switch (candidateInput.family) {
+      case "test-id":
+      case "id":
+      case "name":
+      case "href":
+        return isUnique ? "strong" : "medium";
+      case "aria-label":
+      case "placeholder":
+        return isUnique ? "strong" : "medium";
+      case "class":
+        return candidateInput.usesDynamicClass ? "weak" : (isUnique ? "medium" : "weak");
+      case "parent-scoped-css":
+      case "tight-container-css":
+        return isUnique ? "medium" : "weak";
+      default:
+        return isUnique ? "medium" : "weak";
+    }
+  }
+
+  _collectSelectorCandidateQueryMetadata(element, selector, engine) {
+    const queryRoot = this._getSelectorCandidateQueryRoot(element);
+    const ownerDocument = element?.ownerDocument || document;
+    const queryResult = this._querySelectorCandidateMatches(queryRoot, ownerDocument, selector, engine);
+    if (!queryResult || queryResult.failed) {
+      return {
+        warningCodes: ["query-failed"],
+      };
+    }
+
+    const matches = Array.isArray(queryResult.matches) ? queryResult.matches : [];
+    const matchCount = matches.length;
+    const positionInAllMatches = matches.indexOf(element);
+    const warningCodes = [];
+
+    if (matchCount > 1) warningCodes.push("multiple-matches");
+    if (positionInAllMatches < 0) warningCodes.push("target-not-in-matches");
+
+    const metadata = {
+      matchCount,
+      positionInAllMatches: positionInAllMatches >= 0 ? positionInAllMatches : null,
+      warningCodes,
+    };
+
+    if (matchCount > MAX_SELECTOR_VISIBLE_INDEX_MATCHES) {
+      metadata.visibleMatchCount = null;
+      metadata.positionInVisibleMatches = null;
+      warningCodes.push("too-many-matches-for-visible-index");
+      return metadata;
+    }
+
+    const visibleMatches = matches.filter((candidate) => this._isElementVisible(candidate));
+    const positionInVisibleMatches = visibleMatches.indexOf(element);
+    metadata.visibleMatchCount = visibleMatches.length;
+    metadata.positionInVisibleMatches = positionInVisibleMatches >= 0 ? positionInVisibleMatches : null;
+
+    if (visibleMatches.length > 1) warningCodes.push("multiple-visible-matches");
+
+    return metadata;
+  }
+
+  _getSelectorCandidateQueryRoot(element) {
+    if (!element) return null;
+    const root = typeof element.getRootNode === "function"
+      ? element.getRootNode()
+      : null;
+
+    if (root && typeof root.querySelectorAll === "function") {
+      return root;
+    }
+
+    return element.ownerDocument || null;
+  }
+
+  _querySelectorCandidateMatches(root, ownerDocument, selector, engine) {
+    const normalizedSelector = String(selector || "").trim();
+    if (!normalizedSelector) {
+      return { failed: true, matches: [] };
+    }
+
+    if (engine === "xpath" || normalizedSelector.startsWith("//") || normalizedSelector.startsWith("xpath=") || /^id\(".*"\)$/i.test(normalizedSelector)) {
+      const xpathDocument = ownerDocument && typeof ownerDocument.evaluate === "function"
+        ? ownerDocument
+        : null;
+      if (!xpathDocument) {
+        return { failed: true, matches: [] };
+      }
+
+      try {
+        const expression = normalizedSelector.startsWith("xpath=")
+          ? normalizedSelector.slice(6)
+          : normalizedSelector;
+        const result = xpathDocument.evaluate(
+          expression,
+          xpathDocument,
+          null,
+          XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+          null,
+        );
+        const nodes = [];
+        for (let i = 0; i < result.snapshotLength; i += 1) {
+          const node = result.snapshotItem(i);
+          if (node?.nodeType === Node.ELEMENT_NODE) nodes.push(node);
+        }
+        return { failed: false, matches: nodes };
+      } catch {
+        return { failed: true, matches: [] };
+      }
+    }
+
+    const queryRoot = root && typeof root.querySelectorAll === "function"
+      ? root
+      : (ownerDocument && typeof ownerDocument.querySelectorAll === "function" ? ownerDocument : null);
+    if (!queryRoot) {
+      return { failed: true, matches: [] };
+    }
+
+    if (engine === "text" || normalizedSelector.startsWith("text=")) {
+      const needle = this._normalizeFieldSemanticText(normalizedSelector.replace(/^text=/, ""), 200);
+      if (!needle) {
+        return { failed: false, matches: [] };
+      }
+
+      try {
+        return {
+          failed: false,
+          matches: Array.from(queryRoot.querySelectorAll("*")).filter((candidate) =>
+            this._normalizeFieldSemanticText(this.extractText(candidate) || "", 200) === needle,
+          ),
+        };
+      } catch {
+        return { failed: true, matches: [] };
+      }
+    }
+
+    try {
+      return {
+        failed: false,
+        matches: Array.from(queryRoot.querySelectorAll(normalizedSelector)),
+      };
+    } catch {
+      return { failed: true, matches: [] };
+    }
   }
 
   _collectSelectorAmbiguity(element, selectorResult) {

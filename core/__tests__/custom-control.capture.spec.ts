@@ -109,6 +109,7 @@ function makeHarness(): CustomControlHarness {
   interceptor._dropdownObserver = null;
   interceptor._pendingOptionSelection = null;
   interceptor._pendingOptionSelectionFallbackTimer = null;
+  interceptor.piiPatterns = [];
   interceptor.activeInputSessions = new Map();
   interceptor.inputDebounceTimers = new Map();
   interceptor.recentEventKeys = new Set();
@@ -125,7 +126,56 @@ function makeSelectorProbe(): Record<string, unknown> {
     debugMode: false,
     maxTextLength: 200,
   };
+  interceptor.log = vi.fn();
   interceptor._isElementVisible = vi.fn((el: Element | null) => !!el);
+  return interceptor;
+}
+
+function makeLiveFingerprintHarness(): CustomControlHarness {
+  let counter = 0;
+  const interceptor = Object.create(AIRInterceptor.prototype) as CustomControlHarness;
+  interceptor.config = {
+    sessionId: 'session-11111111-1111-4111-8111-111111111111',
+    capturePageSnapshot: false,
+    snapshotDepth: 2,
+    debugMode: false,
+    maxTextLength: 200,
+  };
+  interceptor.log = vi.fn();
+  interceptor.queueEvent = vi.fn();
+  interceptor.flushQueue = vi.fn();
+  interceptor.generateUUID = () => `10000000-0000-4000-8000-${String(++counter).padStart(12, '0')}`;
+  interceptor.normalizeUrl = (url: string) => {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  };
+  interceptor._resolveNestedContext = vi.fn((event: unknown, target: Element | null) => ({
+    target,
+    nestedContext: undefined,
+  }));
+  interceptor._captureSubtreeSnapshot = vi.fn((target: Element) => ({
+    html: target.outerHTML,
+  }));
+  interceptor._getComposedEventTarget = vi.fn((event: Event | null) => (event?.target as Element | null) ?? null);
+  interceptor._isElementVisible = vi.fn((el: Element | null) => {
+    if (!el) return false;
+    if (el.hasAttribute?.('hidden')) return false;
+    if (el.getAttribute?.('aria-hidden') === 'true') return false;
+    if (el.getAttribute?.('data-hidden') === 'true') return false;
+    return true;
+  });
+  interceptor._openDropdown = null;
+  interceptor._dropdownObserver = null;
+  interceptor._pendingOptionSelection = null;
+  interceptor._pendingOptionSelectionFallbackTimer = null;
+  interceptor.piiPatterns = [];
+  interceptor.activeInputSessions = new Map();
+  interceptor.inputDebounceTimers = new Map();
+  interceptor.recentEventKeys = new Set();
+  interceptor.maxRecentKeys = 100;
+  interceptor.pendingTraceId = null;
+  interceptor.lastActionTraceId = null;
+  interceptor.lastActionTraceAt = null;
   return interceptor;
 }
 
@@ -436,6 +486,912 @@ describe('input field semantic context enrichment', () => {
       expect(fingerprint.attributes.wrappedLabelText).toBeUndefined();
       expect(fingerprint.attributes.labelledByText).toBeUndefined();
       expect(fingerprint.attributes.fieldLabelText).toBeUndefined();
+    });
+  });
+});
+
+describe('selector candidate capture generation', () => {
+  it('mirrors the selected primary selector as a recorded primary candidate', () => {
+    return withBrowserGlobals(`
+      <button data-testid="save-profile">Save Profile</button>
+    `, 'https://example.test/profile', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('button') as HTMLButtonElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'click',
+        trigger: 'click',
+      });
+
+      expect(fingerprint.selector).toBe('[data-testid="save-profile"]');
+      expect(fingerprint.selectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          selector: '[data-testid="save-profile"]',
+          engine: 'css',
+          family: 'primary',
+          strength: 'strong',
+          source: 'capture',
+          isPrimary: true,
+          matchCount: 1,
+          visibleMatchCount: 1,
+          positionInAllMatches: 0,
+          positionInVisibleMatches: 0,
+        }),
+      ]));
+    });
+  });
+
+  it('captures stable attribute candidates for semantic attributes and href without changing the primary selector', () => {
+    return withBrowserGlobals(`
+      <input
+        id="username"
+        name="username"
+        data-cy="username-field"
+        data-qa="username-field-qa"
+        placeholder="Username"
+        aria-label="Username"
+      />
+      <a href="/web/index.php/admin/viewAdminModule">Admin</a>
+    `, 'https://example.test/login', () => {
+      const interceptor = makeSelectorProbe();
+      const input = document.querySelector('input') as HTMLInputElement;
+      const link = document.querySelector('a') as HTMLAnchorElement;
+
+      const inputFingerprint = (interceptor as any).generateFingerprint(input, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+      const linkFingerprint = (interceptor as any).generateFingerprint(link, {
+        eventType: 'click',
+        trigger: 'click',
+      });
+
+      expect(inputFingerprint.selector).toBe('input[data-cy="username-field"]');
+      expect(inputFingerprint.selectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({ selector: 'input[data-cy="username-field"]', family: 'primary' }),
+        expect.objectContaining({ selector: 'input[data-qa="username-field-qa"]', family: 'test-id' }),
+        expect.objectContaining({ selector: '#username', family: 'id' }),
+        expect.objectContaining({ selector: 'input[name="username"]', family: 'name' }),
+        expect.objectContaining({ selector: 'input[placeholder="Username"]', family: 'placeholder' }),
+        expect.objectContaining({ selector: 'input[aria-label="Username"]', family: 'aria-label' }),
+      ]));
+      expect(linkFingerprint.selectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          selector: 'a[href="/web/index.php/admin/viewAdminModule"]',
+          family: 'primary',
+        }),
+      ]));
+    });
+  });
+
+  it('captures one stable class candidate and skips dynamic-only class tokens', () => {
+    return withBrowserGlobals(`
+      <button data-cy="save-user" class="css-abc123 is-open user-row">Save</button>
+      <div class="css-z9yx7 open state-active"></div>
+    `, 'https://example.test/users', () => {
+      const interceptor = makeSelectorProbe();
+      const stableTarget = document.querySelector('button') as HTMLButtonElement;
+      const dynamicOnlyTarget = document.querySelector('div') as HTMLDivElement;
+
+      const stableFingerprint = (interceptor as any).generateFingerprint(stableTarget, {
+        eventType: 'click',
+        trigger: 'click',
+      });
+      const dynamicFingerprint = (interceptor as any).generateFingerprint(dynamicOnlyTarget, {
+        eventType: 'click',
+        trigger: 'click',
+      });
+
+      expect(stableFingerprint.selectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          selector: '.user-row',
+          family: 'class',
+          source: 'capture',
+        }),
+      ]));
+      expect(stableFingerprint.selectorCandidates?.some((candidate: any) =>
+        candidate.selector === '.css-abc123' || candidate.selector === '.is-open',
+      )).toBe(false);
+      expect(dynamicFingerprint.selectorCandidates?.some((candidate: any) => candidate.family === 'class')).toBe(false);
+    });
+  });
+
+  it('captures one simple parent-scoped CSS candidate when the parent has a stable selector', () => {
+    return withBrowserGlobals(`
+      <div data-testid="user-row">
+        <input name="username" />
+      </div>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+
+      expect(fingerprint.selectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          selector: '[data-testid="user-row"] > input[name="username"]',
+          family: 'parent-scoped-css',
+          source: 'capture',
+        }),
+      ]));
+    });
+  });
+
+  it('emits tight-container-css for a generic single-field row without app-specific container classes', () => {
+    return withBrowserGlobals(`
+      <div class="profile-field">
+        <div>
+          <input name="username" />
+        </div>
+      </div>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+
+      expect(fingerprint.selectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          selector: '.profile-field input[name="username"]',
+          family: 'tight-container-css',
+          source: 'capture',
+          strength: 'medium',
+        }),
+      ]));
+    });
+  });
+
+  it('finds a tight container beyond five wrapper levels when a stable bounded ancestor exists', () => {
+    return withBrowserGlobals(`
+      <div class="employee-field">
+        <div><div><div><div><div><div><input name="employee" /></div></div></div></div></div></div>
+      </div>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      const discovery = (interceptor as any)._discoverTightContainerContext(target, 'input-like');
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+
+      expect(discovery).toEqual(expect.objectContaining({
+        status: 'found',
+        depth: expect.any(Number),
+      }));
+      expect(discovery.depth).toBeGreaterThan(5);
+      expect(fingerprint.selectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          selector: '.employee-field input[name="employee"]',
+          family: 'tight-container-css',
+        }),
+      ]));
+    });
+  });
+
+  it('blocks tight-container discovery when multiple competing controls share the same bounded container', () => {
+    return withBrowserGlobals(`
+      <div class="profile-field">
+        <input name="username" />
+        <input name="password" />
+      </div>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input[name="username"]') as HTMLInputElement;
+
+      const discovery = (interceptor as any)._discoverTightContainerContext(target, 'input-like');
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+
+      expect(discovery).toEqual(expect.objectContaining({
+        status: 'blocked',
+        blockedReason: 'multiple-control-like-targets',
+      }));
+      expect(fingerprint.selectorCandidates?.some((candidate: any) =>
+        candidate.family === 'tight-container-css',
+      )).toBe(false);
+    });
+  });
+
+  it('bails out when a container exposes more than four control-like descendants', () => {
+    return withBrowserGlobals(`
+      <div class="profile-grid">
+        <input name="field-1" />
+        <input name="field-2" />
+        <input name="field-3" />
+        <input name="field-4" />
+        <input name="field-5" />
+      </div>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input[name="field-1"]') as HTMLInputElement;
+
+      const discovery = (interceptor as any)._discoverTightContainerContext(target, 'input-like');
+
+      expect(discovery).toEqual(expect.objectContaining({
+        status: 'blocked',
+        blockedReason: 'container-too-broad',
+        controlCount: 5,
+      }));
+    });
+  });
+
+  it('blocks broad semantic ancestors from becoming tight-container candidates', () => {
+    return withBrowserGlobals(`
+      <section id="profile-section">
+        <input name="username" />
+      </section>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      const discovery = (interceptor as any)._discoverTightContainerContext(target, 'input-like');
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+
+      expect(discovery).toEqual(expect.objectContaining({
+        status: 'blocked',
+        blockedReason: 'broad-container',
+      }));
+      expect(fingerprint.selectorCandidates?.some((candidate: any) =>
+        candidate.family === 'tight-container-css',
+      )).toBe(false);
+    });
+  });
+
+  it('skips tight-container-css when only generic parent wrappers are available', () => {
+    return withBrowserGlobals(`
+      <div class="container">
+        <input name="username" />
+      </div>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+
+      expect(fingerprint.selectorCandidates?.some((candidate: any) =>
+        candidate.family === 'tight-container-css',
+      )).toBe(false);
+    });
+  });
+
+  it('uses fast visibility in the ancestor loop and ignores hidden controls when discovering a tight container', () => {
+    return withBrowserGlobals(`
+      <div class="profile-field">
+        <input type="hidden" name="username" value="hidden-user" />
+        <input name="username" value="visible-user" />
+      </div>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelectorAll('input')[1] as HTMLInputElement;
+      const styleSpy = vi.spyOn(window, 'getComputedStyle');
+      const rectSpy = vi.spyOn(window.Element.prototype, 'getBoundingClientRect');
+
+      const discovery = (interceptor as any)._discoverTightContainerContext(target, 'input-like');
+      expect(styleSpy).not.toHaveBeenCalled();
+      expect(rectSpy).not.toHaveBeenCalled();
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+
+      expect(discovery).toEqual(expect.objectContaining({
+        status: 'found',
+        controlCount: 1,
+      }));
+      expect(fingerprint.selectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          selector: '.profile-field input[name="username"]',
+          family: 'tight-container-css',
+        }),
+      ]));
+    });
+  });
+
+  it('handles detached targets safely in tight-container discovery without removing basic selector candidates', () => {
+    return withBrowserGlobals(`
+      <div class="profile-field">
+        <input data-testid="username-field" name="username" />
+      </div>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+      target.remove();
+
+      const discovery = (interceptor as any)._discoverTightContainerContext(target, 'input-like');
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+
+      expect(discovery).toEqual(expect.objectContaining({
+        status: 'blocked',
+        blockedReason: 'detached-target',
+      }));
+      expect(fingerprint.selectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          family: 'primary',
+        }),
+      ]));
+      expect(fingerprint.selectorCandidates?.some((candidate: any) =>
+        candidate.family === 'tight-container-css',
+      )).toBe(false);
+    });
+  });
+
+  it('emits tight-container-css for explicit listbox triggers with role and aria semantics', () => {
+    return withBrowserGlobals(`
+      <div class="user-role-field">
+        <div role="button" aria-haspopup="listbox" tabindex="0">User Role</div>
+      </div>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('[role="button"]') as HTMLDivElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'custom-control-open',
+        trigger: 'trigger-click',
+      });
+
+      expect(fingerprint.selectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          selector: '.user-role-field div[role="button"][aria-haspopup="listbox"]',
+          family: 'tight-container-css',
+        }),
+      ]));
+    });
+  });
+
+  it('does not emit tight-container-css for bare visual div triggers without role or aria semantics', () => {
+    return withBrowserGlobals(`
+      <div class="user-role-field">
+        <div class="select-trigger">User Role</div>
+      </div>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('.select-trigger') as HTMLDivElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'custom-control-open',
+        trigger: 'trigger-click',
+      });
+
+      expect(fingerprint.selectorCandidates?.some((candidate: any) =>
+        candidate.family === 'tight-container-css',
+      )).toBe(false);
+    });
+  });
+
+  it('allows role=\"searchbox\" targets to participate in tight-container discovery', () => {
+    return withBrowserGlobals(`
+      <div class="search-panel">
+        <div role="searchbox" contenteditable="true">Search</div>
+      </div>
+    `, 'https://example.test/search', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('[role="searchbox"]') as HTMLDivElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+
+      expect(fingerprint.selectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          selector: '.search-panel div[role="searchbox"]',
+          family: 'tight-container-css',
+        }),
+      ]));
+    });
+  });
+
+  it('allows contenteditable=\"true\" targets to participate in tight-container discovery', () => {
+    return withBrowserGlobals(`
+      <div class="editor-field">
+        <div contenteditable="true">Notes</div>
+      </div>
+    `, 'https://example.test/editor', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('[contenteditable="true"]') as HTMLDivElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+
+      expect(fingerprint.selectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          selector: '.editor-field div[contenteditable="true"]',
+          family: 'tight-container-css',
+        }),
+      ]));
+    });
+  });
+
+  it('does not treat contenteditable=\"false\" nodes as tight-container candidates', () => {
+    return withBrowserGlobals(`
+      <div class="editor-field">
+        <div contenteditable="false">Read only</div>
+      </div>
+    `, 'https://example.test/editor', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('[contenteditable="false"]') as HTMLDivElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+
+      expect(fingerprint.selectorCandidates?.some((candidate: any) =>
+        candidate.family === 'tight-container-css',
+      )).toBe(false);
+    });
+  });
+
+  it('emits shadow-local tight-container-css and annotates inside-shadow-dom without crossing the boundary', () => {
+    return withBrowserGlobals(`
+      <div id="shadow-host"></div>
+    `, 'https://example.test/shadow', () => {
+      const interceptor = makeSelectorProbe();
+      const host = document.querySelector('#shadow-host') as HTMLDivElement;
+      const shadowRoot = host.attachShadow({ mode: 'open' });
+      shadowRoot.innerHTML = `
+        <div class="employee-field">
+          <div><input name="employee" /></div>
+        </div>
+      `;
+      const target = shadowRoot.querySelector('input') as HTMLInputElement;
+
+      const discovery = (interceptor as any)._discoverTightContainerContext(target, 'input-like');
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+      const tightCandidate = fingerprint.selectorCandidates.find((candidate: any) =>
+        candidate.family === 'tight-container-css',
+      );
+
+      expect(discovery).toEqual(expect.objectContaining({
+        status: 'found',
+        shadowBoundaryCrossed: false,
+      }));
+      expect(tightCandidate).toEqual(expect.objectContaining({
+        selector: '.employee-field input[name="employee"]',
+        family: 'tight-container-css',
+        warningCodes: expect.arrayContaining(['inside-shadow-dom']),
+      }));
+    });
+  });
+
+  it('annotates open shadow boundary crossings and avoids fake document tight-container selectors across the boundary', () => {
+    return withBrowserGlobals(`
+      <div class="host-shell">
+        <div id="shadow-host"></div>
+      </div>
+    `, 'https://example.test/shadow', () => {
+      const interceptor = makeSelectorProbe();
+      const host = document.querySelector('#shadow-host') as HTMLDivElement;
+      const shadowRoot = host.attachShadow({ mode: 'open' });
+      shadowRoot.innerHTML = `<input name="employee" />`;
+      const target = shadowRoot.querySelector('input') as HTMLInputElement;
+
+      const discovery = (interceptor as any)._discoverTightContainerContext(target, 'input-like');
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+
+      expect(discovery.shadowBoundaryCrossed).toBe(true);
+      expect(discovery.warningCodes).toEqual(expect.arrayContaining([
+        'inside-shadow-dom',
+        'shadow-boundary-crossed',
+      ]));
+      expect(fingerprint.selectorCandidates?.some((candidate: any) =>
+        candidate.family === 'tight-container-css',
+      )).toBe(false);
+    });
+  });
+
+  it('uses the local shadow root for tight-container candidate match counts when the target lives in open shadow DOM', () => {
+    return withBrowserGlobals(`
+      <div id="shadow-host"></div>
+    `, 'https://example.test/shadow', () => {
+      const interceptor = makeSelectorProbe();
+      const host = document.querySelector('#shadow-host') as HTMLDivElement;
+      const shadowRoot = host.attachShadow({ mode: 'open' });
+      shadowRoot.innerHTML = `
+        <div class="employee-field">
+          <input name="employee" hidden value="shadow-hidden" />
+          <div><input name="employee" value="shadow-visible" /></div>
+        </div>
+      `;
+      interceptor._isElementVisible = vi.fn((el: Element | null) => !!el && !el.hasAttribute('hidden'));
+      const target = shadowRoot.querySelectorAll('input')[1] as HTMLInputElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+      const tightCandidate = fingerprint.selectorCandidates.find((candidate: any) =>
+        candidate.family === 'tight-container-css',
+      );
+
+      expect(tightCandidate).toEqual(expect.objectContaining({
+        selector: '.employee-field input[name="employee"]',
+        matchCount: 2,
+        visibleMatchCount: 1,
+        positionInAllMatches: 1,
+        positionInVisibleMatches: 0,
+      }));
+    });
+  });
+
+  it('handles closed shadow roots gracefully without emitting a fake tight-container candidate', () => {
+    return withBrowserGlobals(`
+      <div id="shadow-host"></div>
+    `, 'https://example.test/shadow', () => {
+      const interceptor = makeSelectorProbe();
+      const host = document.querySelector('#shadow-host') as HTMLDivElement;
+      const shadowRoot = host.attachShadow({ mode: 'closed' });
+      shadowRoot.innerHTML = `
+        <div class="employee-field">
+          <input name="employee" />
+        </div>
+      `;
+      const target = shadowRoot.querySelector('input') as HTMLInputElement;
+
+      const discovery = (interceptor as any)._discoverTightContainerContext(target, 'input-like');
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+
+      expect(discovery).toEqual(expect.objectContaining({
+        status: 'blocked',
+        blockedReason: 'unsupported-shadow-root',
+      }));
+      expect(fingerprint.selectorCandidates?.some((candidate: any) =>
+        candidate.family === 'tight-container-css',
+      )).toBe(false);
+    });
+  });
+
+  it('captures raw and visible indexes separately when hidden matches differ from visible matches', () => {
+    return withBrowserGlobals(`
+      <input name="username" hidden value="hidden-user" />
+      <input name="username" value="visible-user" />
+    `, 'https://example.test/login', () => {
+      const interceptor = makeSelectorProbe();
+      interceptor._isElementVisible = vi.fn((el: Element | null) => !!el && !el.hasAttribute('hidden'));
+      const target = document.querySelectorAll('input')[1] as HTMLInputElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+      const primaryCandidate = fingerprint.selectorCandidates.find((candidate: any) => candidate.family === 'primary');
+
+      expect(primaryCandidate).toEqual(expect.objectContaining({
+        selector: 'input[name="username"]',
+        matchCount: 2,
+        visibleMatchCount: 1,
+        positionInAllMatches: 1,
+        positionInVisibleMatches: 0,
+      }));
+      expect(primaryCandidate.positionInAllMatches).not.toBe(primaryCandidate.positionInVisibleMatches);
+    });
+  });
+
+  it('preserves same-selector evidence across primary and id families', () => {
+    return withBrowserGlobals(`
+      <input id="username" name="username" placeholder="Username" />
+    `, 'https://example.test/login', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+
+      const sharedSelectorCandidates = fingerprint.selectorCandidates.filter((candidate: any) =>
+        candidate.selector === '#username',
+      );
+
+      expect(sharedSelectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          family: 'primary',
+          isPrimary: true,
+        }),
+        expect.objectContaining({
+          family: 'id',
+        }),
+      ]));
+      expect(sharedSelectorCandidates).toHaveLength(2);
+    });
+  });
+
+  it('dedupes exact duplicate candidates by engine, family, and selector', () => {
+    return withBrowserGlobals(`
+      <input id="username" />
+    `, 'https://example.test/login', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      (interceptor as any)._collectStableAttributeSelectorCandidates = vi.fn(() => [
+        { selector: '#username', engine: 'css', family: 'id', source: 'capture' },
+        { selector: '#username', engine: 'css', family: 'id', source: 'capture' },
+      ]);
+      (interceptor as any)._collectStableClassCandidate = vi.fn(() => null);
+      (interceptor as any)._collectParentScopedCssCandidate = vi.fn(() => null);
+
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+
+      const sharedSelectorCandidates = fingerprint.selectorCandidates.filter((candidate: any) =>
+        candidate.selector === '#username',
+      );
+      const idCandidates = sharedSelectorCandidates.filter((candidate: any) => candidate.family === 'id');
+
+      expect(sharedSelectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          family: 'primary',
+          isPrimary: true,
+        }),
+        expect.objectContaining({
+          family: 'id',
+        }),
+      ]));
+      expect(idCandidates).toHaveLength(1);
+    });
+  });
+
+  it('caps recorded selector candidates at 8 and preserves primary-first entries under cap pressure', () => {
+    return withBrowserGlobals(`
+      <div data-testid="user-row">
+        <input
+          id="username"
+          name="username"
+          data-testid="username-input"
+          data-cy="username-field"
+          data-qa="username-field-qa"
+          placeholder="Username"
+          aria-label="Username"
+          class="user-row-field"
+        />
+      </div>
+    `, 'https://example.test/login', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+
+      expect(fingerprint.selectorCandidates).toHaveLength(8);
+      expect(fingerprint.selectorCandidates.filter((candidate: any) =>
+        candidate.selector === '[data-testid="username-input"]',
+      )).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          family: 'primary',
+          isPrimary: true,
+        }),
+        expect.objectContaining({
+          family: 'test-id',
+        }),
+      ]));
+    });
+  });
+
+  it('does not throw on detached targets and falls back to a safe primary candidate', () => {
+    return withBrowserGlobals(`
+      <button data-testid="save-user">Save</button>
+    `, 'https://example.test/users', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('button') as HTMLButtonElement;
+      target.remove();
+
+      expect(() => (interceptor as any).generateFingerprint(target, {
+        eventType: 'click',
+        trigger: 'click',
+      })).not.toThrow();
+
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'click',
+        trigger: 'click',
+      });
+
+      expect(fingerprint.selectorCandidates).toEqual([
+        expect.objectContaining({
+          selector: '[data-testid="save-user"]',
+          family: 'primary',
+          isPrimary: true,
+        }),
+      ]);
+      expect(interceptor.log).toHaveBeenCalledWith('SELECTOR_CANDIDATES_SKIPPED_DETACHED_TARGET', expect.objectContaining({
+        eventType: 'click',
+      }));
+    });
+  });
+
+  it('skips advanced selector candidates for input:progress heartbeats', () => {
+    return withBrowserGlobals(`
+      <input name="username" value="Admin" />
+    `, 'https://example.test/login', () => {
+      const interceptor = makeLiveFingerprintHarness();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      (interceptor as any)._emitInputEvent(target, 'trace-input-progress', 'input:progress');
+
+      expect(interceptor.queueEvent).toHaveBeenCalledTimes(1);
+      const event = interceptor.queueEvent.mock.calls[0][0];
+      expect(event.fingerprint?.selectorCandidates).toBeUndefined();
+      expect(interceptor.log).toHaveBeenCalledWith('SELECTOR_CANDIDATES_SKIPPED_HOT_PATH', expect.objectContaining({
+        eventType: 'input',
+        trigger: 'input:progress',
+      }));
+    });
+  });
+
+  it('captures advanced candidates for committed input change events', () => {
+    return withBrowserGlobals(`
+      <input name="username" placeholder="Username" value="Admin" />
+    `, 'https://example.test/login', () => {
+      const interceptor = makeLiveFingerprintHarness();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      (interceptor as any)._emitInputEvent(target, 'trace-input-change', 'change');
+
+      expect(interceptor.queueEvent).toHaveBeenCalledTimes(1);
+      const event = interceptor.queueEvent.mock.calls[0][0];
+      expect(event.fingerprint?.selectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({ family: 'primary' }),
+        expect.objectContaining({ family: 'placeholder' }),
+      ]));
+    });
+  });
+
+  it('captures selectorCandidates on emitted custom-control-open and custom-select trigger fingerprints', async () => {
+    await withBrowserGlobals(`
+      <div class="oxd-select-text" aria-haspopup="listbox">
+        <div class="oxd-select-text-input">-- Select --</div>
+      </div>
+      <div role="listbox">
+        <div role="option">Admin</div>
+      </div>
+    `, 'https://example.test/admin', async () => {
+      const interceptor = makeLiveFingerprintHarness();
+      const trigger = document.querySelector('.oxd-select-text') as Element;
+      const option = document.querySelector('[role="option"]') as Element;
+      const triggerFingerprint = (interceptor as any).generateFingerprint(trigger, {
+        eventType: 'custom-control-open',
+        trigger: 'trigger-click',
+      });
+
+      const handled = await (interceptor as any)._handlePotentialCustomControlTrigger(
+        trigger,
+        triggerFingerprint,
+        undefined,
+      );
+
+      expect(handled).toBe(true);
+      const openEvent = interceptor.queueEvent.mock.calls[0][0];
+      const parsedOpenEvent = AIREventSchema.parse(openEvent);
+      expect((parsedOpenEvent as any).fingerprint?.selectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          family: 'primary',
+        }),
+      ]));
+
+      interceptor.queueEvent.mockClear();
+      interceptor._openDropdown = {
+        traceId: 'trace-select',
+        triggerEl: trigger,
+        triggerFingerprint,
+        controlFamily: 'combobox',
+        openTimestamp: Date.now() - 20,
+      };
+
+      const optionData = (interceptor as any)._extractOptionData(option);
+      (interceptor as any)._handleCustomDropdownSelection(optionData, { target: option });
+
+      const selectEvent = interceptor.queueEvent.mock.calls[0][0];
+      const parsedSelectEvent = AIREventSchema.parse(selectEvent);
+      expect((parsedSelectEvent as any).fingerprint?.selectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({ family: 'primary' }),
+      ]));
+      expect((parsedSelectEvent as any).triggerFingerprint?.selectorCandidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({ family: 'primary' }),
+      ]));
+    });
+  });
+
+  it('does not crash on SVG className objects when capture candidate generation runs', () => {
+    return withBrowserGlobals(`
+      <svg viewBox="0 0 10 10">
+        <path class="chart-point stable-icon" d="M0 0 L10 10"></path>
+      </svg>
+    `, 'https://example.test/charts', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('path') as SVGPathElement;
+
+      expect(() => (interceptor as any).generateFingerprint(target, {
+        eventType: 'click',
+        trigger: 'click',
+      })).not.toThrow();
+    });
+  });
+
+  it('validates selector candidate counts against the target owner document instead of the global document', () => {
+    return withBrowserGlobals(`
+      <input name="email" />
+      <input name="email" />
+    `, 'https://example.test/main', () => {
+      const interceptor = makeSelectorProbe();
+      const alternateDocument = document.implementation.createHTMLDocument('alternate');
+      alternateDocument.body.innerHTML = `<input name="email" />`;
+      const target = alternateDocument.querySelector('input') as HTMLInputElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+      const primaryCandidate = fingerprint.selectorCandidates.find((candidate: any) => candidate.family === 'primary');
+
+      expect(primaryCandidate).toEqual(expect.objectContaining({
+        matchCount: 1,
+        visibleMatchCount: 1,
+        positionInAllMatches: 0,
+        positionInVisibleMatches: 0,
+      }));
+    });
+  });
+
+  it('uses the target shadow root for candidate match counts when the target lives in open shadow DOM', () => {
+    return withBrowserGlobals(`
+      <input name="employee" value="light-dom" />
+      <div id="shadow-host"></div>
+    `, 'https://example.test/shadow', () => {
+      const interceptor = makeSelectorProbe();
+      const host = document.querySelector('#shadow-host') as HTMLDivElement;
+      const shadowRoot = host.attachShadow({ mode: 'open' });
+      shadowRoot.innerHTML = `
+        <input name="employee" hidden value="shadow-hidden" />
+        <input name="employee" value="shadow-visible" />
+      `;
+      interceptor._isElementVisible = vi.fn((el: Element | null) => !!el && !el.hasAttribute('hidden'));
+      const target = shadowRoot.querySelectorAll('input')[1] as HTMLInputElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'input',
+        trigger: 'change',
+      });
+      const primaryCandidate = fingerprint.selectorCandidates.find((candidate: any) => candidate.family === 'primary');
+
+      expect(primaryCandidate).toEqual(expect.objectContaining({
+        matchCount: 2,
+        visibleMatchCount: 1,
+        positionInAllMatches: 1,
+        positionInVisibleMatches: 0,
+      }));
     });
   });
 });
