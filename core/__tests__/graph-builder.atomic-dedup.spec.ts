@@ -165,6 +165,9 @@ function makeClickEvent(id: string) {
   } as any;
 }
 
+const CLICK_EVENT_ID = '11111111-1111-4111-8111-111111111111';
+const CONCURRENT_EVENT_ID = '22222222-2222-4222-8222-222222222222';
+
 describe('GraphBuilder atomic event ingestion dedup', () => {
   let harness: ReturnType<typeof createGraphBuilderHarness>;
 
@@ -180,8 +183,8 @@ describe('GraphBuilder atomic event ingestion dedup', () => {
       return true;
     });
 
-    const first = await harness.builder.processEvent(makeClickEvent('evt-1'));
-    const second = await harness.builder.processEvent(makeClickEvent('evt-1'));
+    const first = await harness.builder.processEvent(makeClickEvent(CLICK_EVENT_ID));
+    const second = await harness.builder.processEvent(makeClickEvent(CLICK_EVENT_ID));
 
     expect(first.success).toBe(true);
     expect(first.stage).toBe('action_recorded');
@@ -191,6 +194,9 @@ describe('GraphBuilder atomic event ingestion dedup', () => {
     expect(harness.builder.actionHandler.handleAction).toHaveBeenCalledTimes(1);
     expect(harness.eventRepo.insertIfAbsent).toHaveBeenCalledTimes(2);
     expect(harness.eventRepo.insertDedupKeyIfAbsent).toHaveBeenCalledTimes(1);
+    expect(harness.eventRepo.insertDedupKeyIfAbsent).toHaveBeenCalledWith(
+      expect.objectContaining({ eventId: CLICK_EVENT_ID }),
+    );
   });
 
   it('treats only one concurrent insert as authoritative when the repository ignores duplicates', async () => {
@@ -202,8 +208,8 @@ describe('GraphBuilder atomic event ingestion dedup', () => {
     });
 
     const [first, second] = await Promise.all([
-      harness.builder.processEvent(makeClickEvent('evt-race')),
-      harness.builder.processEvent(makeClickEvent('evt-race')),
+      harness.builder.processEvent(makeClickEvent(CONCURRENT_EVENT_ID)),
+      harness.builder.processEvent(makeClickEvent(CONCURRENT_EVENT_ID)),
     ]);
 
     const stages = [first.stage, second.stage].sort();

@@ -502,19 +502,19 @@ export class GraphBuilder {
   }
 
   public async processEvent(event: AIREvent): Promise<ProcessResult> {
-    const safeEventId = event.id || crypto.randomUUID();
+    const eventId = event.id;
     const traceId = event.traceId || crypto.randomUUID();
     const sessionId = event.sessionId;
 
     if (!sessionId) {
       await this.logWithContext('error', 'Event stage: missing session - rejected before persistence', {
-        eventId: safeEventId,
+        eventId,
         type: event.type,
       }, null, traceId ?? null);
       await this.logGraphResult(
         'error',
         event,
-        safeEventId,
+        eventId,
         traceId ?? null,
         null,
         null,
@@ -523,11 +523,9 @@ export class GraphBuilder {
       return { success: false, error: 'Missing sessionId' };
     }
 
-    const normalizedEvent = {
-      ...event,
-      id: safeEventId,
-      traceId: event.traceId || traceId,
-    } as AIREvent;
+    const normalizedEvent: AIREvent = event.traceId
+      ? event
+      : { ...event, traceId };
     const effectiveTabId = this.getEffectiveTabId(normalizedEvent);
 
     try {
@@ -535,7 +533,7 @@ export class GraphBuilder {
         await this.sessionManager.getOrCreateSession(normalizedEvent.sessionId);
         if (effectiveTabId === 'tab-legacy') {
           await this.logWithContext('info', 'TAB_LEGACY_FALLBACK_USED', {
-            eventId: safeEventId,
+            eventId,
             type: normalizedEvent.type,
             tabId: effectiveTabId,
             reason: 'missing_tab_id_on_event',
@@ -586,25 +584,25 @@ export class GraphBuilder {
         const inserted = await this.eventRepo.insertIfAbsent(slimPayload as AIREvent, intent, intentRaw);
         if (!inserted) {
           await this.logWithContext('warn', 'Event stage: duplicate event ID detected - skipping graph work', {
-            eventId: safeEventId,
+            eventId,
             type: event.type,
           }, sessionId ?? null, traceId ?? null);
           await this.logGraphResult(
             'warn',
             event,
-            safeEventId,
+            eventId,
             traceId ?? null,
             effectiveTabId,
             null,
             { success: true, stage: 'duplicate_skipped', duplicate: true }
           );
-          return { success: true, eventId: safeEventId, duplicate: true, stage: 'duplicate_skipped', traceId };
+          return { success: true, eventId, duplicate: true, stage: 'duplicate_skipped', traceId };
         }
         await this.recordSemanticDedupShadowSignal(eventForGraph, traceId, effectiveTabId);
         await this.logWithContext(
           'info',
           'EVENT_PERSISTED',
-          this.buildEventLogFields(eventForGraph, safeEventId, traceId, effectiveTabId, null, {
+          this.buildEventLogFields(eventForGraph, eventId, traceId, effectiveTabId, null, {
             intent,
             intentRaw,
           }),
@@ -623,7 +621,7 @@ export class GraphBuilder {
           if (lastNodeId) {
             currentNodeId = lastNodeId;
             await this.logWithContext('info', 'CONTROL_EVENT_ANCHORED_EXISTING_NODE', {
-              eventId: safeEventId,
+              eventId,
               type: eventForGraph.type,
               nodeId: currentNodeId,
               traceId,
@@ -633,7 +631,7 @@ export class GraphBuilder {
             currentNodeId = await this.baselineHandler.upsertNode(eventForGraph);
             if (currentNodeId) {
               await this.logWithContext('info', 'CONTROL_EVENT_EVENT_LOCAL_FALLBACK_PROMOTED', {
-                eventId: safeEventId,
+                eventId,
                 type: eventForGraph.type,
                 nodeId: currentNodeId,
                 traceId,
@@ -644,7 +642,7 @@ export class GraphBuilder {
               }, eventForGraph.sessionId ?? null, traceId ?? null);
             } else {
               await this.logWithContext('warn', 'CONTROL_EVENT_UNLINKED_NO_VALID_SNAPSHOT', {
-                eventId: safeEventId,
+                eventId,
                 type: eventForGraph.type,
                 traceId,
                 reason: 'fallback_upsert_failed',
@@ -654,7 +652,7 @@ export class GraphBuilder {
             }
           } else {
             await this.logWithContext('warn', 'CONTROL_EVENT_UNLINKED_NO_VALID_SNAPSHOT', {
-              eventId: safeEventId,
+              eventId,
               type: eventForGraph.type,
               traceId,
               reason: fallbackDecision.reason,
@@ -673,11 +671,11 @@ export class GraphBuilder {
         }
 
         if (currentNodeId) {
-          await this.eventRepo.updateNodeId(safeEventId, currentNodeId);
+          await this.eventRepo.updateNodeId(eventId, currentNodeId);
           await this.logWithContext(
             'info',
             'EVENT_NODE_LINKED',
-            this.buildEventLogFields(eventForGraph, safeEventId, traceId, effectiveTabId, currentNodeId),
+            this.buildEventLogFields(eventForGraph, eventId, traceId, effectiveTabId, currentNodeId),
             eventForGraph.sessionId ?? null,
             traceId ?? null
           );
@@ -706,7 +704,7 @@ export class GraphBuilder {
             await this.logGraphResult(
               'warn',
               eventForGraph,
-              safeEventId,
+              eventId,
               traceId,
               effectiveTabId,
               currentNodeId,
@@ -719,7 +717,7 @@ export class GraphBuilder {
             await this.actionHandler.handleAction(eventForGraph, traceId, currentNodeId, effectiveLastNodeId, effectiveTabId);
             await this.sessionManager.updatePointer(eventForGraph.sessionId, effectiveTabId, currentNodeId, eventForGraph.timestamp);
             await this.logWithContext('info', 'Event stage: action recorded, pending action registered', {
-              eventId: safeEventId,
+              eventId,
               type: eventForGraph.type,
               nodeId: currentNodeId,
               traceId,
@@ -728,7 +726,7 @@ export class GraphBuilder {
             await this.logGraphResult(
               'info',
               eventForGraph,
-              safeEventId,
+              eventId,
               traceId,
               effectiveTabId,
               currentNodeId,
@@ -742,7 +740,7 @@ export class GraphBuilder {
             await this.outcomeHandler.handleOutcome(parsedOutcome, traceId, currentNodeId, effectiveTabId);
             await this.sessionManager.updatePointer(eventForGraph.sessionId, effectiveTabId, currentNodeId, eventForGraph.timestamp);
             await this.logWithContext('info', 'Event stage: outcome processed, edge created or updated', {
-              eventId: safeEventId,
+              eventId,
               type: eventForGraph.type,
               nodeId: currentNodeId,
               traceId,
@@ -751,7 +749,7 @@ export class GraphBuilder {
             await this.logGraphResult(
               'info',
               eventForGraph,
-              safeEventId,
+              eventId,
               traceId,
               effectiveTabId,
               currentNodeId,
@@ -770,7 +768,7 @@ export class GraphBuilder {
 
             if (suppression.suppress) {
               await this.logWithContext('info', 'SPA_ROUTE_OBSERVATIONAL_SUPPRESSED_DUPLICATE_OUTCOME', {
-                eventId: safeEventId,
+                eventId,
                 type: eventForGraph.type,
                 nodeId: currentNodeId,
                 traceId,
@@ -784,7 +782,7 @@ export class GraphBuilder {
               await this.logGraphResult(
                 'info',
                 eventForGraph,
-                safeEventId,
+                eventId,
                 traceId,
                 effectiveTabId,
                 currentNodeId,
@@ -812,7 +810,7 @@ export class GraphBuilder {
 
             await this.sessionManager.updatePointer(eventForGraph.sessionId, effectiveTabId, currentNodeId, eventForGraph.timestamp);
             await this.logWithContext('info', 'Event stage: SPA route transition processed as synthetic outcome', {
-              eventId: safeEventId,
+              eventId,
               type: eventForGraph.type,
               nodeId: currentNodeId,
               traceId,
@@ -821,7 +819,7 @@ export class GraphBuilder {
             await this.logGraphResult(
               'info',
               eventForGraph,
-              safeEventId,
+              eventId,
               traceId,
               effectiveTabId,
               currentNodeId,
@@ -837,7 +835,7 @@ export class GraphBuilder {
         else if (!eventForGraph.sessionId) stage = 'missing session - rejected';
 
         await this.logWithContext('info', `Event stage: ${stage}`, {
-          eventId: safeEventId,
+          eventId,
           nodeId: currentNodeId,
           type: eventForGraph.type,
           traceId,
@@ -846,27 +844,27 @@ export class GraphBuilder {
         await this.logGraphResult(
           'info',
           eventForGraph,
-          safeEventId,
+          eventId,
           traceId,
           effectiveTabId,
           currentNodeId,
           { success: true, stage }
         );
 
-        return { success: true, eventId: safeEventId, nodeId: currentNodeId, traceId };
+        return { success: true, eventId, nodeId: currentNodeId, traceId };
       });
     } catch (error) {
       await this.logWithContext(
         'error',
         'Transaction failed - all writes rolled back',
-        { error: (error as Error).message, eventId: safeEventId, traceId },
+        { error: (error as Error).message, eventId, traceId },
         sessionId,
         traceId
       );
       await this.logGraphResult(
         'error',
         normalizedEvent,
-        safeEventId,
+        eventId,
         traceId,
         effectiveTabId,
         null,

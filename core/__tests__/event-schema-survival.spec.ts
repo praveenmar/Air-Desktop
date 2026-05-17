@@ -545,6 +545,29 @@ describe('active-path schema survival', () => {
     }
   });
 
+  it('rejects events missing id at the schema boundary', () => {
+    const result = AIREventSchema.safeParse({
+      type: 'click',
+      timestamp: 1_700_000_000_065,
+      sessionId: 'session-89898989-8989-4898-8989-898989898989',
+      pageUrl: 'https://app.test/dashboard',
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects events with non-UUID ids at the schema boundary', () => {
+    const result = AIREventSchema.safeParse({
+      id: 'evt-1',
+      type: 'click',
+      timestamp: 1_700_000_000_066,
+      sessionId: 'session-90909090-9090-4909-9090-909090909090',
+      pageUrl: 'https://app.test/dashboard',
+    });
+
+    expect(result.success).toBe(false);
+  });
+
   it('accepts custom-select selection payloads with label, value, and index', () => {
     const parsed = AIREventSchema.parse({
       id: '99999999-9999-4999-8999-999999999999',

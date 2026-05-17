@@ -66,13 +66,13 @@ export class ActionHandler {
     tabId: string
   ): Promise<void> {
     const fpHash    = this.computeFingerprintHash(event);
-    const safeEventId = event.id || crypto.randomUUID();
+    const eventId = event.id;
 
     const shouldRegisterPending = ['click', 'submit', 'custom-control-open', 'custom-select', 'custom-menu-select'].includes(event.type);
 
     // 1. Register PENDING ACTION in DB (for future Outcome to resolve)
     if (shouldRegisterPending) {
-      await this.registerPendingAction(traceId, event.sessionId, tabId, currentNodeId, safeEventId, event.type, fpHash);
+      await this.registerPendingAction(traceId, event.sessionId, tabId, currentNodeId, eventId, event.type, fpHash);
       await this.logWithContext('info', 'PENDING_ACTION_TAB_SCOPED_REGISTERED', {
         type: event.type,
         tabId,
@@ -149,7 +149,7 @@ export class ActionHandler {
         id: edgeId,
         fromNodeId,
         toNodeId,
-        triggerEventId: event.id || crypto.randomUUID(),
+        triggerEventId: event.id,
         fingerprintHash: fpHash,
         outcomeType: 'immediate_action',  // ← Bug A fix
         lastUpdated: Date.now(),

@@ -77,7 +77,7 @@ export type NestedContext = z.infer<typeof NestedContextSchema>;
 
 /** Base fields shared by all events */
 const BaseEventSchema = z.object({
-  id: z.string().uuid().optional().catch(() => crypto.randomUUID()), // Safe fallback if ID is stripped
+  id: z.string().uuid(),
   timestamp: z.number(),
   traceId: z.string().optional(),
   sessionId: z.string()
