@@ -173,6 +173,11 @@ describe('active-path end-to-end contract fixture', () => {
         positionInVisibleMatches: 0,
       }),
     ]));
+    expect(parsedClick.fingerprint).toEqual(expect.objectContaining({
+      targetNodeId: 'air-node-1',
+      targetIdentitySource: 'pageSnapshot',
+      targetIdentityStatus: 'emitted',
+    }));
 
     expect(parsedOutcome.type).toBe('outcome');
     expect(parsedOutcome.interactionContext).toEqual(expect.objectContaining({
@@ -232,6 +237,11 @@ describe('active-path end-to-end contract fixture', () => {
         positionInVisibleMatches: 0,
       }),
     ]));
+    expect(storedClickPayload.fingerprint).toEqual(expect.objectContaining({
+      targetNodeId: 'air-node-1',
+      targetIdentitySource: 'pageSnapshot',
+      targetIdentityStatus: 'emitted',
+    }));
 
     // Intentional graph policy: outcome pageSnapshot/pageState trim, but interactionContext is kept
     // because downstream D3.5/Sprint 5 diagnostics consume it.
@@ -257,6 +267,7 @@ describe('active-path end-to-end contract fixture', () => {
     expect(interactionContextRow?.normalizedUrl).toBe('https://app.test/profile');
     expect(interactionContextRow?.controlSignature).toBe('sig-profile-save');
     expect(interactionContextRow?.snapshotHtml).toContain('profile-form');
+    expect(interactionContextRow?.snapshotHtml).toContain('data-air-node-id="air-node-1"');
     // Intentional table shape: interaction_contexts stores flattened HTML + flat anchors only.
     expect(JSON.parse(interactionContextRow?.anchors || '[]')).toEqual(rawSnapshot.anchors);
 
@@ -294,6 +305,12 @@ describe('active-path end-to-end contract fixture', () => {
           positionInVisibleMatches: 0,
         }),
       ]));
+      expect(session.steps[0].fingerprint).toEqual(expect.objectContaining({
+        targetNodeId: 'air-node-1',
+        targetIdentitySource: 'pageSnapshot',
+        targetIdentityStatus: 'emitted',
+      }));
+      expect(session.steps[0].targetNodeId).toBe('air-node-1');
 
       const resolverMetadata = buildSprint5ResolverMetadata();
       const sidecar: AirMetadata = {

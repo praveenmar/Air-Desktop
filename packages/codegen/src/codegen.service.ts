@@ -268,6 +268,26 @@ function normalizeNonNegativeInteger(raw: unknown): number | null | undefined {
   return raw;
 }
 
+function normalizeTargetIdentitySource(raw: unknown): FingerprintData['targetIdentitySource'] | undefined {
+  return raw === 'pageState' || raw === 'pageSnapshot' || raw === 'interactionContext'
+    ? raw
+    : undefined;
+}
+
+function normalizeTargetIdentityStatus(raw: unknown): FingerprintData['targetIdentityStatus'] | undefined {
+  return (
+    raw === 'emitted' ||
+    raw === 'target-not-element' ||
+    raw === 'target-detached' ||
+    raw === 'target-not-in-snapshot' ||
+    raw === 'shadow-not-serialized' ||
+    raw === 'cross-origin-frame' ||
+    raw === 'unsupported'
+  )
+    ? raw
+    : undefined;
+}
+
 function normalizeCapturedSelectorCandidate(raw: unknown): CapturedSelectorCandidate | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const source = raw as Record<string, unknown>;
@@ -547,6 +567,12 @@ function normalizeFingerprint(raw: unknown): FingerprintData | null {
     boundedFieldContext: normalizeBoundedFieldContext(fingerprint.boundedFieldContext),
     accessibilityEvidence: normalizeAccessibilityEvidence(fingerprint.accessibilityEvidence),
     attributesHash: typeof fingerprint.attributesHash === 'string' ? fingerprint.attributesHash : undefined,
+    targetNodeId:
+      typeof fingerprint.targetNodeId === 'string' && fingerprint.targetNodeId.trim().length > 0
+        ? fingerprint.targetNodeId.trim()
+        : undefined,
+    targetIdentitySource: normalizeTargetIdentitySource(fingerprint.targetIdentitySource),
+    targetIdentityStatus: normalizeTargetIdentityStatus(fingerprint.targetIdentityStatus),
   };
 
   if (
@@ -1557,6 +1583,7 @@ export class CodegenService {
           rank: selectorRank,
         }),
         fingerprint:      fingerprint ?? undefined,
+        targetNodeId:     fingerprint?.targetNodeId ?? undefined,
         nestedContext:    extractNestedContext(ev.payload),
         controlSignature,
         pageUrl:          ev.pageUrl || '',

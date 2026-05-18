@@ -30,6 +30,7 @@ export function buildRawActivePathSnapshot() {
                 title="Profile Help"
               >Help</a>
               <button
+                data-air-node-id="air-node-1"
                 type="submit"
                 value="Save"
                 title="Save Profile"
@@ -156,6 +157,9 @@ export function buildActivePathClickEvent(normalizedSnapshot: Record<string, unk
           visibleMatchCount: 1,
         },
       ],
+      targetNodeId: 'air-node-1',
+      targetIdentitySource: 'pageSnapshot',
+      targetIdentityStatus: 'emitted',
       attributesHash: 'fingerprint-hash-profile-save',
     },
     meta: {

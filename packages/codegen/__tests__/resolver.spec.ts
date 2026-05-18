@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { parseHTML } from 'linkedom';
 import {
   generateCandidates,
+  hasSameAirTargetNodeId,
   resolveSelectorsForSession,
   scoreCandidate,
   validateCSSCandidate,
@@ -4314,5 +4315,29 @@ describe('selector-resolver', () => {
 
     expect(resolution.resolverMetadata.triggerResolvedSelectorSpec).toBeUndefined();
     expect(resolution.resolverMetadata.triggerContextRenderStatus).toBe('blocked-unsafe-render');
+  });
+
+  it('reports matching AIR target node ids without consuming them in resolver selection', () => {
+    const matching = makeHtmlDocument(`
+      <html><body>
+        <button data-air-node-id="air-node-1">Save</button>
+      </body></html>
+    `).querySelector('button');
+    const different = makeHtmlDocument(`
+      <html><body>
+        <button data-air-node-id="air-node-2">Save</button>
+      </body></html>
+    `).querySelector('button');
+    const missing = makeHtmlDocument(`
+      <html><body>
+        <button>Save</button>
+      </body></html>
+    `).querySelector('button');
+
+    expect(hasSameAirTargetNodeId(matching, 'air-node-1')).toBe(true);
+    expect(hasSameAirTargetNodeId(different, 'air-node-1')).toBe(false);
+    expect(hasSameAirTargetNodeId(missing, 'air-node-1')).toBe(false);
+    expect(hasSameAirTargetNodeId(matching, undefined)).toBe(false);
+    expect(hasSameAirTargetNodeId(null, 'air-node-1')).toBe(false);
   });
 });

@@ -661,6 +661,20 @@ export interface AccessibilityEvidence {
   isNativeLabelAssociation?: boolean;
 }
 
+export type TargetIdentitySource =
+  | 'pageState'
+  | 'pageSnapshot'
+  | 'interactionContext';
+
+export type TargetIdentityStatus =
+  | 'emitted'
+  | 'target-not-element'
+  | 'target-detached'
+  | 'target-not-in-snapshot'
+  | 'shadow-not-serialized'
+  | 'cross-origin-frame'
+  | 'unsupported';
+
 export interface FingerprintData {
   selector?: string;
   selectorPriority?: string;
@@ -678,6 +692,9 @@ export interface FingerprintData {
   boundedFieldContext?: FingerprintBoundedFieldContext;
   accessibilityEvidence?: AccessibilityEvidence;
   attributesHash?: string;
+  targetNodeId?: string;
+  targetIdentitySource?: TargetIdentitySource;
+  targetIdentityStatus?: TargetIdentityStatus;
 }
 
 export interface CodegenStep {
@@ -730,6 +747,9 @@ export interface CodegenStep {
 
   /** Original captured fingerprint payload for resolver diagnostics and candidate hints. */
   fingerprint?: FingerprintData;
+
+  /** Optional snapshot-backed target identity for future same-node comparison. */
+  targetNodeId?: string;
 
   /** Additive nested-context metadata for shadow DOM / iframe handling. */
   nestedContext?: NestedContextData;

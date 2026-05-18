@@ -173,6 +173,7 @@ const MAX_CAPTURED_SELECTOR_CANDIDATES = 8;
 const MAX_SELECTOR_VISIBLE_INDEX_MATCHES = 100;
 const MAX_TIGHT_CONTAINER_DEPTH = 8;
 const MAX_TIGHT_CONTAINER_CONTROL_LIKE_DESCENDANTS = 4;
+const AIR_TARGET_NODE_ID_ATTR = "data-air-node-id";
 const TIGHT_CONTAINER_INPUT_LIKE_SELECTOR = [
   'input:not([type="hidden"])',
   'textarea',
@@ -2470,6 +2471,230 @@ class AIRInterceptor {
     });
   }
 
+  resolveElementTarget(target) {
+    if (!target || typeof target !== "object") return null;
+
+    if (typeof Node !== "undefined") {
+      if (target.nodeType === Node.ELEMENT_NODE) {
+        return target;
+      }
+
+      if (target.nodeType === Node.TEXT_NODE) {
+        return target.parentElement || null;
+      }
+    }
+
+    return target.parentElement || null;
+  }
+
+  _escapeSnapshotAttributeValue(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/"/g, "&quot;");
+  }
+
+  _isShadowRootNode(rootNode) {
+    if (!rootNode || typeof rootNode !== "object") return false;
+    if (typeof ShadowRoot !== "undefined" && rootNode instanceof ShadowRoot) {
+      return true;
+    }
+    return (
+      typeof Node !== "undefined" &&
+      rootNode.nodeType === Node.DOCUMENT_FRAGMENT_NODE &&
+      !!rootNode.host &&
+      typeof rootNode.host.tagName === "string"
+    );
+  }
+
+  _createTargetIdentityCapture(target, options = {}) {
+    const targetElement = this.resolveElementTarget(target);
+    const targetIdentityCapture = {
+      targetElement,
+      nodeIds: new WeakMap(),
+      targetNodeId: null,
+      serializedTargetNodeId: null,
+      nestedContext: options?.nestedContext,
+      targetIdentityStatus: undefined,
+    };
+
+    if (!targetElement) {
+      targetIdentityCapture.targetIdentityStatus = "target-not-element";
+      return targetIdentityCapture;
+    }
+
+    if (
+      options?.nestedContext?.isIframe === true &&
+      options?.nestedContext?.iframeSameOrigin === false
+    ) {
+      targetIdentityCapture.targetIdentityStatus = "cross-origin-frame";
+      return targetIdentityCapture;
+    }
+
+    if (targetElement.isConnected === false) {
+      targetIdentityCapture.targetIdentityStatus = "target-detached";
+      return targetIdentityCapture;
+    }
+
+    targetIdentityCapture.targetNodeId = "air-node-1";
+    targetIdentityCapture.nodeIds.set(targetElement, targetIdentityCapture.targetNodeId);
+    return targetIdentityCapture;
+  }
+
+  _serializeSnapshotNode(node, currentDepth, options = {}) {
+    const maxDepth = Number.isFinite(options.maxDepth) ? options.maxDepth : Infinity;
+    const maxNodes = Number.isFinite(options.maxNodes) ? options.maxNodes : Infinity;
+    const maxTextLength = Number.isFinite(options.maxTextLength) ? options.maxTextLength : 5000;
+    const maxAttrValueLength = Number.isFinite(options.maxAttrValueLength) ? options.maxAttrValueLength : 200;
+    const timedOut = typeof options.timedOut === "function" ? options.timedOut : (() => false);
+    const shouldIncludeAttr =
+      typeof options.shouldIncludeAttr === "function"
+        ? options.shouldIncludeAttr
+        : (() => true);
+    const state = options.state || { nodesProcessed: 0, depthReached: 0 };
+    const targetIdentityCapture = options.targetIdentityCapture || null;
+
+    if (!node || timedOut() || currentDepth > maxDepth) return "";
+
+    if (typeof Node !== "undefined" && node.nodeType === Node.ELEMENT_NODE) {
+      if (state.nodesProcessed >= maxNodes) return "";
+      state.nodesProcessed++;
+      state.depthReached = Math.max(state.depthReached || 0, currentDepth);
+
+      const tag = node.tagName.toLowerCase();
+      if (tag === "iframe") return "<iframe></iframe>";
+
+      let out = `<${tag}`;
+      try {
+        for (const attr of node.attributes || []) {
+          if (!shouldIncludeAttr(attr.name, attr.value, node)) continue;
+          const safe = this._escapeSnapshotAttributeValue(String(attr.value).slice(0, maxAttrValueLength));
+          out += ` ${attr.name}="${safe}"`;
+        }
+
+        if (targetIdentityCapture?.targetNodeId) {
+          const assignedNodeId = targetIdentityCapture.nodeIds.get(node);
+          if (assignedNodeId) {
+            out += ` ${AIR_TARGET_NODE_ID_ATTR}="${this._escapeSnapshotAttributeValue(assignedNodeId)}"`;
+            targetIdentityCapture.serializedTargetNodeId = assignedNodeId;
+          }
+        }
+
+        if (tag === "input" || tag === "textarea") {
+          const liveValue = node.value;
+          if (
+            liveValue &&
+            node.type !== "password" &&
+            node.getAttribute("value") !== liveValue
+          ) {
+            out += ` value="${this._escapeSnapshotAttributeValue(liveValue)}"`;
+          }
+        }
+
+        if (
+          tag === "input" &&
+          (String(node.type || "").toLowerCase() === "checkbox" ||
+            String(node.type || "").toLowerCase() === "radio") &&
+          node.checked &&
+          !node.hasAttribute("checked")
+        ) {
+          out += ` checked=""`;
+        }
+
+        if (tag === "option" && node.selected && !node.hasAttribute("selected")) {
+          out += ` selected=""`;
+        }
+      } catch (e) {
+        this.log("DOM capture attr error", e);
+      }
+
+      out += ">";
+      const children = node.childNodes;
+      if (children && children.length) {
+        for (const child of children) {
+          out += this._serializeSnapshotNode(child, currentDepth + 1, options);
+          if (timedOut() || state.nodesProcessed >= maxNodes) break;
+        }
+      }
+
+      out += `</${tag}>`;
+      return out;
+    }
+
+    if (typeof Node !== "undefined" && node.nodeType === Node.TEXT_NODE) {
+      const text = node.textContent || "";
+      if (text.length > maxTextLength) {
+        return text.slice(0, maxTextLength).replace(/</g, "&lt;").replace(/>/g, "&gt;") + "…";
+      }
+      return text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    return "";
+  }
+
+  _buildTargetIdentityFromSnapshot(targetIdentityCapture, snapshot, source = "pageSnapshot") {
+    if (!targetIdentityCapture) return null;
+
+    if (targetIdentityCapture.targetIdentityStatus) {
+      return {
+        targetIdentityStatus: targetIdentityCapture.targetIdentityStatus,
+      };
+    }
+
+    const targetNodeId =
+      typeof targetIdentityCapture.targetNodeId === "string"
+        ? targetIdentityCapture.targetNodeId
+        : null;
+    const html = typeof snapshot?.html === "string" ? snapshot.html : "";
+
+    if (targetNodeId && html.includes(`${AIR_TARGET_NODE_ID_ATTR}="${targetNodeId}"`)) {
+      return {
+        targetNodeId,
+        targetIdentitySource: source,
+        targetIdentityStatus: "emitted",
+      };
+    }
+
+    const targetElement = targetIdentityCapture.targetElement;
+    if (targetElement?.isConnected === false) {
+      return { targetIdentityStatus: "target-detached" };
+    }
+
+    const targetRoot = typeof targetElement?.getRootNode === "function"
+      ? targetElement.getRootNode()
+      : null;
+    if (this._isShadowRootNode(targetRoot)) {
+      return { targetIdentityStatus: "shadow-not-serialized" };
+    }
+
+    return {
+      targetIdentityStatus: snapshot ? "target-not-in-snapshot" : "unsupported",
+    };
+  }
+
+  _applyTargetIdentityToFingerprint(fingerprint, identityResult) {
+    if (!fingerprint || !identityResult || typeof identityResult !== "object") {
+      return fingerprint;
+    }
+
+    if (typeof identityResult.targetNodeId === "string" && identityResult.targetNodeId) {
+      fingerprint.targetNodeId = identityResult.targetNodeId;
+    }
+
+    if (
+      identityResult.targetIdentitySource === "pageState" ||
+      identityResult.targetIdentitySource === "pageSnapshot" ||
+      identityResult.targetIdentitySource === "interactionContext"
+    ) {
+      fingerprint.targetIdentitySource = identityResult.targetIdentitySource;
+    }
+
+    if (typeof identityResult.targetIdentityStatus === "string" && identityResult.targetIdentityStatus) {
+      fingerprint.targetIdentityStatus = identityResult.targetIdentityStatus;
+    }
+
+    return fingerprint;
+  }
+
   /** Capture DOM with depth limit, node limit, timeout, Shadow DOM, Vue/React attrs. */
   captureDOM(depth, opts = {}) {
     const maxDepth = depth ?? this.config.snapshotDepth ?? 10;
@@ -2486,6 +2711,7 @@ class AIRInterceptor {
     let depthReached = 0;
     const startTime = performance.now();
     const timedOut = () => performance.now() - startTime > timeoutMs;
+    const targetIdentityCapture = opts.targetIdentityCapture || null;
 
     const shouldIncludeAttr = (name, value) => {
       if (!name || value == null) return false;
@@ -2522,6 +2748,14 @@ class AIRInterceptor {
           }
 
           // 🛠️ FIX: Explicitly Capture Input Values (Blind Spot Fix)
+          if (targetIdentityCapture?.targetNodeId) {
+            const assignedNodeId = targetIdentityCapture.nodeIds.get(node);
+            if (assignedNodeId) {
+              out += ` ${AIR_TARGET_NODE_ID_ATTR}="${this._escapeSnapshotAttributeValue(assignedNodeId)}"`;
+              targetIdentityCapture.serializedTargetNodeId = assignedNodeId;
+            }
+          }
+
           if (tag === "input" || tag === "textarea") {
             const liveValue = node.value;
             // Only capture if it differs from the attribute and isn't a password
@@ -2585,8 +2819,9 @@ class AIRInterceptor {
   }
 
   /** Fallback: shallow capture when main capture fails or times out. */
-  captureDOMFallback(depth = 5) {
+  captureDOMFallback(depth = 5, options = {}) {
     let html = "";
+    const targetIdentityCapture = options.targetIdentityCapture || null;
     const capture = (node, d) => {
       if (d > depth) return "";
       if (node.nodeType === Node.ELEMENT_NODE) {
@@ -2601,6 +2836,13 @@ class AIRInterceptor {
             attr.name === "data-testid"
           ) {
             out += ` ${attr.name}="${String(attr.value).slice(0, 100)}"`;
+          }
+        }
+        if (targetIdentityCapture?.targetNodeId) {
+          const assignedNodeId = targetIdentityCapture.nodeIds.get(node);
+          if (assignedNodeId) {
+            out += ` ${AIR_TARGET_NODE_ID_ATTR}="${this._escapeSnapshotAttributeValue(assignedNodeId)}"`;
+            targetIdentityCapture.serializedTargetNodeId = assignedNodeId;
           }
         }
         out += ">";
@@ -2646,12 +2888,19 @@ class AIRInterceptor {
         }
 
         try {
-          result = this.captureDOM(effectiveDepth, captureLimits);
+          result = this.captureDOM(effectiveDepth, {
+            ...captureLimits,
+            targetIdentityCapture: options.targetIdentityCapture || null,
+          });
           if (!result?.html) {
-            result = this.captureDOMFallback(Math.min(5, effectiveDepth));
+            result = this.captureDOMFallback(Math.min(5, effectiveDepth), {
+              targetIdentityCapture: options.targetIdentityCapture || null,
+            });
           }
         } catch (e) {
-          result = this.captureDOMFallback(Math.min(5, effectiveDepth));
+          result = this.captureDOMFallback(Math.min(5, effectiveDepth), {
+            targetIdentityCapture: options.targetIdentityCapture || null,
+          });
         }
 
         const controlSignature = this.computeControlSignature(document);
@@ -2821,24 +3070,41 @@ class AIRInterceptor {
     return snapshot;
   }
 
-  _captureSubtreeSnapshot(element, maxChars = 50000) {
-    if (!element) return null;
+  _captureSubtreeSnapshot(element, maxChars = 50000, options = {}) {
+    const resolvedElement = this.resolveElementTarget(element);
+    if (!resolvedElement) return null;
 
-    // Try to get a meaningful container first
-    let container = element.closest('form, section, article, div') || element.parentElement;
-    let bestHtml = element.outerHTML;
+    const targetIdentityCapture = options.targetIdentityCapture || null;
+    const pageUrl = window.location.href;
+    const normalizedUrl = this.normalizeUrl(pageUrl);
+    const serializeSubtree = (root) => {
+      if (!root) return "";
+      return this._serializeSnapshotNode(root, 0, {
+        maxDepth: Infinity,
+        maxNodes: Infinity,
+        maxTextLength: this.config.snapshotMaxTextLength ?? 5000,
+        maxAttrValueLength: 500,
+        shouldIncludeAttr: () => true,
+        state: { nodesProcessed: 0, depthReached: 0 },
+        targetIdentityCapture,
+      });
+    };
 
-    if (container && container.outerHTML && container.outerHTML.length <= maxChars) {
-      bestHtml = container.outerHTML;
+    let container = resolvedElement.closest('form, section, article, div') || resolvedElement.parentElement;
+    let bestHtml = serializeSubtree(resolvedElement);
+
+    if (container) {
+      const containerHtml = serializeSubtree(container);
+      if (containerHtml && containerHtml.length <= maxChars) {
+        bestHtml = containerHtml;
+      }
     }
 
-    // Keep existing behavior: only attempt parent expansion when current html is too large.
     if (bestHtml.length > maxChars) {
-      // Try to expand to parent (up to 2 levels) for more context
       let depth = 0;
-      let current = element.parentElement;
+      let current = resolvedElement.parentElement;
       while (current && depth < 2) {
-        const parentHtml = current.outerHTML;
+        const parentHtml = serializeSubtree(current);
         if (parentHtml.length <= maxChars) {
           bestHtml = parentHtml;
         } else {
@@ -2848,7 +3114,6 @@ class AIRInterceptor {
         depth++;
       }
 
-      // If still too large, truncate
       if (bestHtml.length > maxChars) {
         bestHtml = bestHtml.slice(0, maxChars) + '<!-- truncated -->';
       }
@@ -2880,9 +3145,6 @@ class AIRInterceptor {
     try {
       controlSignature = this.computeControlSignature(document);
     } catch (_) {}
-
-    const pageUrl = window.location.href;
-    const normalizedUrl = this.normalizeUrl(pageUrl);
 
     const stabilityState = this._buildSnapshotStability();
 
@@ -4372,7 +4634,8 @@ class AIRInterceptor {
   }
 
   _getComposedEventTarget(event) {
-    return (event?.composedPath && event.composedPath()[0]) || event?.target || null;
+    const rawTarget = (event?.composedPath && event.composedPath()[0]) || event?.target || null;
+    return this.resolveElementTarget(rawTarget);
   }
 
   _elementHasActionableDetail(element) {
@@ -4398,19 +4661,19 @@ class AIRInterceptor {
   }
 
   _resolveNestedContext(event, target, eventId = null) {
-    if (!target || typeof target !== "object") {
-      return { target, nestedContext: undefined };
+    const effectiveTarget = this.resolveElementTarget(target);
+    if (!effectiveTarget || typeof effectiveTarget !== "object") {
+      return { target: effectiveTarget, nestedContext: undefined };
     }
 
     const nestedContext = {};
     const sessionId = this.config?.sessionId || null;
     const tabId = this.config?.tabId || null;
-    const effectiveTarget = target;
     const rootNode = typeof effectiveTarget.getRootNode === "function"
       ? effectiveTarget.getRootNode()
       : null;
 
-    if (rootNode && typeof ShadowRoot !== "undefined" && rootNode instanceof ShadowRoot) {
+    if (this._isShadowRootNode(rootNode)) {
       nestedContext.isShadowDom = true;
       nestedContext.shadowHostTag = rootNode.host?.tagName?.toLowerCase?.() || null;
       this.log("SHADOW_DOM_TARGET_USED", {
@@ -4503,6 +4766,10 @@ class AIRInterceptor {
     const resolvedTargetInfo = this._resolveNestedContext(null, target, eventId);
     const effectiveTarget = resolvedTargetInfo.target || target;
     const nestedContext = resolvedTargetInfo.nestedContext;
+    if (!effectiveTarget || typeof effectiveTarget.tagName !== "string") return;
+    const targetIdentityCapture = this._createTargetIdentityCapture(effectiveTarget, {
+      nestedContext,
+    });
     const fingerprint = this.generateFingerprint(effectiveTarget, {
       eventType: EventType.INPUT,
       trigger,
@@ -4534,8 +4801,12 @@ class AIRInterceptor {
     const pageUrl = window.location.href;
     const normalizedUrl = this.normalizeUrl(pageUrl);
     const subtreeSnapshot = effectiveTarget
-      ? this._captureSubtreeSnapshot(effectiveTarget)
+      ? this._captureSubtreeSnapshot(effectiveTarget, 50000, { targetIdentityCapture })
       : null;
+    this._applyTargetIdentityToFingerprint(
+      fingerprint,
+      this._buildTargetIdentityFromSnapshot(targetIdentityCapture, subtreeSnapshot, "pageSnapshot"),
+    );
 
     this.queueEvent({
       id:            eventId,
@@ -5057,16 +5328,24 @@ class AIRInterceptor {
     }, 30_000);
 
     let afterOpenSnapshot = undefined;
+    const targetIdentityCapture = this._createTargetIdentityCapture(triggerEl, {
+      nestedContext,
+    });
     if (this.config.capturePageSnapshot) {
       try {
         afterOpenSnapshot = await this.capturePageSnapshot(
           this.config.snapshotDepth,
           false,
+          { targetIdentityCapture },
         );
       } catch (err) {
         this.log("Failed to capture custom control open snapshot", err);
       }
     }
+    this._applyTargetIdentityToFingerprint(
+      triggerFingerprint,
+      this._buildTargetIdentityFromSnapshot(targetIdentityCapture, afterOpenSnapshot, "pageSnapshot"),
+    );
 
     const pageUrl = window.location.href;
     const normalizedUrl = this.normalizeUrl(pageUrl);
@@ -5179,14 +5458,21 @@ class AIRInterceptor {
     );
     const nestedContext = resolvedTargetInfo.nestedContext;
     const optionTarget = resolvedTargetInfo.target || el;
+    const targetIdentityCapture = this._createTargetIdentityCapture(optionTarget, {
+      nestedContext,
+    });
     const optionFingerprint = this.generateFingerprint(optionTarget, {
       eventType,
       trigger: "option-click",
     });
     const snapshotTarget = optionTarget || session?.triggerEl || this._getComposedEventTarget(clickEvent) || null;
     const subtreeSnapshot = snapshotTarget
-      ? this._captureSubtreeSnapshot(snapshotTarget)
+      ? this._captureSubtreeSnapshot(snapshotTarget, 50000, { targetIdentityCapture })
       : null;
+    this._applyTargetIdentityToFingerprint(
+      optionFingerprint,
+      this._buildTargetIdentityFromSnapshot(targetIdentityCapture, subtreeSnapshot, "pageSnapshot"),
+    );
 
     const pageUrl = window.location.href;
     const normalizedUrl = this.normalizeUrl(pageUrl);
@@ -5489,6 +5775,7 @@ class AIRInterceptor {
     const resolvedTargetInfo = this._resolveNestedContext(e, this._getComposedEventTarget(e), actionEventId);
     const clickTarget = resolvedTargetInfo.target;
     const nestedContext = resolvedTargetInfo.nestedContext;
+    if (!clickTarget || typeof clickTarget.tagName !== "string") return;
 
     // ══════════════════════════════════════════════════════════════
     // CUSTOM DROPDOWN INTERCEPT — must run FIRST, before dedup logic,
@@ -5654,6 +5941,9 @@ class AIRInterceptor {
       });
     }
 
+    const targetIdentityCapture = this._createTargetIdentityCapture(target, {
+      nestedContext,
+    });
     const fingerprint = this.generateFingerprint(target, {
       eventType: EventType.CLICK,
       trigger: "click",
@@ -5666,15 +5956,20 @@ class AIRInterceptor {
     if (this.config.capturePageSnapshot) {
       try {
         initialSnapshot = target
-          ? this._captureSubtreeSnapshot(target)
+          ? this._captureSubtreeSnapshot(target, 50000, { targetIdentityCapture })
           : await this.capturePageSnapshot(
               this.config.snapshotDepth,
               true,
+              { targetIdentityCapture },
             );
       } catch (err) {
         this.log("Failed to capture initial snapshot", err);
       }
     }
+    this._applyTargetIdentityToFingerprint(
+      fingerprint,
+      this._buildTargetIdentityFromSnapshot(targetIdentityCapture, initialSnapshot, "pageSnapshot"),
+    );
 
     // 4. Send ACTION Event (Immediate User Intent)
     const actionNormalizedUrl = this.normalizeUrl(startUrl);
@@ -6159,6 +6454,9 @@ class AIRInterceptor {
       ? (target.closest("form") || target)
       : target;
     const captureTarget = formTarget && formTarget.tagName ? formTarget : null;
+    const targetIdentityCapture = this._createTargetIdentityCapture(captureTarget, {
+      nestedContext,
+    });
     const fingerprint = this.generateFingerprint(captureTarget, {
       eventType: "submit",
       trigger: "submit",
@@ -6194,8 +6492,12 @@ class AIRInterceptor {
       return;
     }
     const subtreeSnapshot = captureTarget
-      ? this._captureSubtreeSnapshot(captureTarget)
+      ? this._captureSubtreeSnapshot(captureTarget, 50000, { targetIdentityCapture })
       : null;
+    this._applyTargetIdentityToFingerprint(
+      fingerprint,
+      this._buildTargetIdentityFromSnapshot(targetIdentityCapture, subtreeSnapshot, "pageSnapshot"),
+    );
 
     if (subtreeSnapshot) {
       this.queueEvent({
@@ -6209,6 +6511,10 @@ class AIRInterceptor {
     this.capturePageSnapshot(this.config.snapshotDepth, true)
       .then((pageSnapshot) => {
         const snapshot = pageSnapshot || undefined;
+        this._applyTargetIdentityToFingerprint(
+          fingerprint,
+          this._buildTargetIdentityFromSnapshot(targetIdentityCapture, snapshot, "pageSnapshot"),
+        );
         this.queueEvent({
           ...baseEvent,
           pageSnapshot: snapshot,
@@ -6225,7 +6531,9 @@ class AIRInterceptor {
   // ============================================================
 
   generateFingerprint(element, eventContext = undefined) {
-    if (!element) return null;
+    const resolvedElement = this.resolveElementTarget(element);
+    if (!resolvedElement) return null;
+    element = resolvedElement;
 
     // Debug logging
     if (this.config.debugMode) {

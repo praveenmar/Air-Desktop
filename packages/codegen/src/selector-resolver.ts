@@ -126,6 +126,15 @@ export type {
 export { isVisibleElement, validateCSSCandidate, validateTextCandidate } from './resolver/visibility';
 export { validateSelectorSpec, validateScopedSelectorSpec } from './resolver/selector-spec-validator';
 
+export function hasSameAirTargetNodeId(
+  resolvedElement: Element | null,
+  targetNodeId?: string,
+): boolean {
+  return !!resolvedElement &&
+    !!targetNodeId &&
+    resolvedElement.getAttribute('data-air-node-id') === targetNodeId;
+}
+
 const SELECTOR_RANK_MAP: Record<string, number> = {
   'data-testid': 1,
   id: 2,

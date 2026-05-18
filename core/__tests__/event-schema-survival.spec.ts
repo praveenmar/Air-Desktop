@@ -418,6 +418,66 @@ describe('active-path schema survival', () => {
     ]);
   });
 
+  it('accepts snapshot-backed fingerprint target identity fields', () => {
+    const parsed = AIREventSchema.parse({
+      id: '67676767-6767-4676-8676-676767676768',
+      type: 'click',
+      timestamp: 1_700_000_000_045,
+      sessionId: 'session-67676767-6767-4676-8676-676767676768',
+      fingerprint: {
+        selector: '[data-testid="save-profile"]',
+        selectorPriority: 'data-testid',
+        selectorRank: 1,
+        tagName: 'button',
+        textExcerpt: 'Save Profile',
+        context: {
+          parentTag: 'form',
+          nearestContainerTag: 'main',
+        },
+        attributes: {
+          'data-testid': 'save-profile',
+        },
+        targetNodeId: 'air-node-1',
+        targetIdentitySource: 'pageSnapshot',
+        targetIdentityStatus: 'emitted',
+        attributesHash: 'hash-target-identity',
+      },
+    });
+
+    expect((parsed.fingerprint as Record<string, unknown>)?.targetNodeId).toBe('air-node-1');
+    expect((parsed.fingerprint as Record<string, unknown>)?.targetIdentitySource).toBe('pageSnapshot');
+    expect((parsed.fingerprint as Record<string, unknown>)?.targetIdentityStatus).toBe('emitted');
+  });
+
+  it('rejects invalid fingerprint target identity enums at the schema boundary', () => {
+    const result = AIREventSchema.safeParse({
+      id: '67676767-6767-4676-8676-676767676769',
+      type: 'click',
+      timestamp: 1_700_000_000_045,
+      sessionId: 'session-67676767-6767-4676-8676-676767676769',
+      fingerprint: {
+        selector: '[data-testid="save-profile"]',
+        selectorPriority: 'data-testid',
+        selectorRank: 1,
+        tagName: 'button',
+        textExcerpt: 'Save Profile',
+        context: {
+          parentTag: 'form',
+          nearestContainerTag: 'main',
+        },
+        attributes: {
+          'data-testid': 'save-profile',
+        },
+        targetNodeId: 'air-node-1',
+        targetIdentitySource: 'snapshot',
+        targetIdentityStatus: 'missing',
+        attributesHash: 'hash-invalid-target-identity',
+      },
+    });
+
+    expect(result.success).toBe(false);
+  });
+
   it('treats invalid selectorCandidates as candidate-local failures without rejecting the full event', () => {
     const invalidCandidate = {
       selector: '.candidate',

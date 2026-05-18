@@ -179,6 +179,44 @@ function makeLiveFingerprintHarness(): CustomControlHarness {
   return interceptor;
 }
 
+function makeTargetIdentityHarness(): CustomControlHarness {
+  let counter = 0;
+  const interceptor = Object.create(AIRInterceptor.prototype) as CustomControlHarness;
+  interceptor.config = {
+    sessionId: 'session-11111111-1111-4111-8111-111111111111',
+    capturePageSnapshot: true,
+    snapshotDepth: 3,
+    snapshotMaxTextLength: 5000,
+    snapshotTimeoutMs: 1000,
+    debugMode: false,
+    maxTextLength: 200,
+    snapshotCaptureVueAttrs: true,
+    snapshotCaptureReactAttrs: true,
+  } as any;
+  interceptor.log = vi.fn();
+  interceptor.queueEvent = vi.fn();
+  interceptor.flushQueue = vi.fn();
+  interceptor.generateUUID = () => `20000000-0000-4000-8000-${String(++counter).padStart(12, '0')}`;
+  interceptor.normalizeUrl = (url: string) => {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  };
+  interceptor._openDropdown = null;
+  interceptor._dropdownObserver = null;
+  interceptor._pendingOptionSelection = null;
+  interceptor._pendingOptionSelectionFallbackTimer = null;
+  interceptor.piiPatterns = [];
+  interceptor.activeInputSessions = new Map();
+  interceptor.inputDebounceTimers = new Map();
+  interceptor.recentEventKeys = new Set();
+  interceptor.maxRecentKeys = 100;
+  interceptor.pendingTraceId = null;
+  interceptor.lastActionTraceId = null;
+  interceptor.lastActionTraceAt = null;
+  interceptor._isElementVisible = vi.fn((el: Element | null) => !!el && !el.hasAttribute?.('hidden'));
+  return interceptor;
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -1391,6 +1429,195 @@ describe('selector candidate capture generation', () => {
         visibleMatchCount: 1,
         positionInAllMatches: 1,
         positionInVisibleMatches: 0,
+      }));
+    });
+  });
+});
+
+describe('target identity capture contract', () => {
+  it('emits snapshot-backed targetNodeId for committed input events without mutating live DOM', () => {
+    return withBrowserGlobals(`
+      <form>
+        <input name="username" value="Admin" />
+      </form>
+    `, 'https://example.test/login', () => {
+      const interceptor = makeTargetIdentityHarness();
+      const target = document.querySelector('input') as HTMLInputElement;
+
+      (interceptor as any)._emitInputEvent(target, 'trace-target-id', 'change');
+
+      expect(interceptor.queueEvent).toHaveBeenCalledTimes(1);
+      const event = interceptor.queueEvent.mock.calls[0][0];
+      const parsed = AIREventSchema.parse(event);
+      expect(parsed.fingerprint).toEqual(expect.objectContaining({
+        targetNodeId: 'air-node-1',
+        targetIdentitySource: 'pageSnapshot',
+        targetIdentityStatus: 'emitted',
+      }));
+      expect(parsed.pageSnapshot?.html).toContain('data-air-node-id="air-node-1"');
+      expect(target.getAttribute('data-air-node-id')).toBeNull();
+    });
+  });
+
+  it('resolves text-node targets to their parent element for snapshot-backed identity', () => {
+    return withBrowserGlobals(`
+      <button id="save-button">Save Profile</button>
+    `, 'https://example.test/profile', () => {
+      const interceptor = makeTargetIdentityHarness();
+      const button = document.querySelector('button') as HTMLButtonElement;
+      const textNode = button.firstChild;
+      const targetIdentityCapture = (interceptor as any)._createTargetIdentityCapture(textNode);
+      const snapshot = (interceptor as any)._captureSubtreeSnapshot(textNode, 50000, { targetIdentityCapture });
+      const fingerprint = (interceptor as any).generateFingerprint(textNode, {
+        eventType: 'click',
+        trigger: 'click',
+      });
+      (interceptor as any)._applyTargetIdentityToFingerprint(
+        fingerprint,
+        (interceptor as any)._buildTargetIdentityFromSnapshot(targetIdentityCapture, snapshot, 'pageSnapshot'),
+      );
+
+      expect((interceptor as any).resolveElementTarget(textNode)).toBe(button);
+      expect(fingerprint).toEqual(expect.objectContaining({
+        targetNodeId: 'air-node-1',
+        targetIdentityStatus: 'emitted',
+      }));
+      expect(snapshot.html).toContain('data-air-node-id="air-node-1"');
+    });
+  });
+
+  it('returns target-not-element for unresolved non-element targets without crashing', () => {
+    return withBrowserGlobals(`<div>Shell</div>`, 'https://example.test/profile', () => {
+      const interceptor = makeTargetIdentityHarness();
+      const comment = document.createComment('note');
+      const capture = (interceptor as any)._createTargetIdentityCapture(comment);
+      const result = (interceptor as any)._buildTargetIdentityFromSnapshot(capture, null, 'pageSnapshot');
+
+      expect((interceptor as any).resolveElementTarget(comment)).toBeNull();
+      expect(result).toEqual(expect.objectContaining({
+        targetIdentityStatus: 'target-not-element',
+      }));
+    });
+  });
+
+  it('omits targetNodeId gracefully when the target is detached before snapshot serialization', () => {
+    return withBrowserGlobals(`
+      <button data-testid="delete-row">Delete</button>
+    `, 'https://example.test/users', () => {
+      const interceptor = makeTargetIdentityHarness();
+      const target = document.querySelector('button') as HTMLButtonElement;
+      target.remove();
+
+      const targetIdentityCapture = (interceptor as any)._createTargetIdentityCapture(target);
+      const snapshot = (interceptor as any)._captureSubtreeSnapshot(target, 50000, { targetIdentityCapture });
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'click',
+        trigger: 'click',
+      });
+      (interceptor as any)._applyTargetIdentityToFingerprint(
+        fingerprint,
+        (interceptor as any)._buildTargetIdentityFromSnapshot(targetIdentityCapture, snapshot, 'pageSnapshot'),
+      );
+
+      expect(snapshot).not.toBeNull();
+      expect(snapshot.html).not.toContain('data-air-node-id=');
+      expect(fingerprint.targetNodeId).toBeUndefined();
+      expect(fingerprint.targetIdentityStatus).toBe('target-detached');
+    });
+  });
+
+  it('stamps SVG element targets safely in serialized subtree snapshots', () => {
+    return withBrowserGlobals(`
+      <svg viewBox="0 0 10 10">
+        <path class="chart-point" d="M0 0 L10 10"></path>
+      </svg>
+    `, 'https://example.test/charts', () => {
+      const interceptor = makeTargetIdentityHarness();
+      const target = document.querySelector('path') as SVGPathElement;
+      const targetIdentityCapture = (interceptor as any)._createTargetIdentityCapture(target);
+      const snapshot = (interceptor as any)._captureSubtreeSnapshot(target, 50000, { targetIdentityCapture });
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'click',
+        trigger: 'click',
+      });
+      (interceptor as any)._applyTargetIdentityToFingerprint(
+        fingerprint,
+        (interceptor as any)._buildTargetIdentityFromSnapshot(targetIdentityCapture, snapshot, 'pageSnapshot'),
+      );
+
+      expect(snapshot.html).toContain('data-air-node-id="air-node-1"');
+      expect(fingerprint.targetNodeId).toBe('air-node-1');
+      expect(fingerprint.targetIdentityStatus).toBe('emitted');
+    });
+  });
+
+  it('stamps the actual captured label element without remapping to its control', () => {
+    return withBrowserGlobals(`
+      <label for="terms">I agree</label>
+      <input id="terms" type="checkbox" />
+    `, 'https://example.test/forms', () => {
+      const interceptor = makeTargetIdentityHarness();
+      const target = document.querySelector('label') as HTMLLabelElement;
+      const targetIdentityCapture = (interceptor as any)._createTargetIdentityCapture(target);
+      const snapshot = (interceptor as any)._captureSubtreeSnapshot(target, 50000, { targetIdentityCapture });
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'click',
+        trigger: 'click',
+      });
+      (interceptor as any)._applyTargetIdentityToFingerprint(
+        fingerprint,
+        (interceptor as any)._buildTargetIdentityFromSnapshot(targetIdentityCapture, snapshot, 'pageSnapshot'),
+      );
+
+      expect(snapshot.html).toContain('<label');
+      expect(snapshot.html).toContain('data-air-node-id="air-node-1"');
+      expect(snapshot.html).not.toContain('<input id="terms" type="checkbox" data-air-node-id="air-node-1"');
+      expect(fingerprint.targetNodeId).toBe('air-node-1');
+    });
+  });
+
+  it('does not fabricate identity for open shadow targets when the full-page snapshot does not serialize shadow internals', async () => {
+    await withBrowserGlobals(`
+      <div id="shadow-host"></div>
+    `, 'https://example.test/shadow', async () => {
+      const interceptor = makeTargetIdentityHarness();
+      const host = document.querySelector('#shadow-host') as HTMLDivElement;
+      const shadowRoot = host.attachShadow({ mode: 'open' });
+      shadowRoot.innerHTML = `<button id="shadow-save">Save</button>`;
+      const target = shadowRoot.querySelector('button') as HTMLButtonElement;
+      const targetIdentityCapture = (interceptor as any)._createTargetIdentityCapture(target);
+      const snapshot = await (interceptor as any).capturePageSnapshot(2, true, { targetIdentityCapture });
+      const fingerprint = (interceptor as any).generateFingerprint(target, {
+        eventType: 'click',
+        trigger: 'click',
+      });
+      (interceptor as any)._applyTargetIdentityToFingerprint(
+        fingerprint,
+        (interceptor as any)._buildTargetIdentityFromSnapshot(targetIdentityCapture, snapshot, 'pageSnapshot'),
+      );
+
+      expect(snapshot?.html).not.toContain('data-air-node-id=');
+      expect(fingerprint.targetNodeId).toBeUndefined();
+      expect(fingerprint.targetIdentityStatus).toBe('shadow-not-serialized');
+    });
+  });
+
+  it('reports cross-origin-frame when nested context proves iframe DOM is inaccessible', () => {
+    return withBrowserGlobals(`
+      <iframe src="https://example.test/remote"></iframe>
+    `, 'https://example.test/frame-host', () => {
+      const interceptor = makeTargetIdentityHarness();
+      const target = document.querySelector('iframe') as HTMLIFrameElement;
+      const targetIdentityCapture = (interceptor as any)._createTargetIdentityCapture(target, {
+        nestedContext: {
+          isIframe: true,
+          iframeSameOrigin: false,
+        },
+      });
+      const result = (interceptor as any)._buildTargetIdentityFromSnapshot(targetIdentityCapture, null, 'pageSnapshot');
+
+      expect(result).toEqual(expect.objectContaining({
+        targetIdentityStatus: 'cross-origin-frame',
       }));
     });
   });

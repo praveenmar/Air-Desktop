@@ -1095,6 +1095,48 @@ describe('CodegenService - Step Metadata Preservation', () => {
     ]);
   });
 
+  it('buildSession preserves snapshot-backed target identity fields and mirrors targetNodeId onto the step', () => {
+    const eventPayload = JSON.stringify({
+      normalizedUrl: 'https://app.test/login',
+      fingerprint: {
+        selector: '[name="username"]',
+        selectorPriority: 'attribute',
+        selectorRank: 3,
+        tagName: 'input',
+        textExcerpt: null,
+        context: {
+          parentTag: 'form',
+          nearestContainerTag: 'form',
+        },
+        attributes: {
+          name: 'username',
+        },
+        targetNodeId: 'air-node-1',
+        targetIdentitySource: 'pageSnapshot',
+        targetIdentityStatus: 'emitted',
+        attributesHash: 'target-identity-hash',
+      },
+    });
+
+    const session = buildSessionFromEventRows([{
+      eventId: 'ev-target-identity',
+      eventType: 'input',
+      timestamp: 1_700_000_000_100,
+      pageUrl: 'https://app.test/login',
+      traceId: 'trace-target-identity',
+      nodeId: 'node-1',
+      payload: eventPayload,
+    }]);
+
+    expect(session.steps).toHaveLength(1);
+    expect(session.steps[0].fingerprint).toEqual(expect.objectContaining({
+      targetNodeId: 'air-node-1',
+      targetIdentitySource: 'pageSnapshot',
+      targetIdentityStatus: 'emitted',
+    }));
+    expect(session.steps[0].targetNodeId).toBe('air-node-1');
+  });
+
   it('buildSession caps selectorCandidates at 8 and dedupes by engine + family + selector', () => {
     const selectorCandidates = [
       {

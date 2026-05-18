@@ -162,6 +162,24 @@ export const AccessibilityEvidenceSchema = z.object({
 }).passthrough();
 export type AccessibilityEvidence = z.infer<typeof AccessibilityEvidenceSchema>;
 
+export const TargetIdentitySourceSchema = z.enum([
+  'pageState',
+  'pageSnapshot',
+  'interactionContext',
+]);
+export type TargetIdentitySource = z.infer<typeof TargetIdentitySourceSchema>;
+
+export const TargetIdentityStatusSchema = z.enum([
+  'emitted',
+  'target-not-element',
+  'target-detached',
+  'target-not-in-snapshot',
+  'shadow-not-serialized',
+  'cross-origin-frame',
+  'unsupported',
+]);
+export type TargetIdentityStatus = z.infer<typeof TargetIdentityStatusSchema>;
+
 /** Compact fingerprint for an element (4-layer identification) */
 export const ElementFingerprintSchema = z.object({
   selector: z.string(),
@@ -177,5 +195,8 @@ export const ElementFingerprintSchema = z.object({
   boundedFieldContext: BoundedFieldContextSchema.optional(),
   accessibilityEvidence: AccessibilityEvidenceSchema.optional(),
   attributesHash: z.string(),
+  targetNodeId: z.string().trim().min(1).optional(),
+  targetIdentitySource: TargetIdentitySourceSchema.optional(),
+  targetIdentityStatus: TargetIdentityStatusSchema.optional(),
 }).passthrough();
 export type ElementFingerprint = z.infer<typeof ElementFingerprintSchema>;
