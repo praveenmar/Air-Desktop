@@ -4,6 +4,11 @@ import * as http from 'http';
 import { ZodError } from 'zod';
 import { GraphBuilder } from '../../core/graph/graph-builder';
 import { AIREventSchema } from '../../core/types';
+import {
+  isSelectorDiagnosticsEnabled,
+  SelectorCaptureDiagnosticsWriter,
+  type SelectorCaptureDiagnosticsWriterLike,
+} from '../../core/diagnostics/selector-capture-diagnostics';
 
 export interface EventServerExtraHandler {
   (req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> | boolean;
@@ -12,6 +17,7 @@ export interface EventServerExtraHandler {
 export interface EventServerOptions {
   getActiveSessionId: () => string | null;
   extraHandler?: EventServerExtraHandler;
+  selectorDiagnosticsWriter?: SelectorCaptureDiagnosticsWriterLike;
 }
 
 export class EventServer {
@@ -19,6 +25,7 @@ export class EventServer {
   private port = 0;
   private activeSessionIdGetter: () => string | null;
   private extraHandler?: EventServerExtraHandler;
+  private selectorDiagnosticsWriter: SelectorCaptureDiagnosticsWriterLike | null = null;
 
   constructor(
     private graphBuilder: GraphBuilder,
@@ -30,6 +37,7 @@ export class EventServer {
     } else {
       this.activeSessionIdGetter = activeSessionIdGetterOrOptions.getActiveSessionId;
       this.extraHandler = activeSessionIdGetterOrOptions.extraHandler;
+      this.selectorDiagnosticsWriter = activeSessionIdGetterOrOptions.selectorDiagnosticsWriter ?? null;
     }
 
     this.server = http.createServer((req, res) => {
@@ -170,6 +178,23 @@ export class EventServer {
     });
   }
 
+  private writeSelectorDiagnostics(event: ReturnType<typeof AIREventSchema.parse>): void {
+    if (!this.selectorDiagnosticsWriter && isSelectorDiagnosticsEnabled()) {
+      this.selectorDiagnosticsWriter = new SelectorCaptureDiagnosticsWriter();
+    }
+    if (!this.selectorDiagnosticsWriter) return;
+
+    try {
+      this.selectorDiagnosticsWriter.writeEventDiagnostic(event);
+    } catch (error) {
+      console.warn('[EventServer] Selector diagnostics writer failed', {
+        eventId: event.id,
+        type: event.type,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     try {
       this.setCorsHeaders(req, res);
@@ -293,6 +318,7 @@ export class EventServer {
         }
 
         try {
+          this.writeSelectorDiagnostics(parsedEvent);
           console.log('[EventServer] [EVENT_RECEIVED]', { eventId: parsedEvent.id, type: parsedEvent.type });
           const result = await this.graphBuilder.processEvent(parsedEvent);
           if (!result.success) {
@@ -365,6 +391,7 @@ export class EventServer {
       return;
     }
 
+    this.writeSelectorDiagnostics(parsedEvent);
     console.log('[EventServer] [EVENT_RECEIVED]', { eventId: parsedEvent.id, type: parsedEvent.type });
 
     try {

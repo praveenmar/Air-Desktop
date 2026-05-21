@@ -316,6 +316,30 @@ describe('selector-resolver', () => {
     expect(classifySelectorCategory('//button[@id="submit"]', 'original')).toBe('xpath');
   });
 
+  it('classifies :has-text selectors as text and keeps them off plain CSS direct evidence paths', () => {
+    const searchButton = makeElement({}, { tagName: 'BUTTON', text: 'Search' });
+    const snapshot = makeDocument({
+      button: [searchButton],
+      '*': [searchButton],
+    });
+
+    const category = classifySelectorCategory('button:has-text("Search")', 'text');
+
+    expect(category).toBe('text');
+    expect([
+      'testid',
+      'data-cy',
+      'data-qa',
+      'id',
+      'name',
+      'href',
+      'placeholder',
+      'aria-label',
+    ]).not.toContain(category);
+    expect(validateCSSCandidate('button:has-text("Search")', snapshot).reason).toBe('invalid-selector');
+    expect(validateTextCandidate('button:has-text("Search")', snapshot).reason).toBe('unique-visible');
+  });
+
   it('prefers proven testid over weaker class selector when both are valid', () => {
     const submit = makeElement(
       { 'data-testid': 'submit-btn', class: 'btn btn-primary' },
@@ -1266,6 +1290,69 @@ describe('selector-resolver', () => {
     expect(scoreResolvedCandidate(step, snapshot, '#addressLine2').score).toBeGreaterThanOrEqual(0.65);
   });
 
+  it('penalizes runtime, framework, css-hash, and opaque generated IDs below stable semantic IDs', () => {
+    const stableIds = ['login-email', 'submit-button'] as const;
+    const dynamicIds = [
+      'radix-:R2H1:',
+      'headlessui-menu-button-1',
+      ':r1:',
+      'user-7f4c2f31-1e1a-4bd4-a1a2-99f9f6a5f123',
+      'css-1x2y3z4a',
+      'sc-kxYz12',
+      'account-1234567890',
+    ] as const;
+
+    const stableScores = stableIds.map(id => {
+      const element = makeElement({ id }, { tagName: 'INPUT', id });
+      const step = makeStep(1, {
+        selector: '.field-input',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        action: 'input',
+        fingerprint: {
+          selector: '.field-input',
+          selectorPriority: 'class',
+          selectorRank: 7,
+          tagName: 'input',
+          attributes: { id },
+        },
+      });
+      const snapshot = makeDocument({
+        '.field-input': [element],
+        [`[id="${id}"]`]: [element],
+        '*': [element],
+      });
+
+      return scoreResolvedCandidate(step, snapshot, `[id="${id}"]`).score;
+    });
+
+    const semanticFloor = Math.min(...stableScores);
+    expect(semanticFloor).toBeGreaterThanOrEqual(0.65);
+
+    for (const id of dynamicIds) {
+      const element = makeElement({ id }, { tagName: 'DIV', id });
+      const step = makeStep(1, {
+        selector: '.generated-item',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        fingerprint: {
+          selector: '.generated-item',
+          selectorPriority: 'class',
+          selectorRank: 7,
+          tagName: 'div',
+          attributes: { id },
+        },
+      });
+      const snapshot = makeDocument({
+        '.generated-item': [element],
+        [`[id="${id}"]`]: [element],
+        '*': [element],
+      });
+
+      expect(scoreResolvedCandidate(step, snapshot, `[id="${id}"]`).score).toBeLessThan(semanticFloor);
+    }
+  });
+
   it('gives readable fingerprint-aligned IDs a small bonus', () => {
     const usernameInput = makeElement(
       { id: 'usernameField', name: 'username' },
@@ -1562,6 +1649,91 @@ describe('selector-resolver', () => {
 
     expect(scoreExplicitCandidate(bemStep, bemSnapshot, '.user-menu__logout', 'class', 7))
       .toBeGreaterThan(scoreExplicitCandidate(frameworkStep, frameworkSnapshot, '.oxd-main-menu-item', 'class', 7));
+  });
+
+  it('penalizes css-in-js, hashed, state, and framework classes below semantic BEM-style classes', () => {
+    const semanticClass = 'login-form__email-input';
+    const controlClass = 'checkout-button--primary';
+    const riskyClasses = [
+      'css-abc123',
+      'sc-kxYz12',
+      'k9Lm8Np7qX',
+      'is-active',
+      '--selected',
+      'data-state-open',
+      'mui-button-root',
+      'radix-dropdown-trigger',
+      'headlessui-button',
+    ] as const;
+
+    const semanticElement = makeElement({ class: `${semanticClass} ${controlClass}` }, { tagName: 'BUTTON' });
+    const semanticSnapshot = makeDocument({
+      '.target': [semanticElement],
+      [`.${semanticClass}`]: [semanticElement],
+      [`.${controlClass}`]: [semanticElement],
+      '*': [semanticElement],
+    });
+    const semanticStep = makeStep(1, {
+      selector: '.target',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      intent: 'click_checkout_button',
+      fingerprint: {
+        selector: '.target',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'button',
+        textExcerpt: 'Checkout',
+        attributes: {
+          class: `${semanticClass} ${controlClass}`,
+          name: 'checkout',
+        },
+      },
+    });
+
+    const semanticScore = scoreExplicitCandidate(
+      semanticStep,
+      semanticSnapshot,
+      `.${semanticClass}`,
+      'class',
+      7,
+    );
+    const controlScore = scoreExplicitCandidate(
+      semanticStep,
+      semanticSnapshot,
+      `.${controlClass}`,
+      'class',
+      7,
+    );
+
+    expect(controlScore).toBeGreaterThanOrEqual(semanticScore - 0.05);
+
+    for (const classToken of riskyClasses) {
+      const element = makeElement({ class: classToken }, { tagName: 'BUTTON' });
+      const snapshot = makeDocument({
+        '.target': [element],
+        [`.${classToken}`]: [element],
+        '*': [element],
+      });
+      const step = makeStep(1, {
+        selector: '.target',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        intent: 'click_checkout_button',
+        fingerprint: {
+          selector: '.target',
+          selectorPriority: 'class',
+          selectorRank: 7,
+          tagName: 'button',
+          textExcerpt: 'Checkout',
+          attributes: {
+            class: classToken,
+          },
+        },
+      });
+
+      expect(scoreExplicitCandidate(step, snapshot, `.${classToken}`, 'class', 7)).toBeLessThan(controlScore);
+    }
   });
 
   it('class-only selector remains available if no better truth exists', async () => {

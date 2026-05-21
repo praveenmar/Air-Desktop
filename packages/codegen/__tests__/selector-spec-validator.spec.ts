@@ -50,6 +50,60 @@ describe('selector spec validator', () => {
     expect(validation.effectiveMatchCount).toBe(1);
   });
 
+  it.each([
+    {
+      title: 'data-testid with embedded double quotes',
+      html: `<button data-testid='save-"draft"'>Save</button>`,
+      selector: `[data-testid="save-\\"draft\\""]`,
+    },
+    {
+      title: 'aria-label with embedded double quotes',
+      html: `<button aria-label='Save "Draft"'>Save</button>`,
+      selector: `[aria-label="Save \\"Draft\\""]`,
+    },
+    {
+      title: 'name with square brackets',
+      html: `<input name="user[email]" />`,
+      selector: `input[name="user[email]"]`,
+    },
+    {
+      title: 'placeholder with apostrophe',
+      html: `<input placeholder="What's your name?" />`,
+      selector: `input[placeholder="What's your name?"]`,
+    },
+    {
+      title: 'data-testid containing a closing bracket',
+      html: `<button data-testid="invite]user">Invite</button>`,
+      selector: `[data-testid="invite]user"]`,
+    },
+    {
+      title: 'data-testid containing an apostrophe',
+      html: `<button data-testid="author's-choice">Choose</button>`,
+      selector: `[data-testid="author's-choice"]`,
+    },
+    {
+      title: 'data-testid containing a backslash',
+      html: `<button data-testid="path\\to\\field">Open</button>`,
+      selector: `[data-testid="path\\\\to\\\\field"]`,
+    },
+    {
+      title: 'data-testid containing newline escapes',
+      html: `<button data-testid="line1&#10;line2">Open</button>`,
+      selector: `[data-testid="line1\\A line2"]`,
+    },
+  ])('keeps escaped attribute selector validation safe for $title', ({ html, selector }) => {
+    const snapshot = makeDocument(`<div>${html}</div>`);
+    const spec = buildSelectorSpec({
+      selector,
+      source: 'resolver',
+      proofLevel: 'snapshot_validated',
+    });
+
+    const validation = validateSelectorSpec(spec, snapshot);
+    expect(validation.reason).toBe('unique-visible');
+    expect(validation.effectiveMatchCount).toBe(1);
+  });
+
   it('validates a scoped selector when the parent has one visible child target', () => {
     const snapshot = makeDocument(`
       <div data-testid="username-field">

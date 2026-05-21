@@ -40,11 +40,33 @@ export function isTextSelector(selector: string): boolean {
   return trimmed.startsWith('text=') || /:has-text\((?:"[^"]*"|'[^']*')\)/i.test(trimmed);
 }
 
+function decodeCssStringLiteral(value: string): string {
+  const escapedBackslashSentinel = '\uE000';
+  const invalidCssEscapeSentinel = '\uE001';
+  const invalidCssEscapes: string[] = [];
+  return value
+    .replace(/\\\\/g, escapedBackslashSentinel)
+    .replace(/\\([0-9a-f]{1,6})\s?/gi, (match, hex: string) => {
+      const codePoint = parseInt(hex, 16);
+      if (!Number.isFinite(codePoint) || codePoint < 0 || codePoint > 0x10ffff) {
+        const index = invalidCssEscapes.push(match) - 1;
+        return `${invalidCssEscapeSentinel}${index}${invalidCssEscapeSentinel}`;
+      }
+      return String.fromCodePoint(codePoint);
+    })
+    .replace(/\\(.)/g, '$1')
+    .replace(new RegExp(`${invalidCssEscapeSentinel}(\\d+)${invalidCssEscapeSentinel}`, 'g'), (_match, index: string) =>
+      invalidCssEscapes[Number(index)] ?? '',
+    )
+    .replace(new RegExp(escapedBackslashSentinel, 'g'), '\\');
+}
+
 export function extractAttributeValue(selector: string, attribute: string): string | null {
   const escaped = attribute.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = selector.match(new RegExp(`\\[${escaped}=(?:"([^"]*)"|'([^']*)')\\]`, 'i'));
+  const match = selector.match(new RegExp(`\\[${escaped}=(?:"((?:\\\\.|[^"\\\\])*)"|'((?:\\\\.|[^'\\\\])*)')\\]`, 'i'));
   if (!match) return null;
-  return match[1] ?? match[2] ?? null;
+  const rawValue = match[1] ?? match[2] ?? null;
+  return rawValue == null ? null : decodeCssStringLiteral(rawValue);
 }
 
 export function extractId(selector: string): string | null {
