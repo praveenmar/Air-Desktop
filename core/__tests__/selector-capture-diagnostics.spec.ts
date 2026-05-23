@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { AIREventSchema, type AIREvent } from '../types/events';
 import {
   buildSelectorCaptureDiagnostic,
+  isSelectorDiagnosticsEnabled,
   resolveSelectorCaptureDiagnosticPath,
   SelectorCaptureDiagnosticsWriter,
 } from '../diagnostics/selector-capture-diagnostics';
@@ -179,6 +180,7 @@ describe('selector capture diagnostics', () => {
       sessionId: 'session-33333333-3333-4333-8333-333333333333',
       eventId: '11111111-1111-4111-8111-111111111111',
       eventType: 'click',
+      normalizedUrl: 'https://example.com/login',
       frameContext: 'main',
       captureVersion: 'air:v2',
       target: expect.objectContaining({
@@ -201,9 +203,12 @@ describe('selector capture diagnostics', () => {
       }),
       snapshot: expect.objectContaining({
         hasSnapshot: true,
+        hasPageSnapshot: true,
+        hasPageState: true,
         source: 'pageSnapshot',
         snapshotStage: 'subtree-snapshot',
         htmlChars: expect.any(Number),
+        htmlBytes: expect.any(Number),
         containsTargetNodeId: true,
         rootTagName: 'DIV',
         rootClass: 'oxd-input-group',
@@ -228,6 +233,43 @@ describe('selector capture diagnostics', () => {
     expect(JSON.stringify(diagnostic)).not.toContain('hunter2');
     expect(JSON.stringify(diagnostic)).not.toContain('secret-password-value');
     expect((diagnostic as any)?.snapshot?.html).toBeUndefined();
+  });
+
+  it('accepts true, 1, and yes as enabled selector diagnostics flag values', () => {
+    expect(isSelectorDiagnosticsEnabled({ AIR_SELECTOR_DIAGNOSTICS: 'true' } as NodeJS.ProcessEnv)).toBe(true);
+    expect(isSelectorDiagnosticsEnabled({ AIR_SELECTOR_DIAGNOSTICS: '1' } as NodeJS.ProcessEnv)).toBe(true);
+    expect(isSelectorDiagnosticsEnabled({ AIR_SELECTOR_DIAGNOSTICS: 'yes' } as NodeJS.ProcessEnv)).toBe(true);
+    expect(isSelectorDiagnosticsEnabled({ AIR_SELECTOR_DIAGNOSTICS: 'false' } as NodeJS.ProcessEnv)).toBe(false);
+  });
+
+  it('sanitizes session id characters in diagnostic filenames', () => {
+    const outputPath = resolveSelectorCaptureDiagnosticPath(
+      'session:/\\:*?"<>|unsafe',
+      'E:\\Air Desktop',
+    );
+
+    expect(outputPath).toContain('session__________unsafe.jsonl');
+  });
+
+  it('exposes normalizedUrl and snapshot presence booleans even when pageState is missing', () => {
+    const diagnostic = buildSelectorCaptureDiagnostic(buildClickEvent({
+      normalizedUrl: 'https://example.com/login?normalized=true',
+      pageState: undefined,
+    }));
+
+    expect(diagnostic?.normalizedUrl).toBe('https://example.com/login?normalized=true');
+    expect(diagnostic?.snapshot.hasPageSnapshot).toBe(true);
+    expect(diagnostic?.snapshot.hasPageState).toBe(false);
+  });
+
+  it('computes snapshot htmlBytes from the selected snapshot html', () => {
+    const html = '<div class="oxd-input-group"><input data-air-node-id="air-node-1" /></div>';
+    const diagnostic = buildSelectorCaptureDiagnostic(buildClickEvent({
+      pageSnapshot: buildSnapshot(html, { subtree: true }),
+      pageState: undefined,
+    }));
+
+    expect(diagnostic?.snapshot.htmlBytes).toBe(Buffer.byteLength(html, 'utf8'));
   });
 
   it('skips non-committed input heartbeats', () => {
@@ -323,5 +365,31 @@ describe('selector capture diagnostics', () => {
     expect(() => writer.writeEventDiagnostic(buildClickEvent())).not.toThrow();
     expect(writer.writeEventDiagnostic(buildClickEvent())).toBe(false);
     expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it('logs write failure only once per session', () => {
+    const logger = { log: vi.fn(), warn: vi.fn() };
+    const writer = new SelectorCaptureDiagnosticsWriter({
+      enabled: true,
+      rootDir: path.join(os.tmpdir(), 'air-selector-diagnostics-fail-once'),
+      fsImpl: {
+        mkdirSync: vi.fn(),
+        appendFileSync: vi.fn(() => {
+          throw new Error('disk full');
+        }),
+      },
+      logger,
+    });
+
+    expect(writer.writeEventDiagnostic(buildClickEvent())).toBe(false);
+    expect(writer.writeEventDiagnostic(buildClickEvent({
+      id: '77777777-7777-4777-8777-777777777777',
+      timestamp: 1730000002000,
+    }))).toBe(false);
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('write failed for session session-33333333-3333-4333-8333-333333333333'),
+    );
   });
 });

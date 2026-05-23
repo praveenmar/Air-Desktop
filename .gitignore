@@ -44,3 +44,5 @@ tests/
 air-*.json 
 tmp/
 interceptor logs.txt
+
+/docs

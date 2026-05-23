@@ -39,6 +39,7 @@ export interface SelectorCaptureDiagnostic {
   traceId: string | null;
   tabId: string | null;
   url: string | null;
+  normalizedUrl: string | null;
   eventType: AIREvent['type'];
   trigger?: string | null;
   viewport?: { width: number; height: number } | null;
@@ -98,9 +99,12 @@ export interface SelectorCaptureDiagnostic {
   };
   snapshot: {
     hasSnapshot: boolean;
+    hasPageSnapshot: boolean;
+    hasPageState: boolean;
     source: SnapshotSourceKind;
     snapshotStage?: string | null;
     htmlChars: number;
+    htmlBytes?: number;
     containsTargetNodeId: boolean;
     rootTagName: string | null;
     rootId: string | null;
@@ -339,7 +343,8 @@ function eventPayloadByteLength(event: AIREvent): number {
 }
 
 export function isSelectorDiagnosticsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env[SELECTOR_DIAGNOSTICS_ENV_KEY] === 'true';
+  const value = env[SELECTOR_DIAGNOSTICS_ENV_KEY];
+  return value === 'true' || value === '1' || value === 'yes';
 }
 
 export function shouldCaptureSelectorDiagnostic(event: AIREvent): boolean {
@@ -348,7 +353,8 @@ export function shouldCaptureSelectorDiagnostic(event: AIREvent): boolean {
 }
 
 export function resolveSelectorCaptureDiagnosticPath(sessionId: string, rootDir = DEFAULT_OUTPUT_ROOT): string {
-  return path.resolve(rootDir, '.air', 'diagnostics', 'selector-capture', `${sessionId}.jsonl`);
+  const safeSessionId = sessionId.replace(/[\\/:*?"<>|]/g, '_');
+  return path.resolve(rootDir, '.air', 'diagnostics', 'selector-capture', `${safeSessionId}.jsonl`);
 }
 
 export function buildSelectorCaptureDiagnostic(event: AIREvent): SelectorCaptureDiagnostic | null {
@@ -390,6 +396,7 @@ export function buildSelectorCaptureDiagnostic(event: AIREvent): SelectorCapture
     traceId: event.traceId ?? null,
     tabId: event.tabId ?? null,
     url: event.pageUrl ?? snapshotSelection.snapshot?.url ?? null,
+    normalizedUrl: event.normalizedUrl ?? snapshotSelection.snapshot?.normalizedUrl ?? null,
     eventType: event.type,
     trigger: deriveTrigger(event),
     viewport: deriveViewport(event),
@@ -425,9 +432,12 @@ export function buildSelectorCaptureDiagnostic(event: AIREvent): SelectorCapture
     accessibilityEvidence,
     snapshot: {
       hasSnapshot: !!snapshotSelection.snapshot?.html,
+      hasPageSnapshot: !!(event as { pageSnapshot?: unknown }).pageSnapshot,
+      hasPageState: !!(event as { pageState?: unknown }).pageState,
       source: snapshotSelection.source,
       snapshotStage: extractSnapshotStage(snapshotSelection.snapshot, snapshotSelection.source),
       htmlChars: snapshotHtml.length,
+      htmlBytes: snapshotHtml ? Buffer.byteLength(snapshotHtml, 'utf8') : undefined,
       containsTargetNodeId: containsTargetNodeId(snapshotHtml, targetNodeId),
       rootTagName: snapshotRoot.rootTagName,
       rootId: snapshotRoot.rootId,
@@ -445,6 +455,7 @@ export class SelectorCaptureDiagnosticsWriter implements SelectorCaptureDiagnost
   private readonly rootDir: string;
   private readonly fsImpl: SelectorCaptureDiagnosticsFs;
   private readonly logger: SelectorCaptureDiagnosticsLogger;
+  private readonly warnedSessions = new Set<string>();
 
   constructor(options: SelectorCaptureDiagnosticsWriterOptions = {}) {
     this.enabled = options.enabled ?? isSelectorDiagnosticsEnabled(options.env);
@@ -469,7 +480,12 @@ export class SelectorCaptureDiagnosticsWriter implements SelectorCaptureDiagnost
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn(`[AIR_SELECTOR_DIAGNOSTIC] failed event=${event.id} error=${message}`);
+      if (!this.warnedSessions.has(diagnostic.sessionId)) {
+        this.logger.warn(
+          `[AIR_SELECTOR_DIAGNOSTIC] write failed for session ${diagnostic.sessionId} – further errors suppressed. First error: ${message}`,
+        );
+        this.warnedSessions.add(diagnostic.sessionId);
+      }
       return false;
     }
   }
