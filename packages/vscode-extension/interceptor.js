@@ -561,6 +561,12 @@ class AIRInterceptor {
       projectId: config.projectId || "default",
       maxTextLength: config.maxTextLength || 50,
       debugMode: config.debugMode || false,
+      selectorEngineShadowMode:
+        window.__AIR_CONFIG__?.selectorEngineShadowMode ?? config.selectorEngineShadowMode ?? true,
+      selectorEngineShadowLogDiffs:
+        window.__AIR_CONFIG__?.selectorEngineShadowLogDiffs ?? config.selectorEngineShadowLogDiffs ?? true,
+      selectorEngineShadowMaxCandidates:
+        window.__AIR_CONFIG__?.selectorEngineShadowMaxCandidates ?? config.selectorEngineShadowMaxCandidates ?? 12,
       batchSize: config.batchSize || 10,
       batchInterval: config.batchInterval || 2000,
       corsEnabled: config.corsEnabled ?? true,
@@ -6563,6 +6569,21 @@ class AIRInterceptor {
       selectorCandidates = undefined;
     }
 
+    try {
+      this._runSelectorEngineShadowComparison(
+        element,
+        selectorResult,
+        eventContext,
+        selectorCandidates,
+      );
+    } catch (error) {
+      this.log("SELECTOR_ENGINE_SHADOW_FAILED", {
+        eventType: typeof eventContext?.eventType === "string" ? eventContext.eventType : null,
+        trigger: typeof eventContext?.trigger === "string" ? eventContext.trigger : null,
+        message: error?.message || String(error),
+      });
+    }
+
     if (this.config.debugMode) {
       console.log("Selector generated:", selectorResult.selector);
       console.log("Priority:", selectorResult.priority);
@@ -6740,6 +6761,65 @@ class AIRInterceptor {
     }
 
     return candidates.length > 0 ? candidates : undefined;
+  }
+
+  _getSelectorEngineShadowApi() {
+    try {
+      return window.__AIR_SELECTOR_ENGINE__ || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _summarizeSelectorEngineCandidates(candidates) {
+    if (!Array.isArray(candidates)) return [];
+    return candidates.map((candidate) => ({
+      selector: typeof candidate?.selector === "string" ? candidate.selector : null,
+      family: typeof candidate?.family === "string" ? candidate.family : null,
+      engine: typeof candidate?.engine === "string" ? candidate.engine : null,
+      strength: typeof candidate?.strength === "string" ? candidate.strength : null,
+      matchCount: typeof candidate?.matchCount === "number" ? candidate.matchCount : null,
+      visibleMatchCount:
+        typeof candidate?.visibleMatchCount === "number" ? candidate.visibleMatchCount : null,
+      warningCodes: Array.isArray(candidate?.warningCodes) ? candidate.warningCodes : [],
+    }));
+  }
+
+  _runSelectorEngineShadowComparison(element, selectorResult, eventContext, currentCandidates) {
+    if (!this.config?.selectorEngineShadowMode) return;
+
+    const selectorEngine = this._getSelectorEngineShadowApi();
+    if (!selectorEngine || typeof selectorEngine.collectShadowSelectorCandidates !== "function") {
+      return;
+    }
+
+    const shadowCandidates = selectorEngine.collectShadowSelectorCandidates({
+      element,
+      selectorResult,
+      eventContext,
+      maxCandidates: Number(this.config?.selectorEngineShadowMaxCandidates) || 12,
+    });
+
+    if (!Array.isArray(shadowCandidates)) return;
+
+    const currentSummary = this._summarizeSelectorEngineCandidates(currentCandidates);
+    const shadowSummary = this._summarizeSelectorEngineCandidates(shadowCandidates);
+    const currentSignature = JSON.stringify(currentSummary);
+    const shadowSignature = JSON.stringify(shadowSummary);
+
+    if (currentSignature === shadowSignature) return;
+    if (!this.config?.selectorEngineShadowLogDiffs) return;
+
+    this.log("SELECTOR_ENGINE_SHADOW_DIFF", {
+      eventType: typeof eventContext?.eventType === "string" ? eventContext.eventType : null,
+      trigger: typeof eventContext?.trigger === "string" ? eventContext.trigger : null,
+      primarySelector: typeof selectorResult?.selector === "string" ? selectorResult.selector : null,
+      currentCandidates: currentSummary,
+      shadowCandidates: shadowSummary,
+      sessionId: this.config?.sessionId || null,
+      tabId: this.config?.tabId || null,
+      selectorEngineVersion: typeof selectorEngine?.version === "string" ? selectorEngine.version : null,
+    });
   }
 
   _buildPrimarySelectorCandidate(element, selectorResult) {

@@ -6,14 +6,11 @@ const externalDeps = ['vscode', 'playwright'];
 
 async function build() {
   try {
-    // Ensure dist directories exist
     fs.mkdirSync(path.join(__dirname, 'dist'), { recursive: true });
     fs.mkdirSync(path.join(__dirname, 'dist', 'server'), { recursive: true });
 
-    // 1. Build VS Code Extension Host
-    // 1. Build VS Code Extension Host
     await esbuild.build({
-      entryPoints: ['src/extension.ts'], // Update this from 'extension.ts' to 'src/extension.ts'
+      entryPoints: ['src/extension.ts'],
       bundle: true,
       outfile: 'dist/extension.js',
       external: externalDeps,
@@ -23,9 +20,8 @@ async function build() {
     });
     console.log('[AIR-DEBUG] Extension built.');
 
-    // 2. Build Background Node Server
     await esbuild.build({
-      entryPoints: ['server-entry.ts'], // This stays the same as it is in the root
+      entryPoints: ['server-entry.ts'],
       bundle: true,
       outfile: 'dist/server/index.js',
       external: externalDeps,
@@ -35,10 +31,20 @@ async function build() {
     });
     console.log('[AIR-DEBUG] Server built.');
 
-    // 3. Copy Interceptor — check multiple candidate locations
+    await esbuild.build({
+      entryPoints: [path.join(__dirname, 'interceptor', 'selector-engine', 'index.js')],
+      bundle: true,
+      outfile: path.join(__dirname, 'dist', 'interceptor-selector-engine.js'),
+      platform: 'browser',
+      format: 'iife',
+      target: ['chrome100'],
+      sourcemap: false,
+    });
+    console.log('[AIR-DEBUG] Interceptor selector engine bundle built.');
+
     const interceptorCandidates = [
-      path.join(__dirname, 'interceptor.js'),                     // already here
-      path.join(__dirname, '..', '..', 'interceptor', 'interceptor.js'), // mono-repo root
+      path.join(__dirname, 'interceptor.js'),
+      path.join(__dirname, '..', '..', 'interceptor', 'interceptor.js'),
       path.join(__dirname, '..', '..', 'interceptor.js'),
     ];
 
@@ -49,15 +55,17 @@ async function build() {
         console.log(`[AIR-DEBUG] Interceptor copied from: ${src}`);
         copied = true;
         break;
-      } else if (fs.existsSync(src)) {
-        console.log(`[AIR-DEBUG] Interceptor already present at: ${src}`);
+      }
+
+      if (fs.existsSync(src)) {
+        console.log(`[AIR-DEBUG] Interceptor shell already present at: ${src}`);
         copied = true;
         break;
       }
     }
 
     if (!copied) {
-      console.warn('[AIR-DEBUG] Warning: interceptor.js not found — extension will fail at runtime.');
+      console.warn('[AIR-DEBUG] Warning: interceptor.js not found - extension will fail at runtime.');
     }
 
     console.log('[AIR-DEBUG] Build success!');

@@ -10,6 +10,28 @@
 import path from 'path';
 import fs from 'fs';
 
+export interface InterceptorAssetPaths {
+  shellPath: string;
+  selectorEnginePath: string | null;
+}
+
+export function resolveGeneratedSelectorEnginePath(extensionRoot: string): string | null {
+  const envPath = process.env.AIR_SELECTOR_ENGINE_PATH;
+  const candidates = [
+    envPath,
+    path.join(extensionRoot, 'dist', 'interceptor-selector-engine.js'),
+    path.join(extensionRoot, 'interceptor-selector-engine.js'),
+  ].filter((value): value is string => Boolean(value));
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
 export function resolveInterceptorPath(extensionRoot: string): string {
   const envPath = process.env.AIR_INTERCEPTOR_PATH;
   const candidates = [
@@ -26,6 +48,13 @@ export function resolveInterceptorPath(extensionRoot: string): string {
   }
 
   throw new Error(`interceptor.js not found. Checked: ${candidates.join(', ')}`);
+}
+
+export function resolveInterceptorAssetPaths(extensionRoot: string): InterceptorAssetPaths {
+  return {
+    shellPath: resolveInterceptorPath(extensionRoot),
+    selectorEnginePath: resolveGeneratedSelectorEnginePath(extensionRoot),
+  };
 }
 
 export function readInterceptorCode(extensionRoot: string): string {

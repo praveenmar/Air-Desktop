@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { spawn, ChildProcess } from 'child_process';
 import { randomUUID } from 'crypto';
+import { resolveInterceptorAssetPaths } from './utils/interceptor-loader';
 
 let activeBrowser: Browser | null = null;
 let activeContext: BrowserContext | null = null;
@@ -179,7 +180,10 @@ function buildConfigScript(sessionId: string, port: number): string {
     window.__AIR_CONFIG__ = {
       sessionId: ${JSON.stringify(sessionId)},
       serverUrl: ${JSON.stringify(serverUrl)},
-      version: ${Date.now()}
+      version: ${Date.now()},
+      selectorEngineShadowMode: true,
+      selectorEngineShadowLogDiffs: true,
+      selectorEngineShadowMaxCandidates: 12
     };
     window.__air_gmSend = async (url, payload) => {
       const targetUrl = typeof url === 'string' ? url : ${JSON.stringify(eventEndpoint)};
@@ -228,16 +232,19 @@ function buildConfigScript(sessionId: string, port: number): string {
   `;
 }
 
-async function loadInterceptorPath(context: vscode.ExtensionContext): Promise<string> {
-  const interceptorPath = context.asAbsolutePath('interceptor.js');
+async function loadInterceptorAssets(context: vscode.ExtensionContext): Promise<{
+  shellPath: string;
+  selectorEnginePath: string | null;
+}> {
+  const assets = resolveInterceptorAssetPaths(context.extensionPath);
 
-  if (!fs.existsSync(interceptorPath)) {
-    console.error(`[${SCOPE}] Interceptor not found`, { interceptorPath });
-    throw new Error(`Interceptor missing at: ${interceptorPath}`);
+  if (!fs.existsSync(assets.shellPath)) {
+    console.error(`[${SCOPE}] Interceptor shell not found`, { shellPath: assets.shellPath });
+    throw new Error(`Interceptor shell missing at: ${assets.shellPath}`);
   }
 
-  console.log(`[${SCOPE}] Loaded interceptor path`, { interceptorPath });
-  return interceptorPath;
+  console.log(`[${SCOPE}] Loaded interceptor assets`, assets);
+  return assets;
 }
 
 async function flushAndCloseBrowser(): Promise<void> {
@@ -310,7 +317,7 @@ async function startRecording() {
       Number(baseUrl.split(':').pop()),
     );
 
-    const interceptorPath = await loadInterceptorPath(extensionContext);
+    const interceptorAssets = await loadInterceptorAssets(extensionContext);
 
     serverProcess?.send({
       type: 'SET_SESSION',
@@ -376,7 +383,10 @@ async function startRecording() {
     );
 
     await activeContext.addInitScript({ content: configScript });
-    await activeContext.addInitScript({ path: interceptorPath });
+    if (interceptorAssets.selectorEnginePath) {
+      await activeContext.addInitScript({ path: interceptorAssets.selectorEnginePath });
+    }
+    await activeContext.addInitScript({ path: interceptorAssets.shellPath });
 
     activeContext.on('page', async (page) => {
       console.log(`[${SCOPE}] New page detected`);
