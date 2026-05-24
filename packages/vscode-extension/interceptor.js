@@ -170,6 +170,24 @@ const AIR_CFG = {
 };
 
 const MAX_CAPTURED_SELECTOR_CANDIDATES = 8;
+const MODULAR_DIRECT_CANDIDATE_FAMILIES = new Set([
+  "test-id",
+  "id",
+  "name",
+  "href",
+  "aria-label",
+  "placeholder",
+]);
+const DIRECT_CANDIDATE_PARITY_MAX_ITEMS = 5;
+const DIRECT_CANDIDATE_PARITY_MAX_SELECTOR_CHARS = 300;
+const INTERCEPTOR_DIAGNOSTIC_MAX_ARRAY_ITEMS = 12;
+const INTERCEPTOR_DIAGNOSTIC_MAX_DEPTH = 4;
+const PERSISTED_INTERCEPTOR_DIAGNOSTIC_MESSAGES = new Set([
+  "DIRECT_CANDIDATE_PARITY",
+  "DIRECT_CANDIDATE_PARITY_FAILED",
+  "SELECTOR_ENGINE_SHADOW_DIFF",
+  "SELECTOR_ENGINE_SHADOW_FAILED",
+]);
 const MAX_SELECTOR_VISIBLE_INDEX_MATCHES = 100;
 const MAX_TIGHT_CONTAINER_DEPTH = 8;
 const MAX_TIGHT_CONTAINER_CONTROL_LIKE_DESCENDANTS = 4;
@@ -567,6 +585,12 @@ class AIRInterceptor {
         window.__AIR_CONFIG__?.selectorEngineShadowLogDiffs ?? config.selectorEngineShadowLogDiffs ?? true,
       selectorEngineShadowMaxCandidates:
         window.__AIR_CONFIG__?.selectorEngineShadowMaxCandidates ?? config.selectorEngineShadowMaxCandidates ?? 12,
+      enableModularDirectCandidateParity:
+        window.__AIR_CONFIG__?.enableModularDirectCandidateParity ?? config.enableModularDirectCandidateParity ?? false,
+      persistInterceptorDiagnostics:
+        window.__AIR_CONFIG__?.persistInterceptorDiagnostics ?? config.persistInterceptorDiagnostics ?? false,
+      interceptorDiagnosticsEndpoint:
+        window.__AIR_CONFIG__?.interceptorDiagnosticsEndpoint ?? config.interceptorDiagnosticsEndpoint ?? null,
       batchSize: config.batchSize || 10,
       batchInterval: config.batchInterval || 2000,
       corsEnabled: config.corsEnabled ?? true,
@@ -6584,6 +6608,21 @@ class AIRInterceptor {
       });
     }
 
+    try {
+      this._runDirectCandidateParityComparison(
+        element,
+        selectorResult,
+        eventContext,
+        selectorCandidates,
+      );
+    } catch (error) {
+      this.log("DIRECT_CANDIDATE_PARITY_FAILED", {
+        eventType: typeof eventContext?.eventType === "string" ? eventContext.eventType : null,
+        trigger: typeof eventContext?.trigger === "string" ? eventContext.trigger : null,
+        message: error?.message || String(error),
+      });
+    }
+
     if (this.config.debugMode) {
       console.log("Selector generated:", selectorResult.selector);
       console.log("Priority:", selectorResult.priority);
@@ -6783,6 +6822,157 @@ class AIRInterceptor {
         typeof candidate?.visibleMatchCount === "number" ? candidate.visibleMatchCount : null,
       warningCodes: Array.isArray(candidate?.warningCodes) ? candidate.warningCodes : [],
     }));
+  }
+
+  _truncateParitySelector(selector) {
+    const normalized = typeof selector === "string" ? selector : "";
+    if (normalized.length <= DIRECT_CANDIDATE_PARITY_MAX_SELECTOR_CHARS) return normalized;
+    return `${normalized.slice(0, DIRECT_CANDIDATE_PARITY_MAX_SELECTOR_CHARS)}...`;
+  }
+
+  _normalizeDirectCandidateForParity(candidate) {
+    return {
+      selector: this._truncateParitySelector(typeof candidate?.selector === "string" ? candidate.selector : ""),
+      family: typeof candidate?.family === "string" ? candidate.family : null,
+      engine: typeof candidate?.engine === "string" ? candidate.engine : null,
+      matchCount: typeof candidate?.matchCount === "number" ? candidate.matchCount : null,
+      visibleMatchCount:
+        typeof candidate?.visibleMatchCount === "number" ? candidate.visibleMatchCount : null,
+      strength: typeof candidate?.strength === "string" ? candidate.strength : null,
+      warningCodes: Array.isArray(candidate?.warningCodes) ? [...candidate.warningCodes].sort() : [],
+    };
+  }
+
+  _extractDirectFamilyCandidatesForParity(candidates) {
+    if (!Array.isArray(candidates)) return [];
+    return candidates
+      .filter((candidate) => MODULAR_DIRECT_CANDIDATE_FAMILIES.has(candidate?.family))
+      .map((candidate) => this._normalizeDirectCandidateForParity(candidate));
+  }
+
+  _buildDirectCandidateParityKey(candidate) {
+    return `${candidate?.family || ""}::${candidate?.engine || ""}::${candidate?.selector || ""}`;
+  }
+
+  _buildDirectCandidateMetadataDiffs(oldDirectCandidates, modularDirectCandidates) {
+    const modularByKey = new Map(
+      modularDirectCandidates.map((candidate) => [this._buildDirectCandidateParityKey(candidate), candidate]),
+    );
+    const diffs = [];
+
+    for (const oldCandidate of oldDirectCandidates) {
+      const modularCandidate = modularByKey.get(this._buildDirectCandidateParityKey(oldCandidate));
+      if (!modularCandidate) continue;
+
+      const changes = {};
+
+      if (oldCandidate.matchCount !== modularCandidate.matchCount) {
+        changes.matchCount = {
+          old: oldCandidate.matchCount,
+          modular: modularCandidate.matchCount,
+        };
+      }
+
+      if (oldCandidate.visibleMatchCount !== modularCandidate.visibleMatchCount) {
+        changes.visibleMatchCount = {
+          old: oldCandidate.visibleMatchCount,
+          modular: modularCandidate.visibleMatchCount,
+        };
+      }
+
+      if (oldCandidate.strength !== modularCandidate.strength) {
+        changes.strength = {
+          old: oldCandidate.strength,
+          modular: modularCandidate.strength,
+        };
+      }
+
+      if (JSON.stringify(oldCandidate.warningCodes) !== JSON.stringify(modularCandidate.warningCodes)) {
+        changes.warningCodes = {
+          old: oldCandidate.warningCodes,
+          modular: modularCandidate.warningCodes,
+        };
+      }
+
+      if (Object.keys(changes).length > 0) {
+        diffs.push({
+          selector: oldCandidate.selector,
+          family: oldCandidate.family,
+          changes,
+        });
+      }
+
+      if (diffs.length >= DIRECT_CANDIDATE_PARITY_MAX_ITEMS) break;
+    }
+
+    return diffs;
+  }
+
+  _runDirectCandidateParityComparison(element, selectorResult, eventContext, currentCandidates) {
+    if (!this.config?.enableModularDirectCandidateParity) return;
+    if (!Array.isArray(currentCandidates) || currentCandidates.length === 0) return;
+
+    const selectorEngine = this._getSelectorEngineShadowApi();
+    if (!selectorEngine || typeof selectorEngine.collectDirectFamilySelectorCandidates !== "function") {
+      return;
+    }
+
+    const oldDirectCandidates = this._extractDirectFamilyCandidatesForParity(currentCandidates);
+    const modularDirectCandidates = this._extractDirectFamilyCandidatesForParity(
+      selectorEngine.collectDirectFamilySelectorCandidates({
+        element,
+        selectorResult,
+        eventContext,
+        maxCandidates: Number(this.config?.selectorEngineShadowMaxCandidates) || 12,
+      }),
+    );
+
+    const oldKeys = oldDirectCandidates.map((candidate) => this._buildDirectCandidateParityKey(candidate));
+    const modularKeys = modularDirectCandidates.map((candidate) => this._buildDirectCandidateParityKey(candidate));
+    const modularKeySet = new Set(modularKeys);
+    const oldKeySet = new Set(oldKeys);
+
+    const missingInModular = oldDirectCandidates
+      .filter((candidate) => !modularKeySet.has(this._buildDirectCandidateParityKey(candidate)))
+      .slice(0, DIRECT_CANDIDATE_PARITY_MAX_ITEMS)
+      .map((candidate) => ({
+        selector: candidate.selector,
+        family: candidate.family,
+      }));
+
+    const extraInModular = modularDirectCandidates
+      .filter((candidate) => !oldKeySet.has(this._buildDirectCandidateParityKey(candidate)))
+      .slice(0, DIRECT_CANDIDATE_PARITY_MAX_ITEMS)
+      .map((candidate) => ({
+        selector: candidate.selector,
+        family: candidate.family,
+      }));
+
+    const orderDiff = JSON.stringify(oldKeys) !== JSON.stringify(modularKeys);
+    const metadataDiff = this._buildDirectCandidateMetadataDiffs(oldDirectCandidates, modularDirectCandidates);
+
+    if (!missingInModular.length && !extraInModular.length && !orderDiff && !metadataDiff.length) {
+      return;
+    }
+
+    this.log("DIRECT_CANDIDATE_PARITY", {
+      eventId: eventContext?.eventId || eventContext?.id || null,
+      traceId: eventContext?.traceId || null,
+      eventType: typeof eventContext?.eventType === "string" ? eventContext.eventType : null,
+      trigger: typeof eventContext?.trigger === "string" ? eventContext.trigger : null,
+      primarySelector: this._truncateParitySelector(
+        typeof selectorResult?.selector === "string" ? selectorResult.selector : "",
+      ),
+      oldDirectCount: oldDirectCandidates.length,
+      modularDirectCount: modularDirectCandidates.length,
+      missingInModular,
+      extraInModular,
+      orderDiff,
+      metadataDiff,
+      sessionId: this.config?.sessionId || null,
+      tabId: this.config?.tabId || null,
+      selectorEngineVersion: typeof selectorEngine?.version === "string" ? selectorEngine.version : null,
+    });
   }
 
   _runSelectorEngineShadowComparison(element, selectorResult, eventContext, currentCandidates) {
@@ -9270,8 +9460,96 @@ async flushPending() {
     );
   }
 
+  _normalizeInterceptorDiagnosticLevel(message) {
+    if (message === "DIRECT_CANDIDATE_PARITY") return "decision";
+    if (message === "SELECTOR_ENGINE_SHADOW_DIFF") return "debug";
+    if (message === "DIRECT_CANDIDATE_PARITY_FAILED") return "error";
+    if (message === "SELECTOR_ENGINE_SHADOW_FAILED") return "error";
+    return "info";
+  }
+
+  _sanitizeInterceptorDiagnosticValue(value, depth = 0) {
+    if (depth > INTERCEPTOR_DIAGNOSTIC_MAX_DEPTH) {
+      return "[truncated-depth]";
+    }
+
+    if (typeof value === "string") {
+      return this._truncateParitySelector(value);
+    }
+
+    if (
+      typeof value === "number" ||
+      typeof value === "boolean" ||
+      value === null
+    ) {
+      return value;
+    }
+
+    if (Array.isArray(value)) {
+      return value
+        .slice(0, INTERCEPTOR_DIAGNOSTIC_MAX_ARRAY_ITEMS)
+        .map((entry) => this._sanitizeInterceptorDiagnosticValue(entry, depth + 1));
+    }
+
+    if (this._isPlainObject(value)) {
+      const sanitized = {};
+      for (const [key, entry] of Object.entries(value)) {
+        sanitized[key] = this._sanitizeInterceptorDiagnosticValue(entry, depth + 1);
+      }
+      return sanitized;
+    }
+
+    if (value === undefined) return null;
+    return String(value);
+  }
+
+  _buildPersistedInterceptorDiagnostic(message, data) {
+    return {
+      component: "selector-engine",
+      level: this._normalizeInterceptorDiagnosticLevel(message),
+      message,
+      sessionId: this.config?.sessionId || null,
+      traceId: typeof data?.traceId === "string" ? data.traceId : null,
+      data: this._sanitizeInterceptorDiagnosticValue(data ?? {}),
+    };
+  }
+
+  async _persistInterceptorDiagnostic(message, data) {
+    if (!this.config?.persistInterceptorDiagnostics) return;
+    if (!PERSISTED_INTERCEPTOR_DIAGNOSTIC_MESSAGES.has(message)) return;
+
+    const endpoint = typeof this.config?.interceptorDiagnosticsEndpoint === "string"
+      ? this.config.interceptorDiagnosticsEndpoint
+      : (typeof this.config?.serverUrl === "string" ? `${this.config.serverUrl.replace(/\/+$/, "")}/api/debug/logs/interceptor` : null);
+    if (!endpoint) return;
+
+    const payload = JSON.stringify(this._buildPersistedInterceptorDiagnostic(message, data));
+
+    try {
+      if (this._gmSend) {
+        await this._gmSend(endpoint, payload);
+        return;
+      }
+
+      await this._rawFetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload,
+        mode: "cors",
+        keepalive: true,
+        [_AIR_INTERNAL]: true,
+      });
+    } catch (_) {
+      // Keep diagnostics strictly best-effort so capture behavior never changes.
+    }
+  }
+
   log(...args) {
     if (this.disabled || !this.config) return;
+    const [message, data] = args;
+    if (typeof message === "string" && PERSISTED_INTERCEPTOR_DIAGNOSTIC_MESSAGES.has(message)) {
+      void this._persistInterceptorDiagnostic(message, data);
+    }
     if (this.config.debugMode) {
       console.log("[AIR]", ...args);
     }

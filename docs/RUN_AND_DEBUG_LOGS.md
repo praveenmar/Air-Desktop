@@ -74,6 +74,16 @@ Key lines:
 
 This tells you whether events left the page successfully.
 
+Selector-engine diagnostics now have two homes:
+- browser console for immediate live debugging
+- persisted `debug_logs` rows for session-linked review later
+
+Look for these persisted messages when parity/shadow analysis is enabled:
+- `DIRECT_CANDIDATE_PARITY`
+- `DIRECT_CANDIDATE_PARITY_FAILED`
+- `SELECTOR_ENGINE_SHADOW_DIFF`
+- `SELECTOR_ENGINE_SHADOW_FAILED`
+
 ## C) SQLite (`air-data.db`) for persistent debug timeline
 
 DB path is created from `app.getPath('userData') + '/air-data.db'`.
@@ -120,6 +130,12 @@ Latest debug logs:
 
 ```powershell
 node -e "const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(process.env.AIR_DB_PATH); console.table(db.prepare('SELECT timestamp,component,level,message,session_id,trace_id FROM debug_logs ORDER BY timestamp DESC LIMIT 50').all());"
+```
+
+Only persisted selector-engine diagnostics:
+
+```powershell
+node -e "const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(process.env.AIR_DB_PATH); console.table(db.prepare(\"SELECT timestamp,component,level,message,session_id,trace_id FROM debug_logs WHERE component LIKE 'Interceptor:%' ORDER BY timestamp DESC LIMIT 100\").all());"
 ```
 
 Debug logs for one session:

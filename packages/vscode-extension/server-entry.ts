@@ -98,6 +98,78 @@ async function readJsonBody(req: http.IncomingMessage): Promise<any> {
   });
 }
 
+function normalizeDebugLogLevel(level: unknown): 'debug' | 'info' | 'warn' | 'error' | 'decision' {
+  switch (level) {
+    case 'debug':
+    case 'info':
+    case 'warn':
+    case 'error':
+    case 'decision':
+      return level;
+    default:
+      return 'info';
+  }
+}
+
+function clampDebugString(value: unknown, maxLength = 300): string | null {
+  if (typeof value !== 'string') return null;
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}...`;
+}
+
+function sanitizeDebugLogData(value: unknown, depth = 0): unknown {
+  if (depth > 4) return '[truncated-depth]';
+
+  if (typeof value === 'string') {
+    return clampDebugString(value, 300);
+  }
+
+  if (
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    value === null
+  ) {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.slice(0, 12).map((entry) => sanitizeDebugLogData(entry, depth + 1));
+  }
+
+  if (value && typeof value === 'object') {
+    const sanitized: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      sanitized[key] = sanitizeDebugLogData(entry, depth + 1);
+    }
+    return sanitized;
+  }
+
+  return value === undefined ? null : String(value);
+}
+
+async function persistInterceptorDiagnostic(body: any): Promise<void> {
+  if (!debugLogger) {
+    throw new Error('Debug logger not initialized');
+  }
+
+  const message = clampDebugString(body?.message, 120);
+  if (!message) {
+    throw new Error('Missing diagnostic message');
+  }
+
+  const componentSuffix = clampDebugString(body?.component, 40);
+  const component = componentSuffix ? `Interceptor:${componentSuffix}` : 'Interceptor';
+  const level = normalizeDebugLogLevel(body?.level);
+  const sessionId = clampDebugString(body?.sessionId, 120);
+  const traceId = clampDebugString(body?.traceId, 120);
+  const sanitizedData = sanitizeDebugLogData(body?.data ?? {});
+  const data = sanitizedData && typeof sanitizedData === 'object' && !Array.isArray(sanitizedData)
+    ? sanitizedData as Record<string, unknown>
+    : { value: sanitizedData };
+
+  await debugLogger.log(component, level, message, data, sessionId, traceId);
+}
+
 async function listSessions(): Promise<Array<{ id: string; startedAt: number; endedAt: number | null }>> {
   const repo = sessionRepo;
   if (!repo) return [];
@@ -486,6 +558,27 @@ async function handleExtensionRoutes(req: http.IncomingMessage, res: http.Server
     const limit = parseLimit(requestUrl.searchParams.get('limit'), 100, 500);
     const logs = await debugRecentLogs(limit);
     json(res, 200, logs);
+    return true;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/debug/logs/interceptor') {
+    let body: any;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      json(res, 400, { success: false, error: 'Invalid JSON body' });
+      return true;
+    }
+
+    try {
+      await persistInterceptorDiagnostic(body);
+      json(res, 200, { success: true });
+    } catch (error) {
+      json(res, 400, {
+        success: false,
+        error: (error as Error).message || 'Failed to persist interceptor diagnostic',
+      });
+    }
     return true;
   }
 

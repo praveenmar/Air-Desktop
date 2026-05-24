@@ -26,6 +26,12 @@ let isStoppingRecording = false;
 
 const SCOPE = 'Extension';
 
+interface BackgroundServerRuntime {
+  executable: string;
+  nodePath?: string;
+  requiresElectronNodeMode: boolean;
+}
+
 function toLogString(value: unknown): string {
   if (typeof value === 'string') {
     return value;
@@ -96,6 +102,40 @@ async function getServerBaseUrl(): Promise<string> {
   return `http://127.0.0.1:${port}`;
 }
 
+function resolveBackgroundServerRuntime(context: vscode.ExtensionContext): BackgroundServerRuntime {
+  const explicitRuntime = process.env.AIR_SERVER_NODE_EXECUTABLE?.trim();
+  if (explicitRuntime) {
+    return {
+      executable: explicitRuntime,
+      nodePath: fs.existsSync(path.join(context.extensionPath, '..', '..', 'node_modules'))
+        ? path.join(context.extensionPath, '..', '..', 'node_modules')
+        : undefined,
+      requiresElectronNodeMode: false,
+    };
+  }
+
+  const execBaseName = path.basename(process.execPath).toLowerCase();
+  const workspaceNodeModules = path.join(context.extensionPath, '..', '..', 'node_modules');
+  const extensionNodeModules = path.join(context.extensionPath, 'node_modules');
+  const nodePath = fs.existsSync(workspaceNodeModules)
+    ? workspaceNodeModules
+    : (fs.existsSync(extensionNodeModules) ? extensionNodeModules : undefined);
+
+  if (execBaseName === 'node' || execBaseName === 'node.exe') {
+    return {
+      executable: process.execPath,
+      nodePath,
+      requiresElectronNodeMode: false,
+    };
+  }
+
+  return {
+    executable: 'node',
+    nodePath,
+    requiresElectronNodeMode: false,
+  };
+}
+
 async function startBackgroundServer(context: vscode.ExtensionContext, dbPath: string): Promise<void> {
 
   if (serverProcess) return;
@@ -108,21 +148,37 @@ async function startBackgroundServer(context: vscode.ExtensionContext, dbPath: s
     throw new Error(`Server module not found: ${serverModule}`);
   }
 
-  // Define the environment for the background process
- serverProcess = spawn(process.execPath, [serverModule], {
-  env: {
+  const runtime = resolveBackgroundServerRuntime(context);
+  const serverEnv: NodeJS.ProcessEnv = {
     ...process.env,
     AIR_DB_PATH: dbPath,
-    ELECTRON_RUN_AS_NODE: '1',
-    //NODE_PATH: path.join(context.extensionPath, '..', '..', 'node_modules')
-    NODE_PATH: path.join(context.extensionPath, 'node_modules')
-  },
-  stdio: ['ipc', 'pipe', 'pipe'],
-  windowsHide: true,
-});
+  };
 
-  console.log(`[${SCOPE}] Background server spawned using VS Code's Node 22 runtime`);
-  logToOutput(`[${SCOPE}] Background server spawned`, { runtime: process.execPath, dbPath });
+  if (runtime.requiresElectronNodeMode) {
+    serverEnv.ELECTRON_RUN_AS_NODE = '1';
+  } else {
+    delete serverEnv.ELECTRON_RUN_AS_NODE;
+  }
+
+  if (runtime.nodePath) {
+    serverEnv.NODE_PATH = runtime.nodePath;
+  } else {
+    delete serverEnv.NODE_PATH;
+  }
+
+  serverProcess = spawn(runtime.executable, [serverModule], {
+    env: serverEnv,
+    stdio: ['ipc', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+
+  console.log(`[${SCOPE}] Background server spawned`, runtime);
+  logToOutput(`[${SCOPE}] Background server spawned`, {
+    runtime: runtime.executable,
+    nodePath: runtime.nodePath ?? null,
+    requiresElectronNodeMode: runtime.requiresElectronNodeMode,
+    dbPath,
+  });
 
   serverProcess.stdout?.on('data', (data) => {
     const out = data.toString();
@@ -176,6 +232,9 @@ async function startBackgroundServer(context: vscode.ExtensionContext, dbPath: s
 function buildConfigScript(sessionId: string, port: number): string {
   const serverUrl = `http://127.0.0.1:${port}`;
   const eventEndpoint = `${serverUrl}/api/events`;
+  const interceptorDiagnosticsEndpoint = `${serverUrl}/api/debug/logs/interceptor`;
+  const enableModularDirectCandidateParity =
+    process.env.AIR_ENABLE_MODULAR_DIRECT_CANDIDATE_PARITY === '1';
   return `
     window.__AIR_CONFIG__ = {
       sessionId: ${JSON.stringify(sessionId)},
@@ -183,7 +242,10 @@ function buildConfigScript(sessionId: string, port: number): string {
       version: ${Date.now()},
       selectorEngineShadowMode: true,
       selectorEngineShadowLogDiffs: true,
-      selectorEngineShadowMaxCandidates: 12
+      selectorEngineShadowMaxCandidates: 12,
+      enableModularDirectCandidateParity: ${enableModularDirectCandidateParity ? 'true' : 'false'},
+      persistInterceptorDiagnostics: true,
+      interceptorDiagnosticsEndpoint: ${JSON.stringify(interceptorDiagnosticsEndpoint)}
     };
     window.__air_gmSend = async (url, payload) => {
       const targetUrl = typeof url === 'string' ? url : ${JSON.stringify(eventEndpoint)};

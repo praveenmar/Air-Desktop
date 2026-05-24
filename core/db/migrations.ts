@@ -171,6 +171,11 @@ const TABLES: string[] = [
 ];
 
 const MIGRATIONS: Array<{ cmd: string; name: string }> = [
+  { cmd: "ALTER TABLE sessions ADD COLUMN project_id TEXT DEFAULT 'default'", name: 'sessions_project_id' },
+  { cmd: 'ALTER TABLE sessions ADD COLUMN last_event_at INTEGER', name: 'sessions_last_event_at' },
+  { cmd: 'ALTER TABLE sessions ADD COLUMN last_node_id TEXT', name: 'sessions_last_node_id' },
+  { cmd: 'ALTER TABLE sessions ADD COLUMN event_count INTEGER DEFAULT 0', name: 'sessions_event_count' },
+  { cmd: "ALTER TABLE nodes ADD COLUMN project_id TEXT DEFAULT 'default'", name: 'nodes_project_id' },
   { cmd: 'ALTER TABLE events ADD COLUMN intent_raw TEXT', name: 'intent_raw' },
   { cmd: 'ALTER TABLE nodes ADD COLUMN state_source TEXT', name: 'state_source' },
   { cmd: 'ALTER TABLE edges ADD COLUMN outcome_type TEXT', name: 'outcome_type' },
@@ -328,6 +333,71 @@ export async function runMigrations(db: AsyncSQLiteDatabase): Promise<void> {
       if (await tableHasColumn('pending_actions', 'tab_id')) {
         await markMigrationApplied(migration.name);
         continue;
+      }
+    }
+    if (migration.name === 'sessions_project_id') {
+      if (await tableHasColumn('sessions', 'project_id')) {
+        await markMigrationApplied(migration.name);
+        continue;
+      }
+    }
+    if (migration.name === 'sessions_last_event_at') {
+      if (await tableHasColumn('sessions', 'last_event_at')) {
+        await markMigrationApplied(migration.name);
+        continue;
+      }
+    }
+    if (migration.name === 'sessions_last_node_id') {
+      if (await tableHasColumn('sessions', 'last_node_id')) {
+        await markMigrationApplied(migration.name);
+        continue;
+      }
+    }
+    if (migration.name === 'sessions_event_count') {
+      if (await tableHasColumn('sessions', 'event_count')) {
+        await markMigrationApplied(migration.name);
+        continue;
+      }
+    }
+    if (migration.name === 'nodes_project_id') {
+      if (await tableHasColumn('nodes', 'project_id')) {
+        await markMigrationApplied(migration.name);
+        continue;
+      }
+    }
+    if (migration.name === 'backfill_session_tab_state_legacy') {
+      const sessionsHasLastNodeId = await tableHasColumn('sessions', 'last_node_id');
+      const sessionsHasLastEventAt = await tableHasColumn('sessions', 'last_event_at');
+      const sessionsHasEventCount = await tableHasColumn('sessions', 'event_count');
+      const lastNodeExpr = sessionsHasLastNodeId ? 'last_node_id' : 'NULL';
+      const lastEventAtExpr = sessionsHasLastEventAt ? 'last_event_at' : 'NULL';
+      const eventCountExpr = sessionsHasEventCount ? 'event_count' : '0';
+      const backfillSql = `
+        INSERT OR IGNORE INTO session_tab_state (
+          session_id,
+          tab_id,
+          last_node_id,
+          last_event_at,
+          event_count
+        )
+        SELECT
+          id,
+          'tab-legacy',
+          ${lastNodeExpr},
+          ${lastEventAtExpr},
+          ${eventCountExpr}
+        FROM sessions
+      `;
+
+      try {
+        await db.exec(backfillSql);
+        console.log(`Applied migration: ${migration.name}`);
+        await markMigrationApplied(migration.name);
+        continue;
+      } catch (error) {
+        const message = (error as Error).message || '';
+        console.error(`Migration ${migration.name} failed:`, message);
+        throw error;
       }
     }
 

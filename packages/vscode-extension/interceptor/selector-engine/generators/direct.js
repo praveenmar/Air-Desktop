@@ -1,8 +1,6 @@
 import {
   buildAttributeSelector,
-  getSafeClassTokens,
   isLikelyDynamicId,
-  normalizeText,
   safeCssEscape,
 } from '../utils.js';
 
@@ -70,38 +68,7 @@ function collectPlaceholderCandidate(element) {
   }] : [];
 }
 
-function collectClassCandidate(element) {
-  const tokens = getSafeClassTokens(element);
-  if (tokens.length !== 1) return [];
-  return [{
-    selector: `${element.tagName.toLowerCase()}.${safeCssEscape(tokens[0])}`,
-    engine: 'css',
-    family: 'class',
-    usesDynamicClass: /(?:active|selected|focus|hover|css-|sc-|chakra|Mui)/.test(tokens[0]),
-  }];
-}
-
-function collectTextCandidate(element) {
-  const text = normalizeText(element.innerText || element.textContent || '');
-  if (!text || text.length > 80) return [];
-  return [{
-    selector: `${element.tagName.toLowerCase()}:has-text("${text.replace(/"/g, '\\"')}")`,
-    engine: 'css',
-    family: 'text',
-  }];
-}
-
-function collectRoleCandidate(element) {
-  const role = element.getAttribute('role');
-  if (!role) return [];
-  return [{
-    selector: `[role="${role}"]`,
-    engine: 'css',
-    family: 'role-attr',
-  }];
-}
-
-export function collectDirectCandidates(element) {
+export function collectDirectFamilyCandidates(element) {
   if (!element) return [];
   return [
     ...collectTestIdCandidates(element),
@@ -110,9 +77,9 @@ export function collectDirectCandidates(element) {
     ...collectHrefCandidate(element),
     ...collectAriaLabelCandidate(element),
     ...collectPlaceholderCandidate(element),
-    ...collectClassCandidate(element),
-    ...collectTextCandidate(element),
-    ...collectRoleCandidate(element),
   ];
 }
 
+export function collectDirectCandidates(element) {
+  return collectDirectFamilyCandidates(element);
+}
