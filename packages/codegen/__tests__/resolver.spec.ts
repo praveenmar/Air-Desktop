@@ -4512,4 +4512,991 @@ describe('selector-resolver', () => {
     expect(hasSameAirTargetNodeId(matching, undefined)).toBe(false);
     expect(hasSameAirTargetNodeId(null, 'air-node-1')).toBe(false);
   });
+
+  it('does not record shadow evaluation metadata when disabled and keeps emitted selector unchanged', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <button class="btn" data-testid="save-primary">Save</button>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      selector: '.btn',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.btn',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'button',
+        textExcerpt: 'Save',
+        selectorCandidates: [
+          {
+            selector: '.btn',
+            engine: 'css',
+            family: 'class',
+            strength: 'weak',
+            source: 'capture',
+            isPrimary: true,
+            matchCount: 1,
+            visibleMatchCount: 1,
+            warningCodes: ['framework-class'],
+          },
+          {
+            selector: '[data-testid="save-primary"]',
+            engine: 'css',
+            family: 'test-id',
+            strength: 'strong',
+            source: 'capture',
+            matchCount: 1,
+            visibleMatchCount: 1,
+          },
+        ],
+      },
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'test_shadow_evaluation_snapshot',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, { enableLLMFallback: false });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toBe('.btn');
+    expect(resolution.resolverMetadata.shadowEvaluation).toBeUndefined();
+  });
+
+  it('computes a captured shadow winner when enabled without changing the emitted selector', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <button class="btn" data-testid="save-primary">Save</button>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      selector: '.btn',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.btn',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'button',
+        textExcerpt: 'Save',
+        selectorCandidates: [
+          {
+            selector: '.btn',
+            engine: 'css',
+            family: 'class',
+            strength: 'weak',
+            source: 'capture',
+            isPrimary: true,
+            matchCount: 1,
+            visibleMatchCount: 1,
+            warningCodes: ['framework-class'],
+          },
+          {
+            selector: '[data-testid="save-primary"]',
+            engine: 'css',
+            family: 'test-id',
+            strength: 'strong',
+            source: 'capture',
+            matchCount: 1,
+            visibleMatchCount: 1,
+          },
+        ],
+      },
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'test_shadow_evaluation_snapshot',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, {
+      enableLLMFallback: false,
+      enableCapturedCandidateShadowEvaluation: true,
+    });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toBe('.btn');
+    expect(resolution.resolverMetadata.shadowEvaluation).toEqual(expect.objectContaining({
+      status: 'computed',
+      candidateCount: 2,
+      convertedCandidateCount: 2,
+      uniqueCandidateCount: 2,
+      semanticallySafeCandidateCount: 2,
+      winner: expect.objectContaining({
+        selector: '[data-testid="save-primary"]',
+        family: 'test-id',
+        strength: 'strong',
+      }),
+    }));
+  });
+
+  it('skips shadow evaluation conservatively when no usable snapshot is available', async () => {
+    const step = makeStep(1, {
+      selector: '.btn',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.btn',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'button',
+        textExcerpt: 'Save',
+        selectorCandidates: [
+          {
+            selector: '.btn',
+            engine: 'css',
+            family: 'class',
+            strength: 'weak',
+            source: 'capture',
+            isPrimary: true,
+            matchCount: 1,
+            visibleMatchCount: 1,
+            warningCodes: ['framework-class'],
+          },
+          {
+            selector: '[data-testid="save-primary"]',
+            engine: 'css',
+            family: 'test-id',
+            strength: 'strong',
+            source: 'capture',
+            matchCount: 1,
+            visibleMatchCount: 1,
+          },
+        ],
+      },
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), makeSnapshotCache({}), {
+      enableLLMFallback: false,
+      enableCapturedCandidateShadowEvaluation: true,
+    });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toBe('.btn');
+    expect(resolution.resolverMetadata.shadowEvaluation).toEqual(expect.objectContaining({
+      status: 'skipped-no-snapshot',
+      candidateCount: 2,
+      convertedCandidateCount: 0,
+      uniqueCandidateCount: 0,
+      semanticallySafeCandidateCount: 0,
+      skippedReason: 'snapshot-unavailable',
+    }));
+  });
+
+  it('does not overclaim same-target proof when the matched shadow winner has a different AIR node id', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <button data-air-node-id="air-node-2" data-testid="save-primary">Save</button>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      selector: '.btn',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      targetNodeId: 'air-node-1',
+      fingerprint: {
+        selector: '.btn',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'button',
+        textExcerpt: 'Save',
+        targetNodeId: 'air-node-1',
+        selectorCandidates: [
+          {
+            selector: '[data-testid="save-primary"]',
+            engine: 'css',
+            family: 'test-id',
+            strength: 'strong',
+            source: 'capture',
+            isPrimary: true,
+            matchCount: 1,
+            visibleMatchCount: 1,
+          },
+        ],
+      },
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'test_shadow_same_target_mismatch_snapshot',
+          snapshotTargetEvidence: false,
+          snapshotTargetEvidenceReason: 'target_missing_in_snapshot',
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, {
+      enableLLMFallback: false,
+      enableCapturedCandidateShadowEvaluation: true,
+    });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toBe('.btn');
+    expect(resolution.resolverMetadata.shadowEvaluation).toEqual(expect.objectContaining({
+      status: 'computed',
+      winner: expect.objectContaining({
+        selector: '[data-testid="save-primary"]',
+        sameTargetEvidence: false,
+      }),
+    }));
+  });
+
+  it('keeps structured recovery active while recording additive shadow evaluation metadata', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <div class="field-row">
+          <label>Status</label>
+          <input class="oxd-input" />
+        </div>
+        <div class="field-row">
+          <label>User Role</label>
+          <input class="oxd-input" />
+        </div>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      action: 'input',
+      selector: '.oxd-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.oxd-input',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'input',
+        selectorCandidates: [
+          {
+            selector: '.oxd-input',
+            engine: 'css',
+            family: 'class',
+            strength: 'weak',
+            source: 'capture',
+            isPrimary: true,
+            matchCount: 2,
+            visibleMatchCount: 2,
+            warningCodes: ['framework-class', 'multiple-visible-matches'],
+          },
+        ],
+        boundedFieldContext: {
+          fieldLabelText: 'User Role',
+          fieldRelation: 'bounded-container',
+          targetControlKind: 'input',
+          visibleControlCountInContainer: 1,
+          targetIndexWithinContainer: 0,
+          boundedContainerSummary: 'div.field-row',
+          cleanParentSelector: 'div.field-row',
+          cleanChildSelector: 'input.oxd-input',
+          isValid: true,
+        },
+      },
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'test_shadow_bounded_field_snapshot',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, {
+      enableLLMFallback: false,
+      enableCapturedCandidateShadowEvaluation: true,
+    });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toContain('bounded-field("User Role"');
+    expect(resolution.resolverMetadata.shadowEvaluation).toEqual(expect.objectContaining({
+      status: 'computed',
+      candidateCount: 1,
+      convertedCandidateCount: 1,
+      winner: expect.objectContaining({
+        selector: '.oxd-input',
+        family: 'class',
+        strength: 'weak',
+      }),
+    }));
+  });
+
+  it('promotes a captured test-id candidate over a weak class original when Phase 2A is enabled', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <button class="btn" data-testid="save-primary" data-air-node-id="air-node-1">Save</button>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      selector: '.btn',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      targetNodeId: 'air-node-1',
+      fingerprint: {
+        selector: '.btn',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'button',
+        textExcerpt: 'Save',
+        attributes: {
+          'data-testid': 'save-primary',
+          dataTestId: 'save-primary',
+        },
+        selectorCandidates: [
+          {
+            selector: '.btn',
+            engine: 'css',
+            family: 'class',
+            strength: 'weak',
+            source: 'capture',
+            isPrimary: true,
+            matchCount: 1,
+            visibleMatchCount: 1,
+            warningCodes: ['framework-class'],
+          },
+          {
+            selector: '[data-testid="save-primary"]',
+            engine: 'css',
+            family: 'test-id',
+            strength: 'strong',
+            source: 'capture',
+            matchCount: 1,
+            visibleMatchCount: 1,
+          },
+        ],
+      },
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'test_phase_2a_testid_snapshot',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, {
+      enableLLMFallback: false,
+      enableCapturedCandidateDirectPromotion: true,
+    });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toBe('[data-testid="save-primary"]');
+    expect(resolution.resolvedSelector).not.toContain('||');
+    expect(resolution.resolverMetadata.capturedCandidatePromotion).toEqual(expect.objectContaining({
+      attempted: true,
+      promoted: true,
+      previousSelector: '.btn',
+      selectedSelector: '[data-testid="save-primary"]',
+      selectedFamily: 'test-id',
+      reason: 'same-target-direct-candidate',
+      blockedReason: null,
+    }));
+  });
+
+  it('does not change output when Phase 2A direct promotion flag is off', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <button class="btn" data-testid="save-primary" data-air-node-id="air-node-1">Save</button>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      selector: '.btn',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      targetNodeId: 'air-node-1',
+      fingerprint: {
+        selector: '.btn',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'button',
+        attributes: {
+          'data-testid': 'save-primary',
+          dataTestId: 'save-primary',
+        },
+        selectorCandidates: [
+          {
+            selector: '[data-testid="save-primary"]',
+            engine: 'css',
+            family: 'test-id',
+            strength: 'strong',
+            source: 'capture',
+            matchCount: 1,
+            visibleMatchCount: 1,
+          },
+        ],
+      },
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'test_phase_2a_flag_off_snapshot',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, {
+      enableLLMFallback: false,
+    });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toBe('.btn');
+    expect(resolution.resolverMetadata.capturedCandidatePromotion).toBeUndefined();
+  });
+
+  for (const directCase of [
+    {
+      name: 'name',
+      html: '<input class="weak" name="username" data-air-node-id="air-node-1" />',
+      candidateSelector: 'input[name="username"]',
+      family: 'name' as const,
+      attributes: { name: 'username' },
+    },
+    {
+      name: 'placeholder',
+      html: '<input class="weak" placeholder="Username" data-air-node-id="air-node-1" />',
+      candidateSelector: 'input[placeholder="Username"]',
+      family: 'placeholder' as const,
+      attributes: { placeholder: 'Username' },
+    },
+    {
+      name: 'aria-label',
+      html: '<button class="weak" aria-label="Close" data-air-node-id="air-node-1"></button>',
+      candidateSelector: 'button[aria-label="Close"]',
+      family: 'aria-label' as const,
+      attributes: { 'aria-label': 'Close', ariaLabel: 'Close' },
+    },
+    {
+      name: 'href',
+      html: '<a class="weak" href="/admin/users" data-air-node-id="air-node-1">Users</a>',
+      candidateSelector: 'a[href="/admin/users"]',
+      family: 'href' as const,
+      attributes: { href: '/admin/users' },
+    },
+  ]) {
+    it(`promotes a pristine captured ${directCase.name} candidate when Phase 2A is enabled`, async () => {
+      const snapshot = makeHtmlDocument(`<html><body>${directCase.html}</body></html>`);
+      const step = makeStep(1, {
+        selector: '.weak',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        targetNodeId: 'air-node-1',
+        fingerprint: {
+          selector: '.weak',
+          selectorPriority: 'class',
+          selectorRank: 7,
+          tagName: directCase.family === 'href' ? 'a' : (directCase.family === 'aria-label' ? 'button' : 'input'),
+          textExcerpt: directCase.family === 'href' ? 'Users' : undefined,
+          attributes: directCase.attributes as any,
+          selectorCandidates: [
+            {
+              selector: '.weak',
+              engine: 'css',
+              family: 'class',
+              strength: 'weak',
+              source: 'capture',
+              isPrimary: true,
+              matchCount: 1,
+              visibleMatchCount: 1,
+              warningCodes: ['framework-class'],
+            },
+            {
+              selector: directCase.candidateSelector,
+              engine: 'css',
+              family: directCase.family,
+              strength: 'strong',
+              source: 'capture',
+              matchCount: 1,
+              visibleMatchCount: 1,
+            },
+          ],
+        },
+      });
+      const snapshotCache = makeSnapshotCacheWithSelection(
+        { 'node-1': snapshot },
+        () => ({
+          snapshot,
+          provenance: {
+            source: 'source-node-snapshot',
+            temporalClass: 'pre_action',
+            reason: `test_phase_2a_${directCase.name}_snapshot`,
+            snapshotTargetEvidence: true,
+            snapshotTargetEvidenceReason: 'selector_match',
+          },
+          evaluatedCandidates: [],
+        }),
+      );
+
+      const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, {
+        enableLLMFallback: false,
+        enableCapturedCandidateDirectPromotion: true,
+      });
+      const resolution = result.resolutions[0];
+
+      expect(resolution.resolvedSelector).toBe(directCase.candidateSelector);
+      expect(resolution.resolverMetadata.capturedCandidatePromotion).toEqual(expect.objectContaining({
+        attempted: true,
+        promoted: true,
+        selectedSelector: directCase.candidateSelector,
+        selectedFamily: directCase.family,
+      }));
+    });
+  }
+
+  it('does not churn an already-strong current winner when Phase 2A is enabled', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <input id="password" name="password" placeholder="Password" data-air-node-id="air-node-1" />
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      selector: '#password',
+      selectorPriority: 'id',
+      selectorRank: 2,
+      targetNodeId: 'air-node-1',
+      fingerprint: {
+        selector: '#password',
+        selectorPriority: 'id',
+        selectorRank: 2,
+        tagName: 'input',
+        attributes: {
+          id: 'password',
+          name: 'password',
+          placeholder: 'Password',
+        },
+        selectorCandidates: [
+          {
+            selector: '#password',
+            engine: 'css',
+            family: 'id',
+            strength: 'strong',
+            source: 'capture',
+            isPrimary: true,
+            matchCount: 1,
+            visibleMatchCount: 1,
+          },
+          {
+            selector: 'input[name="password"]',
+            engine: 'css',
+            family: 'name',
+            strength: 'strong',
+            source: 'capture',
+            matchCount: 1,
+            visibleMatchCount: 1,
+          },
+        ],
+      },
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'test_phase_2a_keep_strong_winner',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, {
+      enableLLMFallback: false,
+      enableCapturedCandidateDirectPromotion: true,
+    });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toBe('#password');
+    expect(resolution.resolverMetadata.capturedCandidatePromotion).toEqual(expect.objectContaining({
+      attempted: true,
+      promoted: false,
+      previousSelector: '#password',
+      blockedReason: 'current-winner-already-strong',
+    }));
+  });
+
+  it('never promotes weak class-only captured candidates in Phase 2A', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <button class="btn" data-air-node-id="air-node-1">Save</button>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      selector: '.btn',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      targetNodeId: 'air-node-1',
+      fingerprint: {
+        selector: '.btn',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'button',
+        selectorCandidates: [
+          {
+            selector: '.btn',
+            engine: 'css',
+            family: 'class',
+            strength: 'weak',
+            source: 'capture',
+            isPrimary: true,
+            matchCount: 1,
+            visibleMatchCount: 1,
+          },
+        ],
+      },
+    });
+    const result = await resolveSelectorsForSession(makeSession([step]), makeSnapshotCache({ 'node-1': snapshot }), {
+      enableLLMFallback: false,
+      enableCapturedCandidateDirectPromotion: true,
+    });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toBe('.btn');
+    expect(resolution.resolverMetadata.capturedCandidatePromotion).toEqual(expect.objectContaining({
+      attempted: true,
+      promoted: false,
+      blockedReason: 'no-eligible-direct-candidate',
+    }));
+  });
+
+  it('rejects captured promotion when there are multiple visible matches or visibleMatchCount is missing', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <input class="weak" name="username" data-air-node-id="air-node-1" />
+      </body></html>
+    `);
+    const visibleMismatchStep = makeStep(1, {
+      selector: '.weak',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      targetNodeId: 'air-node-1',
+      fingerprint: {
+        selector: '.weak',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'input',
+        attributes: { name: 'username' },
+        selectorCandidates: [
+          {
+            selector: 'input[name="username"]',
+            engine: 'css',
+            family: 'name',
+            strength: 'strong',
+            source: 'capture',
+            matchCount: 1,
+            visibleMatchCount: 2,
+          },
+        ],
+      },
+    });
+    const missingVisibleCountStep = makeStep(1, {
+      selector: '.weak',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      targetNodeId: 'air-node-1',
+      fingerprint: {
+        selector: '.weak',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'input',
+        attributes: { name: 'username' },
+        selectorCandidates: [
+          {
+            selector: 'input[name="username"]',
+            engine: 'css',
+            family: 'name',
+            strength: 'strong',
+            source: 'capture',
+            matchCount: 1,
+            visibleMatchCount: null,
+          },
+        ],
+      },
+    });
+
+    const [visibleMismatchResult, missingVisibleCountResult] = await Promise.all([
+      resolveSelectorsForSession(makeSession([visibleMismatchStep]), makeSnapshotCache({ 'node-1': snapshot }), {
+        enableLLMFallback: false,
+        enableCapturedCandidateDirectPromotion: true,
+      }),
+      resolveSelectorsForSession(makeSession([missingVisibleCountStep]), makeSnapshotCache({ 'node-1': snapshot }), {
+        enableLLMFallback: false,
+        enableCapturedCandidateDirectPromotion: true,
+      }),
+    ]);
+
+    expect(visibleMismatchResult.resolutions[0].resolvedSelector).toBe('.weak');
+    expect(visibleMismatchResult.resolutions[0].resolverMetadata.capturedCandidatePromotion?.blockedReason).toBe('visible-match-count-not-unique');
+    expect(missingVisibleCountResult.resolutions[0].resolvedSelector).toBe('.weak');
+    expect(missingVisibleCountResult.resolutions[0].resolverMetadata.capturedCandidatePromotion?.blockedReason).toBe('visible-match-count-not-unique');
+  });
+
+  it('rejects dynamic or opaque ids and volatile hrefs from active captured promotion', async () => {
+    const opaqueIdSnapshot = makeHtmlDocument(`
+      <html><body>
+        <button id="react-aria123456" class="weak" data-air-node-id="air-node-1">Save</button>
+      </body></html>
+    `);
+    const volatileHrefSnapshot = makeHtmlDocument(`
+      <html><body>
+        <a href="/admin/users?session=123" class="weak" data-air-node-id="air-node-1">Users</a>
+      </body></html>
+    `);
+    const opaqueIdStep = makeStep(1, {
+      selector: '.weak',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      targetNodeId: 'air-node-1',
+      fingerprint: {
+        selector: '.weak',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'button',
+        attributes: { id: 'react-aria123456' },
+        selectorCandidates: [
+          {
+            selector: '#react-aria123456',
+            engine: 'css',
+            family: 'id',
+            strength: 'strong',
+            source: 'capture',
+            matchCount: 1,
+            visibleMatchCount: 1,
+          },
+        ],
+      },
+    });
+    const volatileHrefStep = makeStep(1, {
+      selector: '.weak',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      targetNodeId: 'air-node-1',
+      fingerprint: {
+        selector: '.weak',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'a',
+        attributes: { href: '/admin/users?session=123' },
+        selectorCandidates: [
+          {
+            selector: 'a[href="/admin/users?session=123"]',
+            engine: 'css',
+            family: 'href',
+            strength: 'strong',
+            source: 'capture',
+            matchCount: 1,
+            visibleMatchCount: 1,
+          },
+        ],
+      },
+    });
+
+    const [opaqueIdResult, volatileHrefResult] = await Promise.all([
+      resolveSelectorsForSession(makeSession([opaqueIdStep]), makeSnapshotCache({ 'node-1': opaqueIdSnapshot }), {
+        enableLLMFallback: false,
+        enableCapturedCandidateDirectPromotion: true,
+      }),
+      resolveSelectorsForSession(makeSession([volatileHrefStep]), makeSnapshotCache({ 'node-1': volatileHrefSnapshot }), {
+        enableLLMFallback: false,
+        enableCapturedCandidateDirectPromotion: true,
+      }),
+    ]);
+
+    expect(opaqueIdResult.resolutions[0].resolvedSelector).toBe('.weak');
+    expect(opaqueIdResult.resolutions[0].resolverMetadata.capturedCandidatePromotion?.blockedReason).toBe('dynamic-or-opaque-id');
+    expect(volatileHrefResult.resolutions[0].resolvedSelector).toBe('.weak');
+    expect(volatileHrefResult.resolutions[0].resolverMetadata.capturedCandidatePromotion?.blockedReason).toBe('volatile-href');
+  });
+
+  it('keeps structured recovery ahead of captured direct promotion in Phase 2A', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <div class="field-row">
+          <label>Status</label>
+          <input class="oxd-input" />
+        </div>
+        <div class="field-row">
+          <label>User Role</label>
+          <input class="oxd-input" data-air-node-id="air-node-1" />
+        </div>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      action: 'input',
+      selector: '.oxd-input',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      targetNodeId: 'air-node-1',
+      fingerprint: {
+        selector: '.oxd-input',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'input',
+        selectorCandidates: [
+          {
+            selector: 'input[placeholder="User Role"]',
+            engine: 'css',
+            family: 'placeholder',
+            strength: 'strong',
+            source: 'capture',
+            matchCount: 1,
+            visibleMatchCount: 1,
+          },
+        ],
+        boundedFieldContext: {
+          fieldLabelText: 'User Role',
+          fieldRelation: 'bounded-container',
+          targetControlKind: 'input',
+          visibleControlCountInContainer: 1,
+          targetIndexWithinContainer: 0,
+          boundedContainerSummary: 'div.field-row',
+          cleanParentSelector: 'div.field-row',
+          cleanChildSelector: 'input.oxd-input',
+          isValid: true,
+        },
+      },
+    });
+    const snapshotCache = makeSnapshotCacheWithSelection(
+      { 'node-1': snapshot },
+      () => ({
+        snapshot,
+        provenance: {
+          source: 'source-node-snapshot',
+          temporalClass: 'pre_action',
+          reason: 'test_phase_2a_structured_recovery_priority',
+          snapshotTargetEvidence: true,
+          snapshotTargetEvidenceReason: 'selector_match',
+        },
+        evaluatedCandidates: [],
+      }),
+    );
+
+    const result = await resolveSelectorsForSession(makeSession([step]), snapshotCache, {
+      enableLLMFallback: false,
+      enableCapturedCandidateDirectPromotion: true,
+    });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toContain('bounded-field("User Role"');
+    expect(resolution.resolverMetadata.capturedCandidatePromotion).toEqual(expect.objectContaining({
+      attempted: true,
+      promoted: false,
+      blockedReason: 'structured-recovery-higher-proof',
+    }));
+  });
+
+  it('keeps legacy and no-captured-candidates sessions unchanged in Phase 2A', async () => {
+    const snapshot = makeHtmlDocument(`
+      <html><body>
+        <button class="btn" data-air-node-id="air-node-1">Save</button>
+      </body></html>
+    `);
+    const step = makeStep(1, {
+      selector: '.btn',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      targetNodeId: 'air-node-1',
+      fingerprint: {
+        selector: '.btn',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'button',
+      },
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), makeSnapshotCache({ 'node-1': snapshot }), {
+      enableLLMFallback: false,
+      enableCapturedCandidateDirectPromotion: true,
+    });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toBe('.btn');
+    expect(resolution.resolverMetadata.capturedCandidatePromotion).toEqual(expect.objectContaining({
+      attempted: true,
+      promoted: false,
+      blockedReason: 'no-captured-candidates',
+    }));
+  });
+
+  it('keeps non-pristine direct candidates conservative when snapshot is missing in Phase 2A', async () => {
+    const step = makeStep(1, {
+      selector: '.weak',
+      selectorPriority: 'class',
+      selectorRank: 7,
+      fingerprint: {
+        selector: '.weak',
+        selectorPriority: 'class',
+        selectorRank: 7,
+        tagName: 'input',
+        selectorCandidates: [
+          {
+            selector: 'input[name="username"]',
+            engine: 'css',
+            family: 'name',
+            strength: 'medium',
+            source: 'capture',
+            matchCount: 1,
+            visibleMatchCount: 1,
+          },
+        ],
+      },
+    });
+
+    const result = await resolveSelectorsForSession(makeSession([step]), makeSnapshotCache({}), {
+      enableLLMFallback: false,
+      enableCapturedCandidateDirectPromotion: true,
+    });
+    const resolution = result.resolutions[0];
+
+    expect(resolution.resolvedSelector).toBe('.weak');
+    expect(resolution.resolverMetadata.capturedCandidatePromotion).toEqual(expect.objectContaining({
+      attempted: true,
+      promoted: false,
+      blockedReason: 'no-snapshot-non-pristine-direct-candidate',
+    }));
+  });
 });

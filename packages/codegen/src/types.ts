@@ -412,6 +412,48 @@ export interface RejectedCandidateTrace {
   reason: string;
 }
 
+export type ShadowEvaluationStatus =
+  | 'computed'
+  | 'skipped-no-candidates'
+  | 'skipped-no-snapshot'
+  | 'failed';
+
+export interface ShadowEvaluationWinner {
+  selector: string;
+  source: string;
+  engine?: FlatSelectorEngine | 'bounded-field';
+  rank: number;
+  score: number;
+  family?: string;
+  strength?: string;
+  matchCount?: number | null;
+  visibleMatchCount?: number | null;
+  sameTargetEvidence?: boolean;
+  warningCodes?: string[];
+}
+
+export interface ShadowEvaluationReport {
+  status: ShadowEvaluationStatus;
+  candidateCount: number;
+  convertedCandidateCount: number;
+  uniqueCandidateCount: number;
+  semanticallySafeCandidateCount: number;
+  winner?: ShadowEvaluationWinner;
+  rejectedCandidates?: RejectedCandidateTrace[];
+  skippedReason?: string | null;
+  failureReason?: string | null;
+}
+
+export interface CapturedCandidatePromotionDecision {
+  attempted: boolean;
+  promoted: boolean;
+  previousSelector: string;
+  selectedSelector?: string | null;
+  selectedFamily?: CapturedSelectorCandidateFamily | null;
+  reason?: string | null;
+  blockedReason?: string | null;
+}
+
 export type LlmResponseFormat =
   | 'legacy-selector'
   | 'legacy-selectors'
@@ -545,6 +587,8 @@ export interface ResolverMetadata {
   evaluatedCandidates?: SnapshotCandidateTraceEntry[];
   snapshotTargetEvidence?: boolean;
   snapshotTargetEvidenceReason?: string | null;
+  shadowEvaluation?: ShadowEvaluationReport;
+  capturedCandidatePromotion?: CapturedCandidatePromotionDecision;
   excerptBuildTotalMs?: number;
   pruneMs?: number;
   redactMs?: number;

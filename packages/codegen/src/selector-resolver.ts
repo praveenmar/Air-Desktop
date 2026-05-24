@@ -1,4 +1,6 @@
 import type {
+  CapturedCandidatePromotionDecision,
+  CapturedSelectorCandidate,
   BoundedFieldSelectorSpec,
   CodegenSession,
   CodegenStep,
@@ -14,6 +16,7 @@ import type {
   SelectorPriority,
   ResolverSnapshotSource,
   SelectorSpec,
+  ShadowEvaluationReport,
   SnapshotSelectionProvenance,
 } from './types';
 import {
@@ -161,6 +164,8 @@ const RANK_SCORES: Record<number, number> = {
 
 const DEFAULT_CONFIG: ResolvedResolverConfig = {
   enableLLMFallback: false,
+  enableCapturedCandidateShadowEvaluation: false,
+  enableCapturedCandidateDirectPromotion: false,
   resolverMinScore: 0.7,
   intentMinScore: 0.6,
   maxSnapshotBytesForValidation: 2_000_000,
@@ -181,6 +186,10 @@ function resolveConfig(config?: ResolverConfig): ResolvedResolverConfig {
 
   return {
     enableLLMFallback: config?.enableLLMFallback ?? DEFAULT_CONFIG.enableLLMFallback,
+    enableCapturedCandidateShadowEvaluation:
+      config?.enableCapturedCandidateShadowEvaluation ?? DEFAULT_CONFIG.enableCapturedCandidateShadowEvaluation,
+    enableCapturedCandidateDirectPromotion:
+      config?.enableCapturedCandidateDirectPromotion ?? DEFAULT_CONFIG.enableCapturedCandidateDirectPromotion,
     resolverMinScore: config?.resolverMinScore ?? DEFAULT_CONFIG.resolverMinScore,
     intentMinScore: config?.intentMinScore ?? DEFAULT_CONFIG.intentMinScore,
     maxSnapshotBytesForValidation: config?.maxSnapshotBytesForValidation ?? DEFAULT_CONFIG.maxSnapshotBytesForValidation,
@@ -531,6 +540,698 @@ function getSelectorRank(
   if (selector.startsWith('text=') || selector.includes(':has-text(')) return 8;
   if (selector.startsWith('//') || selector.startsWith('id("')) return 10;
   return 10;
+}
+
+function inferCapturedSelectorSource(
+  selector: string,
+  family: CapturedSelectorCandidate['family'],
+  engine: CapturedSelectorCandidate['engine'],
+): RawCandidate['source'] {
+  if (family === 'test-id') return 'testid';
+  if (family === 'id') return 'id';
+  if (family === 'name') return 'name';
+  if (family === 'aria-label') return 'aria';
+  if (family === 'placeholder') return 'placeholder';
+  if (family === 'href') return 'href';
+  if (family === 'class') return 'class';
+  if (family === 'text' || engine === 'text') return 'text';
+  if (family === 'parent-scoped-css' || family === 'tight-container-css') return 'parent-scope';
+  if (family === 'role-attr') return 'other';
+
+  if (selector.startsWith('[data-testid=')) return 'testid';
+  if (selector.startsWith('[data-cy=')) return 'data-cy';
+  if (selector.startsWith('[data-qa=')) return 'data-qa';
+  if (selector.startsWith('#') || selector.startsWith('[id=')) return 'id';
+  if (selector.includes('[name=')) return 'name';
+  if (selector.includes('[aria-label=')) return 'aria';
+  if (selector.includes('[placeholder=')) return 'placeholder';
+  if (selector.includes('[href=')) return 'href';
+  if (selector.includes('[role=')) return 'role+name';
+  if (selector.startsWith('.') || /(?:^|[\s>])(?:[a-z0-9_-]+)?\.[a-z0-9:_-]+/i.test(selector)) return 'class';
+  if (engine === 'xpath' || selector.startsWith('//') || selector.startsWith('id("')) return 'path';
+  return 'original';
+}
+
+function inferCapturedSelectorCategoryOverride(
+  family: CapturedSelectorCandidate['family'],
+): SelectorCategory | undefined {
+  if (family === 'role-attr') return 'role-attr';
+  if (family === 'parent-scoped-css') return 'parent-scoped';
+  if (family === 'tight-container-css') return 'structural';
+  return undefined;
+}
+
+/**
+ * Converts one captured selector candidate into a resolver-native candidate
+ * without mutating resolver behavior. This is used only for shadow evaluation.
+ */
+function convertCapturedCandidate(
+  candidate: CapturedSelectorCandidate,
+): RawCandidate | null {
+  if (!candidate?.selector || typeof candidate.selector !== 'string') {
+    return null;
+  }
+
+  const selector = candidate.selector.trim();
+  if (!selector) return null;
+
+  return {
+    selector,
+    source: inferCapturedSelectorSource(selector, candidate.family, candidate.engine),
+    engine: candidate.engine === 'xpath' ? 'xpath' : candidate.engine,
+    categoryOverride: inferCapturedSelectorCategoryOverride(candidate.family),
+    rank: getSelectorRank(selector),
+  };
+}
+
+interface ShadowEvaluatedCandidate {
+  captured: CapturedSelectorCandidate;
+  candidate: CandidateScore;
+  semantic: SemanticCompatibilityEvaluation;
+  selectorEvaluation: SelectorEvaluation;
+  sameTargetEvidence: boolean;
+}
+
+function buildShadowEvaluationWinner(
+  winner: ShadowEvaluatedCandidate,
+): NonNullable<ShadowEvaluationReport['winner']> {
+  return {
+    selector: winner.candidate.candidate.selector,
+    source: winner.candidate.candidate.source,
+    engine: winner.candidate.candidate.engine,
+    rank: winner.candidate.candidate.rank,
+    score: winner.candidate.score,
+    family: winner.captured.family,
+    strength: winner.captured.strength,
+    matchCount: winner.captured.matchCount ?? null,
+    visibleMatchCount: winner.captured.visibleMatchCount ?? null,
+    sameTargetEvidence: winner.sameTargetEvidence,
+    warningCodes: winner.captured.warningCodes,
+  };
+}
+
+/**
+ * Computes a captured-candidate shadow winner using the existing validation
+ * and semantic-rejection rails, while keeping emitted selector output unchanged.
+ */
+function computeCapturedCandidateShadowEvaluation(
+  step: CodegenStep,
+  snapshot: Document | null,
+): ShadowEvaluationReport {
+  const capturedCandidates = step.fingerprint?.selectorCandidates ?? [];
+  if (capturedCandidates.length === 0) {
+    return {
+      status: 'skipped-no-candidates',
+      candidateCount: 0,
+      convertedCandidateCount: 0,
+      uniqueCandidateCount: 0,
+      semanticallySafeCandidateCount: 0,
+      skippedReason: 'missing-selector-candidates',
+    };
+  }
+
+  if (!snapshot) {
+    return {
+      status: 'skipped-no-snapshot',
+      candidateCount: capturedCandidates.length,
+      convertedCandidateCount: 0,
+      uniqueCandidateCount: 0,
+      semanticallySafeCandidateCount: 0,
+      skippedReason: 'snapshot-unavailable',
+    };
+  }
+
+  const converted = capturedCandidates
+    .map(captured => {
+      const rawCandidate = convertCapturedCandidate(captured);
+      if (!rawCandidate) return null;
+
+      const validation = validateCandidate(rawCandidate, snapshot, step);
+      const baselineScore = computeBaselineCandidateScore(rawCandidate, validation, step, snapshot);
+      const usesId = candidateUsesIdSelector(rawCandidate);
+      const usesClass = candidateUsesClassSelector(rawCandidate);
+      const idEntropy = computeIdEntropy(step, rawCandidate, validation, snapshot);
+      const classEntropy = computeClassEntropy(step, rawCandidate, validation, snapshot);
+      const sameTargetEvidence = hasSameAirTargetNodeId(validation.resolvedElement ?? null, step.targetNodeId);
+      const selectorEvaluation = buildCandidateSelectorEvaluation({
+        step,
+        candidate: rawCandidate,
+        validation,
+        baselineScore,
+        snapshotTargetEvidence: sameTargetEvidence || undefined,
+        idEntropyScore: usesId ? idEntropy.score : undefined,
+        idPenaltyReason: usesId ? idEntropy.reasons : undefined,
+        classEntropyScore: usesClass ? classEntropy.score : undefined,
+        classPenaltyReason: usesClass ? classEntropy.reasons : undefined,
+        warningCodes: captured.warningCodes,
+      });
+      const candidateScore: CandidateScore = {
+        candidate: rawCandidate,
+        validation,
+        score: selectorEvaluation.scoring.finalScore,
+        selectorEvaluation,
+        idEntropyScore: usesId ? idEntropy.score : undefined,
+        idPenaltyReason: usesId ? idEntropy.reasons : undefined,
+        classEntropyScore: usesClass ? classEntropy.score : undefined,
+        classPenaltyReason: usesClass ? classEntropy.reasons : undefined,
+      };
+      const semantic = evaluateSemanticReject(step, candidateScore, snapshot);
+      return {
+        captured,
+        candidate: candidateScore,
+        semantic,
+        selectorEvaluation: buildCandidateSelectorEvaluation({
+          step,
+          candidate: rawCandidate,
+          validation,
+          baselineScore: candidateScore.score,
+          snapshotTargetEvidence: sameTargetEvidence || undefined,
+          semanticScore: semantic.score,
+          semanticReasons: semantic.reasons,
+          semanticRejectReason: semantic.rejectReason,
+          proofLevel: semantic.rejectReason === null ? 'semantic_validated' : 'unvalidated',
+          proofSource: semantic.rejectReason === null ? 'semantic' : 'none',
+          idEntropyScore: candidateScore.idEntropyScore,
+          idPenaltyReason: candidateScore.idPenaltyReason,
+          classEntropyScore: candidateScore.classEntropyScore,
+          classPenaltyReason: candidateScore.classPenaltyReason,
+          warningCodes: selectorEvaluation.warningCodes,
+        }),
+        sameTargetEvidence,
+      } satisfies ShadowEvaluatedCandidate;
+    })
+    .filter((candidate): candidate is ShadowEvaluatedCandidate => candidate !== null);
+
+  const uniqueCandidates = converted
+    .filter(candidate => candidate.candidate.validation.effectiveMatchCount === 1);
+  const semanticallySafeCandidates = uniqueCandidates
+    .filter(candidate => candidate.semantic.rejectReason === null)
+    .sort(compareSemanticCandidates);
+  const rejectedCandidates = uniqueCandidates
+    .filter(candidate => candidate.semantic.rejectReason !== null)
+    .map(candidate => ({
+      selector: candidate.candidate.candidate.selector,
+      reason: candidate.semantic.rejectReason as ResolverRejectReason,
+    }));
+  const winner = semanticallySafeCandidates[0];
+
+  return {
+    status: 'computed',
+    candidateCount: capturedCandidates.length,
+    convertedCandidateCount: converted.length,
+    uniqueCandidateCount: uniqueCandidates.length,
+    semanticallySafeCandidateCount: semanticallySafeCandidates.length,
+    winner: winner ? buildShadowEvaluationWinner(winner) : undefined,
+    rejectedCandidates: rejectedCandidates.length > 0 ? rejectedCandidates : undefined,
+    skippedReason: winner ? null : 'no-safe-captured-winner',
+  };
+}
+
+const CAPTURED_DIRECT_PROMOTION_FAMILY_PRIORITY: Record<
+  Extract<CapturedSelectorCandidate['family'], 'test-id' | 'id' | 'name' | 'href' | 'aria-label' | 'placeholder'>,
+  number
+> = {
+  'test-id': 1,
+  id: 2,
+  name: 3,
+  href: 4,
+  'aria-label': 5,
+  placeholder: 6,
+};
+
+const BLOCKED_CAPTURED_DIRECT_PROMOTION_WARNING_CODES = new Set<string>([
+  'multiple-matches',
+  'multiple-visible-matches',
+  'target-not-in-matches',
+  'too-many-matches-for-visible-index',
+  'detached-target',
+  'inside-shadow-dom',
+  'shadow-boundary-crossed',
+  'query-failed',
+  'dynamic-class',
+  'framework-class',
+]);
+
+const HIGH_TRUST_DIRECT_CATEGORIES = new Set<SelectorCategory>([
+  'testid',
+  'id',
+  'name',
+  'href',
+  'placeholder',
+  'aria-label',
+]);
+
+const CURRENT_WINNER_WEAK_WARNING_CODES = new Set<string>([
+  'deterministic-low-score-fallback',
+  'deterministic-below-threshold',
+  'deterministic-low-score-available',
+  'deterministic-low-score-rejected',
+  'no-unique-candidate',
+  'snapshot-target-missing',
+  'blocked-generic-shell-override',
+  'deterministic-semantic-reject',
+  'invalid-original-selector',
+  'trusted-original-snapshot-miss',
+]);
+
+type AllowlistedCapturedDirectFamily =
+  Extract<CapturedSelectorCandidate['family'], 'test-id' | 'id' | 'name' | 'href' | 'aria-label' | 'placeholder'>;
+
+interface CapturedDirectPromotionCandidate {
+  captured: CapturedSelectorCandidate & { family: AllowlistedCapturedDirectFamily };
+  rawCandidate: RawCandidate;
+  score: number;
+  sameTargetEvidence: boolean;
+  selectorEvaluation?: SelectorEvaluation;
+  validation?: CandidateValidation;
+  proofLevel: 'recorded' | 'snapshot_validated' | 'semantic_validated';
+  proofSource: SelectorEvaluation['proof']['proofSource'];
+  reason: string;
+}
+
+function isAllowlistedCapturedDirectFamily(
+  family: CapturedSelectorCandidate['family'],
+): family is AllowlistedCapturedDirectFamily {
+  return family === 'test-id' ||
+    family === 'id' ||
+    family === 'name' ||
+    family === 'href' ||
+    family === 'aria-label' ||
+    family === 'placeholder';
+}
+
+function getBlockedCapturedPromotionWarningCode(
+  warningCodes?: string[],
+): string | null {
+  for (const warningCode of warningCodes ?? []) {
+    if (BLOCKED_CAPTURED_DIRECT_PROMOTION_WARNING_CODES.has(warningCode)) {
+      return warningCode;
+    }
+  }
+  return null;
+}
+
+function extractCapturedDirectCandidateValue(
+  candidate: CapturedSelectorCandidate,
+): string | null {
+  switch (candidate.family) {
+    case 'test-id':
+      return extractAttributeValue(candidate.selector, 'data-testid')
+        ?? extractAttributeValue(candidate.selector, 'data-cy')
+        ?? extractAttributeValue(candidate.selector, 'data-qa');
+    case 'id':
+      return extractCandidateId(candidate.selector);
+    case 'name':
+      return extractAttributeValue(candidate.selector, 'name');
+    case 'href':
+      return extractAttributeValue(candidate.selector, 'href');
+    case 'aria-label':
+      return extractAttributeValue(candidate.selector, 'aria-label');
+    case 'placeholder':
+      return extractAttributeValue(candidate.selector, 'placeholder');
+    default:
+      return null;
+  }
+}
+
+function isStableCapturedHrefValue(href: string | null): boolean {
+  if (!href) return false;
+  const normalized = href.trim();
+  if (!normalized) return false;
+  if (/^(?:#|javascript:|mailto:|tel:)/i.test(normalized)) return false;
+  try {
+    const parsed = new URL(normalized, 'https://air.local');
+    if (parsed.hash) return false;
+    if (parsed.search) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function matchesRecordedDirectSignal(
+  step: CodegenStep,
+  candidate: CapturedSelectorCandidate & { family: AllowlistedCapturedDirectFamily },
+): boolean {
+  const attrs = inferStepSignalAttributes(step);
+  const candidateValue = extractCapturedDirectCandidateValue(candidate);
+  if (!candidateValue) return false;
+
+  switch (candidate.family) {
+    case 'test-id':
+      return candidateValue === attrs.dataTestId || candidateValue === attrs.dataCy || candidateValue === attrs.dataQa;
+    case 'id':
+      return candidateValue === attrs.id;
+    case 'name':
+      return candidateValue === attrs.name;
+    case 'href': {
+      const candidatePath = normalizeComparablePath(candidateValue);
+      const stepPath = normalizeComparablePath(attrs.href);
+      return !!candidatePath && !!stepPath && candidatePath === stepPath;
+    }
+    case 'aria-label':
+      return candidateValue === attrs.ariaLabel;
+    case 'placeholder':
+      return candidateValue === attrs.placeholder;
+    default:
+      return false;
+  }
+}
+
+function isStructuredRecoverySpec(selectorSpec?: SelectorSpec): boolean {
+  return selectorSpec?.engine === 'bounded-field' ||
+    selectorSpec?.engine === 'label-context' ||
+    selectorSpec?.engine === 'trigger-context';
+}
+
+function isCurrentWinnerHighTrust(draft: StepResolutionDraft): boolean {
+  if (isStructuredRecoverySpec(draft.resolvedSelectorSpec)) return true;
+
+  const evaluation = draft.metadata.selectorEvaluation;
+  if (!evaluation) return false;
+  if (!HIGH_TRUST_DIRECT_CATEGORIES.has(evaluation.category)) return false;
+  if (
+    evaluation.proof.proofLevel !== 'snapshot_validated' &&
+    evaluation.proof.proofLevel !== 'semantic_validated' &&
+    evaluation.proof.proofLevel !== 'recorded'
+  ) {
+    return false;
+  }
+  if (evaluation.proof.proofSource === 'none') return false;
+
+  const warningCodes = new Set<string>([
+    ...(draft.metadata.warningCodes ?? []),
+    ...(evaluation.warningCodes ?? []),
+  ]);
+  for (const warningCode of warningCodes) {
+    if (CURRENT_WINNER_WEAK_WARNING_CODES.has(warningCode)) return false;
+  }
+
+  return true;
+}
+
+function compareCapturedDirectPromotionCandidates(
+  left: CapturedDirectPromotionCandidate,
+  right: CapturedDirectPromotionCandidate,
+): number {
+  const leftPriority = CAPTURED_DIRECT_PROMOTION_FAMILY_PRIORITY[left.captured.family];
+  const rightPriority = CAPTURED_DIRECT_PROMOTION_FAMILY_PRIORITY[right.captured.family];
+  if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+  if (right.sameTargetEvidence !== left.sameTargetEvidence) {
+    return Number(right.sameTargetEvidence) - Number(left.sameTargetEvidence);
+  }
+  if (right.score !== left.score) return right.score - left.score;
+  return left.rawCandidate.rank - right.rawCandidate.rank;
+}
+
+function buildCapturedCandidatePromotionDecision(
+  previousSelector: string,
+  params: {
+    promoted: boolean;
+    selectedSelector?: string | null;
+    selectedFamily?: AllowlistedCapturedDirectFamily | null;
+    reason?: string | null;
+    blockedReason?: string | null;
+  },
+): CapturedCandidatePromotionDecision {
+  return {
+    attempted: true,
+    promoted: params.promoted,
+    previousSelector,
+    selectedSelector: params.selectedSelector ?? null,
+    selectedFamily: params.selectedFamily ?? null,
+    reason: params.reason ?? null,
+    blockedReason: params.blockedReason ?? null,
+  };
+}
+
+function evaluateCapturedDirectPromotionCandidate(
+  step: CodegenStep,
+  snapshot: Document | null,
+  captured: CapturedSelectorCandidate & { family: AllowlistedCapturedDirectFamily },
+): { candidate?: CapturedDirectPromotionCandidate; blockedReason?: string } {
+  if (captured.matchCount !== 1) {
+    return { blockedReason: 'match-count-not-unique' };
+  }
+  if (captured.visibleMatchCount !== 1) {
+    return { blockedReason: 'visible-match-count-not-unique' };
+  }
+  const blockedWarningCode = getBlockedCapturedPromotionWarningCode(captured.warningCodes);
+  if (blockedWarningCode) {
+    return { blockedReason: `warning:${blockedWarningCode}` };
+  }
+  if (captured.usesIndex === true) {
+    return { blockedReason: 'uses-index' };
+  }
+  if (captured.usesDynamicClass === true) {
+    return { blockedReason: 'uses-dynamic-class' };
+  }
+
+  const rawCandidate = convertCapturedCandidate(captured);
+  if (!rawCandidate) {
+    return { blockedReason: 'unconvertible-candidate' };
+  }
+
+  if (captured.family === 'id') {
+    const candidateId = extractCapturedDirectCandidateValue(captured);
+    if (!candidateId) {
+      return { blockedReason: 'missing-id-value' };
+    }
+    const idEntropy = computeIdEntropy(
+      step,
+      rawCandidate,
+      {
+        totalMatchCount: 1,
+        visibleMatchCount: 1,
+        effectiveMatchCount: 1,
+        reason: 'unique-visible',
+      },
+      snapshot ?? undefined,
+    );
+    if (idEntropy.reasons.length > 0) {
+      return { blockedReason: 'dynamic-or-opaque-id' };
+    }
+  }
+
+  if (captured.family === 'href') {
+    const hrefValue = extractCapturedDirectCandidateValue(captured);
+    if (!isStableCapturedHrefValue(hrefValue)) {
+      return { blockedReason: 'volatile-href' };
+    }
+  }
+
+  if (!snapshot) {
+    const pristineNoSnapshot =
+      captured.strength === 'strong' &&
+      matchesRecordedDirectSignal(step, captured);
+
+    if (!pristineNoSnapshot) {
+      return { blockedReason: 'no-snapshot-non-pristine-direct-candidate' };
+    }
+
+    const score = 0.85 + Math.max(0, 0.05 - (CAPTURED_DIRECT_PROMOTION_FAMILY_PRIORITY[captured.family] - 1) * 0.005);
+    return {
+      candidate: {
+        captured,
+        rawCandidate,
+        score,
+        sameTargetEvidence: false,
+        proofLevel: 'recorded',
+        proofSource: 'recorded',
+        reason: 'pristine-direct-candidate',
+      },
+    };
+  }
+
+  const validation = validateCandidate(rawCandidate, snapshot, step);
+  if (validation.effectiveMatchCount !== 1 || validation.reason !== 'unique-visible') {
+    return { blockedReason: 'snapshot-validation-not-unique-visible' };
+  }
+
+  const idEntropy = computeIdEntropy(step, rawCandidate, validation, snapshot);
+  if (captured.family === 'id' && idEntropy.reasons.length > 0) {
+    return { blockedReason: 'dynamic-or-opaque-id' };
+  }
+  const classEntropy = computeClassEntropy(step, rawCandidate, validation, snapshot);
+  const sameTargetEvidence = hasSameAirTargetNodeId(validation.resolvedElement ?? null, step.targetNodeId);
+  const baselineScore = computeBaselineCandidateScore(rawCandidate, validation, step, snapshot);
+  const selectorEvaluation = buildCandidateSelectorEvaluation({
+    step,
+    candidate: rawCandidate,
+    validation,
+    baselineScore,
+    snapshotTargetEvidence: sameTargetEvidence || undefined,
+    idEntropyScore: idEntropy.score,
+    idPenaltyReason: idEntropy.reasons,
+    classEntropyScore: classEntropy.score,
+    classPenaltyReason: classEntropy.reasons,
+    warningCodes: captured.warningCodes,
+  });
+  const candidateScore: CandidateScore = {
+    candidate: rawCandidate,
+    validation,
+    score: selectorEvaluation.scoring.finalScore,
+    selectorEvaluation,
+    idEntropyScore: idEntropy.score,
+    idPenaltyReason: idEntropy.reasons,
+    classEntropyScore: classEntropy.score,
+    classPenaltyReason: classEntropy.reasons,
+  };
+  const semantic = evaluateSemanticReject(step, candidateScore, snapshot);
+  if (semantic.rejectReason !== null) {
+    return { blockedReason: semantic.rejectReason };
+  }
+
+  return {
+    candidate: {
+      captured,
+      rawCandidate,
+      score: selectorEvaluation.scoring.finalScore,
+      sameTargetEvidence,
+      selectorEvaluation: buildCandidateSelectorEvaluation({
+        step,
+        candidate: rawCandidate,
+        validation,
+        baselineScore: candidateScore.score,
+        snapshotTargetEvidence: sameTargetEvidence || undefined,
+        semanticScore: semantic.score,
+        semanticReasons: semantic.reasons,
+        semanticRejectReason: semantic.rejectReason,
+        proofLevel: sameTargetEvidence ? 'snapshot_validated' : 'semantic_validated',
+        proofSource: sameTargetEvidence ? 'snapshot' : 'semantic',
+        idEntropyScore: candidateScore.idEntropyScore,
+        idPenaltyReason: candidateScore.idPenaltyReason,
+        classEntropyScore: candidateScore.classEntropyScore,
+        classPenaltyReason: candidateScore.classPenaltyReason,
+        warningCodes: selectorEvaluation.warningCodes,
+      }),
+      validation,
+      proofLevel: sameTargetEvidence ? 'snapshot_validated' : 'semantic_validated',
+      proofSource: sameTargetEvidence ? 'snapshot' : 'semantic',
+      reason: sameTargetEvidence ? 'same-target-direct-candidate' : 'semantic-direct-candidate',
+    },
+  };
+}
+
+function maybeApplyCapturedCandidateDirectPromotion(
+  draft: StepResolutionDraft,
+  config: ResolvedResolverConfig,
+): void {
+  if (!config.enableCapturedCandidateDirectPromotion) return;
+
+  const capturedCandidates = draft.step.fingerprint?.selectorCandidates ?? [];
+  if (capturedCandidates.length === 0) {
+    draft.metadata.capturedCandidatePromotion = buildCapturedCandidatePromotionDecision(
+      draft.resolvedSelector,
+      {
+        promoted: false,
+        blockedReason: 'no-captured-candidates',
+      },
+    );
+    return;
+  }
+
+  if (isStructuredRecoverySpec(draft.resolvedSelectorSpec)) {
+    draft.metadata.capturedCandidatePromotion = buildCapturedCandidatePromotionDecision(
+      draft.resolvedSelector,
+      {
+        promoted: false,
+        blockedReason: 'structured-recovery-higher-proof',
+      },
+    );
+    return;
+  }
+
+  if (isCurrentWinnerHighTrust(draft)) {
+    draft.metadata.capturedCandidatePromotion = buildCapturedCandidatePromotionDecision(
+      draft.resolvedSelector,
+      {
+        promoted: false,
+        blockedReason: 'current-winner-already-strong',
+      },
+    );
+    return;
+  }
+
+  const evaluatedCandidates = capturedCandidates
+    .filter((candidate): candidate is CapturedSelectorCandidate & { family: AllowlistedCapturedDirectFamily } =>
+      isAllowlistedCapturedDirectFamily(candidate.family),
+    )
+    .map(candidate => ({
+      captured: candidate,
+      evaluation: evaluateCapturedDirectPromotionCandidate(draft.step, draft.snapshot, candidate),
+    }));
+
+  const promotableCandidates = evaluatedCandidates
+    .flatMap(entry => entry.evaluation.candidate ? [entry.evaluation.candidate] : [])
+    .filter(candidate => candidate.rawCandidate.selector !== draft.resolvedSelector)
+    .sort(compareCapturedDirectPromotionCandidates);
+
+  const promotedCandidate = promotableCandidates[0];
+
+  if (!promotedCandidate) {
+    const blockedReason = evaluatedCandidates.find(entry => entry.evaluation.blockedReason)?.evaluation.blockedReason
+      ?? 'no-eligible-direct-candidate';
+    draft.metadata.capturedCandidatePromotion = buildCapturedCandidatePromotionDecision(
+      draft.resolvedSelector,
+      {
+        promoted: false,
+        blockedReason,
+      },
+    );
+    return;
+  }
+
+  draft.resolvedSelector = promotedCandidate.rawCandidate.selector;
+  draft.resolvedSelectorSpec = buildResolvedSelectorSpec({
+    step: draft.step,
+    selector: promotedCandidate.rawCandidate.selector,
+    source: 'resolver',
+    proofLevel: promotedCandidate.proofLevel,
+    engine: promotedCandidate.rawCandidate.engine,
+    rank: promotedCandidate.rawCandidate.rank,
+    confidence: promotedCandidate.validation?.confidenceScore ?? promotedCandidate.score,
+    warningCodes: [
+      ...draft.metadata.warningCodes,
+      'captured-direct-promotion',
+    ],
+  });
+  draft.metadata = {
+    ...draft.metadata,
+    resolvedSelector: promotedCandidate.rawCandidate.selector,
+    resolvedBy: 'deterministic-override',
+    bestScore: promotedCandidate.score,
+    effectiveMatchCount: promotedCandidate.validation?.effectiveMatchCount ?? 1,
+    matchCount: promotedCandidate.validation?.matchCount ?? promotedCandidate.validation?.visibleMatchCount ?? 1,
+    confidenceScore: promotedCandidate.validation?.confidenceScore ?? promotedCandidate.score,
+    ambiguityReason: promotedCandidate.validation?.ambiguityReason ?? null,
+    semanticCompatibilityScore: promotedCandidate.selectorEvaluation?.scoring.semanticScore ?? draft.metadata.semanticCompatibilityScore,
+    semanticCompatibilityReasons: promotedCandidate.reason ? [promotedCandidate.reason] : draft.metadata.semanticCompatibilityReasons,
+    snapshotTargetEvidence: promotedCandidate.sameTargetEvidence || undefined,
+    snapshotTargetEvidenceReason: promotedCandidate.sameTargetEvidence ? 'captured_candidate_same_target' : null,
+    warningCodes: [
+      ...draft.metadata.warningCodes,
+      'captured-direct-promotion',
+    ],
+    capturedCandidatePromotion: buildCapturedCandidatePromotionDecision(
+      draft.metadata.resolvedSelector,
+      {
+        promoted: true,
+        selectedSelector: promotedCandidate.rawCandidate.selector,
+        selectedFamily: promotedCandidate.captured.family,
+        reason: promotedCandidate.reason,
+      },
+    ),
+  };
+  draft.metadata.selectorEvaluation = buildResolutionSelectorEvaluation({
+    step: draft.step,
+    selectorSpec: draft.resolvedSelectorSpec,
+    metadata: draft.metadata,
+    candidateEvaluation: promotedCandidate.selectorEvaluation,
+    snapshotTargetEvidence: promotedCandidate.sameTargetEvidence || undefined,
+    validation: promotedCandidate.validation,
+  });
+  draft.llmEligible = false;
 }
 
 function normalizeLabelContextText(value: string | null | undefined): string {
@@ -2506,6 +3207,21 @@ function deriveDeterministicResolution(
     classPenaltyReason: undefined,
   };
 
+  if (config.enableCapturedCandidateShadowEvaluation) {
+    try {
+      baseMetadata.shadowEvaluation = computeCapturedCandidateShadowEvaluation(step, snapshot);
+    } catch (error) {
+      baseMetadata.shadowEvaluation = {
+        status: 'failed',
+        candidateCount: step.fingerprint?.selectorCandidates?.length ?? 0,
+        convertedCandidateCount: 0,
+        uniqueCandidateCount: 0,
+        semanticallySafeCandidateCount: 0,
+        failureReason: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   if (!snapshot) {
     baseMetadata.warningCodes.push('snapshot-unavailable');
     if (!ctx.snapshotEngineAvailable) {
@@ -3457,7 +4173,7 @@ export async function resolveSelectorsForSession(
       ];
     }
 
-    return deriveDeterministicResolution(
+    const draft = deriveDeterministicResolution(
       step,
       snapshot,
       resolvedConfig,
@@ -3466,6 +4182,8 @@ export async function resolveSelectorsForSession(
       snapshotSelection,
       evaluatedCandidates,
     );
+    maybeApplyCapturedCandidateDirectPromotion(draft, resolvedConfig);
+    return draft;
   });
 
   const hasAnySnapshot = drafts.some(draft => draft.snapshot !== null);

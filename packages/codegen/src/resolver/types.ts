@@ -19,6 +19,8 @@ import type { SnapshotSelectionResult } from '../snapshot-selector';
 
 export interface ResolverConfig {
   enableLLMFallback?: boolean;
+  enableCapturedCandidateShadowEvaluation?: boolean;
+  enableCapturedCandidateDirectPromotion?: boolean;
   resolverMinScore?: number;
   intentMinScore?: number;
   maxSnapshotBytesForValidation?: number;
@@ -33,6 +35,8 @@ export interface ResolverConfig {
 
 export interface ResolvedResolverConfig {
   enableLLMFallback: boolean;
+  enableCapturedCandidateShadowEvaluation: boolean;
+  enableCapturedCandidateDirectPromotion: boolean;
   resolverMinScore: number;
   intentMinScore: number;
   maxSnapshotBytesForValidation: number;
