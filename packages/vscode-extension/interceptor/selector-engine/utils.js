@@ -82,6 +82,40 @@ export function queryAll(root, selector) {
   }
 }
 
+export function queryXPathAll(root, expression, contextNode) {
+  const normalizedExpression = safeTrim(expression);
+  if (!normalizedExpression) return [];
+
+  const documentRef = contextNode?.ownerDocument
+    || root?.ownerDocument
+    || (root?.nodeType === Node.DOCUMENT_NODE ? root : document);
+  if (!documentRef || typeof documentRef.evaluate !== 'function') return [];
+
+  const evaluationContext = normalizedExpression.startsWith('.')
+    ? (contextNode || documentRef.documentElement || documentRef)
+    : documentRef;
+
+  try {
+    const result = documentRef.evaluate(
+      normalizedExpression,
+      evaluationContext,
+      null,
+      XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+      null,
+    );
+    const matches = [];
+    for (let index = 0; index < result.snapshotLength; index += 1) {
+      const node = result.snapshotItem(index);
+      if (node && node.nodeType === Node.ELEMENT_NODE) {
+        matches.push(node);
+      }
+    }
+    return matches;
+  } catch {
+    return [];
+  }
+}
+
 export function dedupeCandidates(candidates, maxCandidates) {
   const seen = new Set();
   const deduped = [];
@@ -100,10 +134,16 @@ export function dedupeCandidates(candidates, maxCandidates) {
   return deduped;
 }
 
+export function escapeQuotedAttributeValue(value) {
+  return safeTrim(value)
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"');
+}
+
 export function buildAttributeSelector(tagName, attributeName, attributeValue, options = {}) {
   const value = safeTrim(attributeValue);
   if (!value) return null;
-  const escapedValue = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const escapedValue = escapeQuotedAttributeValue(value);
   const tagPrefix = options.tagScoped === false ? '' : safeTrim(tagName || '').toLowerCase();
   return `${tagPrefix || ''}[${attributeName}="${escapedValue}"]`;
 }

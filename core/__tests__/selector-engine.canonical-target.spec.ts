@@ -61,6 +61,8 @@ describe('selector engine canonical custom-control targets', () => {
       });
 
       expect(canonical.canonicalDiffers).toBe(true);
+      expect('rawTarget' in canonical).toBe(false);
+      expect('canonicalTarget' in canonical).toBe(false);
       expect(canonical.rawTargetSummary).toEqual(expect.objectContaining({
         classList: 'select-trigger',
       }));
@@ -116,6 +118,8 @@ describe('selector engine canonical custom-control targets', () => {
       });
 
       expect(canonical.canonicalDiffers).toBe(false);
+      expect('rawTarget' in canonical).toBe(false);
+      expect('canonicalTarget' in canonical).toBe(false);
       expect(canonical.canonicalTargetSummary).toBeNull();
       expect(canonical.blockedReason).toBe('ambiguous-descendants');
 

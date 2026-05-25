@@ -1,10 +1,12 @@
 import {
+  buildAttributeSelector,
   getSafeClassTokens,
   isLikelyDynamicId,
   normalizeText,
   safeCssEscape,
   safeTrim,
 } from '../utils.js';
+import { resolveCanonicalCustomControlTargetInternal } from '../canonical-target.js';
 
 const MAX_CONTAINER_DEPTH = 5;
 const STOP_TAGS = new Set([
@@ -144,13 +146,13 @@ function collectExplicitLabelProof(target) {
 
   if (target?.id) {
     try {
-      const label = documentRef.querySelector(`label[for="${safeCssEscape(target.id)}"]`);
+      const labelSelector = buildAttributeSelector('label', 'for', target.id);
+      const label = labelSelector ? documentRef.querySelector(labelSelector) : null;
       const text = normalizeLabelText(label?.textContent || '');
       if (label && text) {
         return {
           fieldLabelText: text,
           fieldRelation: 'label-for',
-          labelElement: label,
         };
       }
     } catch {
@@ -164,7 +166,6 @@ function collectExplicitLabelProof(target) {
     return {
       fieldLabelText: wrappedText,
       fieldRelation: 'wrapped-label',
-      labelElement: wrappedLabel,
     };
   }
 
@@ -259,27 +260,31 @@ function deriveContainerSelectorCandidates(container) {
 
   const tagName = container.tagName?.toLowerCase?.() || 'div';
   const candidates = [];
-  const pushCandidate = (selector, isClean) => {
+  const pushCandidate = (selector, kind, isClean) => {
     if (!selector) return;
     if (candidates.some((entry) => entry.selector === selector)) return;
-    candidates.push({ selector, isClean });
+    candidates.push({ selector, kind, isClean });
   };
 
-  const dataTestId = container.getAttribute('data-testid');
-  if (dataTestId) pushCandidate(`[data-testid="${dataTestId.replace(/"/g, '\\"')}"]`, true);
+  const dataTestIdSelector = buildAttributeSelector(null, 'data-testid', container.getAttribute('data-testid'), { tagScoped: false });
+  if (dataTestIdSelector) pushCandidate(dataTestIdSelector, 'data-testid', true);
 
   for (const attrName of ['data-cy', 'data-qa']) {
-    const attrValue = container.getAttribute(attrName);
-    if (attrValue) pushCandidate(`${tagName}[${attrName}="${attrValue.replace(/"/g, '\\"')}"]`, true);
+    const selector = buildAttributeSelector(tagName, attrName, container.getAttribute(attrName));
+    if (selector) pushCandidate(selector, attrName, true);
   }
 
   if (container.id && !isLikelyDynamicId(container.id)) {
-    pushCandidate(`#${safeCssEscape(container.id)}`, true);
+    pushCandidate(`#${safeCssEscape(container.id)}`, 'id', true);
   }
 
   const classToken = getBestStableClassToken(container);
   if (classToken) {
-    pushCandidate(`${tagName}.${safeCssEscape(classToken)}`, !isFrameworkClassToken(classToken));
+    pushCandidate(
+      `${tagName}.${safeCssEscape(classToken)}`,
+      isFrameworkClassToken(classToken) ? 'framework-class' : 'semantic-class',
+      !isFrameworkClassToken(classToken),
+    );
   }
 
   const cleanParentSelector = candidates.find((entry) => entry.isClean)?.selector || null;
@@ -299,24 +304,24 @@ function buildChildSelector(target, selectorResult, controlKind) {
 
   const attributeSelector = (() => {
     for (const attrName of ['data-testid', 'data-cy', 'data-qa']) {
-      const attrValue = target.getAttribute(attrName);
-      if (attrValue) return `${tagName}[${attrName}="${attrValue.replace(/"/g, '\\"')}"]`;
+      const selector = buildAttributeSelector(tagName, attrName, target.getAttribute(attrName));
+      if (selector) return selector;
     }
 
-    const name = target.getAttribute('name');
-    if (name) return `${tagName}[name="${name.replace(/"/g, '\\"')}"]`;
+    const nameSelector = buildAttributeSelector(tagName, 'name', target.getAttribute('name'));
+    if (nameSelector) return nameSelector;
 
-    const ariaLabel = target.getAttribute('aria-label');
-    if (ariaLabel) return `${tagName}[aria-label="${ariaLabel.replace(/"/g, '\\"')}"]`;
+    const ariaLabelSelector = buildAttributeSelector(tagName, 'aria-label', target.getAttribute('aria-label'));
+    if (ariaLabelSelector) return ariaLabelSelector;
 
     const role = getRole(target);
     const hasPopup = safeTrim(target.getAttribute('aria-haspopup') || '').toLowerCase();
     if (role === 'combobox') return `${tagName}[role="combobox"]`;
     if (role === 'button' && hasPopup) {
-      return `${tagName}[role="button"][aria-haspopup="${hasPopup.replace(/"/g, '\\"')}"]`;
+      return `${tagName}[role="button"][aria-haspopup="${hasPopup.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"]`;
     }
     if (controlKind === 'custom-trigger' && (hasPopup === 'listbox' || hasPopup === 'combobox')) {
-      return `${tagName}[aria-haspopup="${hasPopup.replace(/"/g, '\\"')}"]`;
+      return `${tagName}[aria-haspopup="${hasPopup.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"]`;
     }
 
     return null;
@@ -363,8 +368,8 @@ function findBoundedContainerProof(scopeTarget, childTarget, selectorResult, con
     if (labelCandidates.length > 1 && targetIndex >= 0) {
       return {
         isValid: false,
-        blockedReason: 'duplicate-container-labels',
-        warningCodes: ['duplicate-container-labels'],
+        blockedReason: 'bounded-field-duplicate-label',
+        warningCodes: ['bounded-field-duplicate-label'],
       };
     }
 
@@ -373,7 +378,7 @@ function findBoundedContainerProof(scopeTarget, childTarget, selectorResult, con
       const fieldLabelText = labelCandidates[0].text;
       return {
         fieldLabelText,
-        fieldRelation: 'bounded-container',
+        fieldRelation: labelCandidates[0].element.parentElement === current ? 'sibling-label' : 'bounded-container',
         visibleControlCountInContainer: 1,
         competingControlCount: 0,
         targetIndexWithinContainer: 0,
@@ -392,8 +397,8 @@ function findBoundedContainerProof(scopeTarget, childTarget, selectorResult, con
     if (labelCandidates.length === 1 && targetIndex >= 0 && controls.length > 1) {
       return {
         isValid: false,
-        blockedReason: 'multiple-control-like-targets',
-        warningCodes: ['multiple-control-like-targets'],
+        blockedReason: 'bounded-field-multiple-targets',
+        warningCodes: ['bounded-field-multiple-targets'],
       };
     }
 
@@ -403,7 +408,7 @@ function findBoundedContainerProof(scopeTarget, childTarget, selectorResult, con
 
   return {
     isValid: false,
-    blockedReason: 'no-bounded-label-context',
+    blockedReason: 'bounded-field-broad-container',
     warningCodes: [],
   };
 }
@@ -415,14 +420,15 @@ export function resolveLabelContextEvidence({
   canonicalTargetInfo,
 } = {}) {
   const rawTarget = element || null;
-  const effectiveTarget = resolveEffectiveTarget(rawTarget, canonicalTargetInfo);
+  const resolvedCanonicalTargetInfo = canonicalTargetInfo?.canonicalTarget
+    ? canonicalTargetInfo
+    : resolveCanonicalCustomControlTargetInternal(rawTarget, eventContext);
+  const effectiveTarget = resolveEffectiveTarget(rawTarget, resolvedCanonicalTargetInfo);
   const rawTargetSummary = summarizeTarget(rawTarget);
   const effectiveTargetSummary = summarizeTarget(effectiveTarget);
   const targetControlKind = resolveControlKind(effectiveTarget, eventContext);
   const scopeTarget = targetControlKind === 'custom-trigger' ? rawTarget : effectiveTarget;
   const base = {
-    rawTarget,
-    effectiveTarget,
     rawTargetSummary,
     effectiveTargetSummary,
     usedCanonicalTarget: effectiveTarget !== rawTarget,
@@ -475,6 +481,7 @@ export function resolveLabelContextEvidence({
       fieldRelation: explicitProof.fieldRelation,
       duplicateLabelCount: countDocumentLabelDuplicates(scopeTarget, explicitProof.fieldLabelText),
       cleanChildSelector: buildChildSelector(effectiveTarget, selectorResult, targetControlKind),
+      boundedContainerSelectorCandidates: [],
       isValid: true,
     };
   }

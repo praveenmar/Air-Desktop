@@ -252,7 +252,18 @@ function chooseCanonicalCandidate(rawTarget, entries) {
   };
 }
 
-export function resolveCanonicalCustomControlTarget(rawTarget, eventContext) {
+function stripInternalTargets(result) {
+  return {
+    rawTargetSummary: result.rawTargetSummary,
+    canonicalTargetSummary: result.canonicalTargetSummary,
+    canonicalReason: result.canonicalReason,
+    canonicalConfidence: result.canonicalConfidence,
+    canonicalDiffers: result.canonicalDiffers,
+    blockedReason: result.blockedReason,
+  };
+}
+
+export function resolveCanonicalCustomControlTargetInternal(rawTarget, eventContext) {
   const rawTargetSummary = summarizeTarget(rawTarget);
   const base = {
     rawTarget,
@@ -304,4 +315,8 @@ export function resolveCanonicalCustomControlTarget(rawTarget, eventContext) {
     canonicalDiffers: selection.winner.element !== rawTarget,
     blockedReason: null,
   };
+}
+
+export function resolveCanonicalCustomControlTarget(rawTarget, eventContext) {
+  return stripInternalTargets(resolveCanonicalCustomControlTargetInternal(rawTarget, eventContext));
 }

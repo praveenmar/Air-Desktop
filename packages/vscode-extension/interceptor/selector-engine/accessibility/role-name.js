@@ -1,8 +1,9 @@
 import {
+  buildAttributeSelector,
   normalizeText,
-  safeCssEscape,
   safeTrim,
 } from '../utils.js';
+import { resolveCanonicalCustomControlTargetInternal } from '../canonical-target.js';
 
 const TEXTBOX_INPUT_TYPES = new Set([
   '',
@@ -128,7 +129,8 @@ function buildEvidenceForTarget(target) {
 
   if (target?.id) {
     try {
-      const label = documentRef.querySelector(`label[for="${safeCssEscape(target.id)}"]`);
+      const labelSelector = buildAttributeSelector('label', 'for', target.id);
+      const label = labelSelector ? documentRef.querySelector(labelSelector) : null;
       const accessibleName = normalizeAccessibleText(label?.textContent || '');
       if (accessibleName) {
         return {
@@ -249,17 +251,19 @@ function uniqueTargets(rawTarget, effectiveTarget) {
 
 export function resolveAccessibilityEvidence({
   element,
+  eventContext,
   canonicalTargetInfo,
 } = {}) {
   const rawTarget = element || null;
-  const effectiveTarget = canonicalTargetInfo?.canonicalDiffers && canonicalTargetInfo?.canonicalTarget
-    ? canonicalTargetInfo.canonicalTarget
+  const resolvedCanonicalTargetInfo = canonicalTargetInfo?.canonicalTarget
+    ? canonicalTargetInfo
+    : resolveCanonicalCustomControlTargetInternal(rawTarget, eventContext);
+  const effectiveTarget = resolvedCanonicalTargetInfo?.canonicalDiffers && resolvedCanonicalTargetInfo?.canonicalTarget
+    ? resolvedCanonicalTargetInfo.canonicalTarget
     : rawTarget;
   const rawTargetSummary = summarizeTarget(rawTarget);
   const effectiveTargetSummary = summarizeTarget(effectiveTarget);
   const base = {
-    rawTarget,
-    effectiveTarget,
     rawTargetSummary,
     effectiveTargetSummary,
     proofTargetSummary: null,

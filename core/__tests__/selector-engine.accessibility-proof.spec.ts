@@ -49,6 +49,8 @@ describe('selector engine modular accessibility proof', () => {
         element: target,
       });
 
+      expect('rawTarget' in evidence).toBe(false);
+      expect('effectiveTarget' in evidence).toBe(false);
       expect(evidence.role).toBe('textbox');
       expect(evidence.roleSource).toBe('native-role');
       expect(evidence.accessibleName).toBe('Username');
@@ -69,17 +71,16 @@ describe('selector engine modular accessibility proof', () => {
     `, 'https://example.test/admin', async () => {
       const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
       const rawTarget = document.querySelector('.select-trigger') as HTMLDivElement;
-      const canonicalTargetInfo = selectorEngine.resolveCanonicalCustomControlTarget(rawTarget, {
-        eventType: 'custom-control-open',
-        trigger: 'trigger-click',
-      });
-
       const evidence = selectorEngine.resolveAccessibilityEvidence({
         element: rawTarget,
-        canonicalTargetInfo,
+        eventContext: {
+          eventType: 'custom-control-open',
+          trigger: 'trigger-click',
+        },
       });
 
-      expect(canonicalTargetInfo.canonicalDiffers).toBe(true);
+      expect('rawTarget' in evidence).toBe(false);
+      expect('effectiveTarget' in evidence).toBe(false);
       expect(evidence.role).toBe('combobox');
       expect(evidence.roleSource).toBe('explicit-role');
       expect(evidence.accessibleName).toBe('User Role');
@@ -99,17 +100,16 @@ describe('selector engine modular accessibility proof', () => {
     `, 'https://example.test/admin', async () => {
       const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
       const rawTarget = document.querySelector('.action-shell') as HTMLDivElement;
-      const canonicalTargetInfo = selectorEngine.resolveCanonicalCustomControlTarget(rawTarget, {
-        eventType: 'custom-control-open',
-        trigger: 'trigger-click',
-      });
-
       const evidence = selectorEngine.resolveAccessibilityEvidence({
         element: rawTarget,
-        canonicalTargetInfo,
+        eventContext: {
+          eventType: 'custom-control-open',
+          trigger: 'trigger-click',
+        },
       });
 
-      expect(canonicalTargetInfo.canonicalDiffers).toBe(true);
+      expect('rawTarget' in evidence).toBe(false);
+      expect('effectiveTarget' in evidence).toBe(false);
       expect(evidence.usedCanonicalTarget).toBe(true);
       expect(evidence.role).toBe('button');
       expect(evidence.roleSource).toBe('explicit-role');

@@ -34,43 +34,8 @@ afterEach(() => {
   delete (globalThis as any).__AIR_SELECTOR_ENGINE__;
 });
 
-describe('selector engine shadow label context proof', () => {
-  it('resolves native label-for associations without needing bounded container proof', async () => {
-    await withBrowserGlobals(`
-      <div data-testid="username-field">
-        <label for="username">Username</label>
-        <input id="username" name="username" />
-      </div>
-    `, 'https://example.test/admin', async () => {
-      const { resolveLabelContextEvidence } = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
-      const target = document.querySelector('#username') as HTMLInputElement;
-
-      const proof = resolveLabelContextEvidence({
-        element: target,
-        selectorResult: {
-          selector: '#username',
-          priority: 'id',
-          rank: 1,
-        },
-        eventContext: {
-          eventType: 'input',
-          trigger: 'input:commit',
-        },
-      });
-
-      expect(proof.isValid).toBe(true);
-      expect('rawTarget' in proof).toBe(false);
-      expect('effectiveTarget' in proof).toBe(false);
-      expect(proof.fieldLabelText).toBe('Username');
-      expect(proof.fieldRelation).toBe('label-for');
-      expect(proof.targetControlKind).toBe('input');
-      expect(proof.usedCanonicalTarget).toBe(false);
-      expect(proof.cleanChildSelector).toBe('input[name="username"]');
-      expect(proof.blockedReason).toBeNull();
-    });
-  });
-
-  it('uses the canonical inner node for child proof while preserving raw custom trigger scope', async () => {
+describe('selector engine modular bounded-field core', () => {
+  it('returns a legacy-aligned bounded-field shape for repeated custom triggers', async () => {
     await withBrowserGlobals(`
       <div data-testid="user-role-field" class="field-row">
         <label>User Role</label>
@@ -87,14 +52,10 @@ describe('selector engine shadow label context proof', () => {
         </div>
       </div>
     `, 'https://example.test/admin', async () => {
-      const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
+      const { resolveBoundedFieldContextEvidence } = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
       const rawTarget = document.querySelector('.field-row .select-trigger') as HTMLDivElement;
-      const canonicalTargetInfo = selectorEngine.resolveCanonicalCustomControlTarget(rawTarget, {
-        eventType: 'custom-control-open',
-        trigger: 'trigger-click',
-      });
 
-      const proof = selectorEngine.resolveLabelContextEvidence({
+      const proof = resolveBoundedFieldContextEvidence({
         element: rawTarget,
         selectorResult: {
           selector: '.select-trigger',
@@ -105,10 +66,8 @@ describe('selector engine shadow label context proof', () => {
           eventType: 'custom-control-open',
           trigger: 'trigger-click',
         },
-        canonicalTargetInfo,
       });
 
-      expect(proof.isValid).toBe(true);
       expect('rawTarget' in proof).toBe(false);
       expect('effectiveTarget' in proof).toBe(false);
       expect(proof.fieldLabelText).toBe('User Role');
@@ -116,11 +75,9 @@ describe('selector engine shadow label context proof', () => {
       expect(proof.targetControlKind).toBe('custom-trigger');
       expect(proof.usedCanonicalTarget).toBe(true);
       expect(proof.visibleControlCountInContainer).toBe(1);
-      expect(proof.competingControlCount).toBe(0);
       expect(proof.targetIndexWithinContainer).toBe(0);
       expect(proof.cleanParentSelector).toBe('[data-testid="user-role-field"]');
       expect(proof.cleanChildSelector).toBe('div.select-trigger-input');
-      expect(proof.containerSelector).toBe('[data-testid="user-role-field"]');
       expect(proof.boundedContainerSelectorCandidates).toEqual(expect.arrayContaining([
         expect.objectContaining({
           selector: '[data-testid="user-role-field"]',
@@ -128,11 +85,46 @@ describe('selector engine shadow label context proof', () => {
           isClean: true,
         }),
       ]));
+      expect(proof.isValid).toBe(true);
       expect(proof.blockedReason).toBeNull();
     });
   });
 
-  it('fails closed when a labelled container still has multiple trigger-like targets', async () => {
+  it('preserves explicit native label proofs while returning bounded-field-aligned output', async () => {
+    await withBrowserGlobals(`
+      <div class="field-row">
+        <label for="username">Username</label>
+        <input id="username" name="username" />
+      </div>
+    `, 'https://example.test/admin', async () => {
+      const { resolveBoundedFieldContextEvidence } = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
+      const target = document.querySelector('#username') as HTMLInputElement;
+
+      const proof = resolveBoundedFieldContextEvidence({
+        element: target,
+        selectorResult: {
+          selector: '#username',
+          priority: 'id',
+          rank: 1,
+        },
+        eventContext: {
+          eventType: 'input',
+          trigger: 'input:commit',
+        },
+      });
+
+      expect('rawTarget' in proof).toBe(false);
+      expect('effectiveTarget' in proof).toBe(false);
+      expect(proof.fieldLabelText).toBe('Username');
+      expect(proof.fieldRelation).toBe('label-for');
+      expect(proof.targetControlKind).toBe('input');
+      expect(proof.cleanChildSelector).toBe('input[name="username"]');
+      expect(proof.isValid).toBe(true);
+      expect(proof.blockedReason).toBeNull();
+    });
+  });
+
+  it('fails closed with legacy-style blocked reasons when repeated triggers remain ambiguous', async () => {
     await withBrowserGlobals(`
       <div data-testid="user-role-field">
         <label>User Role</label>
@@ -144,14 +136,10 @@ describe('selector engine shadow label context proof', () => {
         </div>
       </div>
     `, 'https://example.test/admin', async () => {
-      const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
+      const { resolveBoundedFieldContextEvidence } = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
       const rawTarget = document.querySelector('.select-trigger') as HTMLDivElement;
-      const canonicalTargetInfo = selectorEngine.resolveCanonicalCustomControlTarget(rawTarget, {
-        eventType: 'custom-control-open',
-        trigger: 'trigger-click',
-      });
 
-      const proof = selectorEngine.resolveLabelContextEvidence({
+      const proof = resolveBoundedFieldContextEvidence({
         element: rawTarget,
         selectorResult: {
           selector: '.select-trigger',
@@ -162,15 +150,13 @@ describe('selector engine shadow label context proof', () => {
           eventType: 'custom-control-open',
           trigger: 'trigger-click',
         },
-        canonicalTargetInfo,
       });
 
-      expect(proof.isValid).toBe(false);
       expect('rawTarget' in proof).toBe(false);
       expect('effectiveTarget' in proof).toBe(false);
+      expect(proof.isValid).toBe(false);
       expect(proof.fieldLabelText).toBeNull();
       expect(proof.blockedReason).toBe('bounded-field-multiple-targets');
-      expect(proof.warningCodes).toContain('bounded-field-multiple-targets');
     });
   });
 });

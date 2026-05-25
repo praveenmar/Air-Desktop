@@ -1,17 +1,37 @@
 import { DEFAULT_MAX_CANDIDATES, SELECTOR_ENGINE_VERSION } from './types.js';
-import { resolveCanonicalCustomControlTarget } from './canonical-target.js';
+import {
+  resolveCanonicalCustomControlTarget,
+  resolveCanonicalCustomControlTargetInternal,
+} from './canonical-target.js';
 import { resolveAccessibilityEvidence } from './accessibility/role-name.js';
+import { resolveBoundedFieldContextEvidence } from './context/bounded-field.js';
+import { collectBoundedFieldSelectorProposals } from './context/bounded-field-bridging.js';
+import { compareBoundedFieldContextEvidence } from './context/bounded-field-parity.js';
+import { buildBoundedFieldShadowExposure } from './context/bounded-field-shadow.js';
 import { resolveLabelContextEvidence } from './context/labels.js';
+import { resolveOptionPanelContextEvidence } from './context/option-panel.js';
+import { resolveTableRowContextEvidence } from './context/table-row.js';
 import { debugLog, debugLogOnce } from './debug.js';
 import { finalizeCandidates } from './evaluation.js';
 import { collectStructuralCandidates } from './generators/structural.js';
 import { collectDirectCandidates, collectDirectFamilyCandidates } from './generators/direct.js';
 import { collectSecondaryCandidates } from './generators/secondary.js';
+import { buildSelectorPreferenceShadow, classifySelectorCandidatePreference } from './preference-tiers.js';
 import { dedupeCandidates } from './utils.js';
+import { collectWeakAppShadowCoverage } from './weak-app-shadow.js';
 
 export { resolveCanonicalCustomControlTarget };
 export { resolveAccessibilityEvidence };
+export { resolveBoundedFieldContextEvidence };
+export { collectBoundedFieldSelectorProposals };
+export { compareBoundedFieldContextEvidence };
+export { buildBoundedFieldShadowExposure };
 export { resolveLabelContextEvidence };
+export { resolveOptionPanelContextEvidence };
+export { resolveTableRowContextEvidence };
+export { classifySelectorCandidatePreference };
+export { buildSelectorPreferenceShadow };
+export { collectWeakAppShadowCoverage };
 
 function isStructuralFamily(candidate) {
   return candidate?.family === 'tight-container-css' || candidate?.family === 'parent-scoped-css';
@@ -57,7 +77,9 @@ export function collectShadowSelectorCandidates({
   canonicalTargetInfo = undefined,
 }) {
   if (!element) return [];
-  const resolvedCanonicalTargetInfo = canonicalTargetInfo || resolveCanonicalCustomControlTarget(element, eventContext);
+  const resolvedCanonicalTargetInfo = canonicalTargetInfo?.canonicalTarget
+    ? canonicalTargetInfo
+    : resolveCanonicalCustomControlTargetInternal(element, eventContext);
   const baseCandidateInputs = [
     ...collectDirectCandidates(element),
     ...collectSecondaryCandidates(element),
@@ -108,7 +130,16 @@ const api = {
   collectDirectFamilySelectorCandidates,
   resolveCanonicalCustomControlTarget,
   resolveAccessibilityEvidence,
+  resolveBoundedFieldContextEvidence,
+  collectBoundedFieldSelectorProposals,
+  compareBoundedFieldContextEvidence,
+  buildBoundedFieldShadowExposure,
   resolveLabelContextEvidence,
+  resolveOptionPanelContextEvidence,
+  resolveTableRowContextEvidence,
+  classifySelectorCandidatePreference,
+  buildSelectorPreferenceShadow,
+  collectWeakAppShadowCoverage,
 };
 
 if (typeof globalThis !== 'undefined') {

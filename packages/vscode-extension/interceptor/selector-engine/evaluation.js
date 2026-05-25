@@ -9,6 +9,7 @@ import {
   isVisible,
   parseHasTextSelector,
   queryAll,
+  queryXPathAll,
 } from './utils.js';
 
 const MAX_TEXT_QUERY_SCOPE = 500;
@@ -88,6 +89,13 @@ function collectMatches(root, candidateInput) {
     return queryTextMatches(root, candidateInput);
   }
 
+  if (candidateInput?.engine === 'xpath' || candidateInput?.family === 'xpath') {
+    return {
+      matches: queryXPathAll(root, candidateInput?.selector, candidateInput?.queryTarget || null),
+      warningCodes: [],
+    };
+  }
+
   return {
     matches: queryAll(root, candidateInput?.selector),
     warningCodes: [],
@@ -140,6 +148,7 @@ export function finalizeCandidates(element, candidates, maxCandidates = DEFAULT_
       engine: candidateInput.engine || 'css',
       family: candidateInput.family,
       source: 'shadow',
+      proposalSource: candidateInput.proposalSource || null,
       strength: resolveStrength(candidateInput, metadata),
       usesDynamicClass: candidateInput.usesDynamicClass === true,
       usesIndex: candidateInput.usesIndex === true,
