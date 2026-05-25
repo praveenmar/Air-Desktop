@@ -235,6 +235,10 @@ function buildConfigScript(sessionId: string, port: number): string {
   const interceptorDiagnosticsEndpoint = `${serverUrl}/api/debug/logs/interceptor`;
   const enableModularDirectCandidateParity =
     process.env.AIR_ENABLE_MODULAR_DIRECT_CANDIDATE_PARITY === '1';
+  const enableModularStructuralParity =
+    process.env.AIR_ENABLE_MODULAR_STRUCTURAL_PARITY === '1';
+  const enableModularDirectCandidateReplacement =
+    process.env.AIR_ENABLE_MODULAR_DIRECT_CANDIDATE_REPLACEMENT === '1';
   return `
     window.__AIR_CONFIG__ = {
       sessionId: ${JSON.stringify(sessionId)},
@@ -243,7 +247,9 @@ function buildConfigScript(sessionId: string, port: number): string {
       selectorEngineShadowMode: true,
       selectorEngineShadowLogDiffs: true,
       selectorEngineShadowMaxCandidates: 12,
+      enableModularStructuralParity: ${enableModularStructuralParity ? 'true' : 'false'},
       enableModularDirectCandidateParity: ${enableModularDirectCandidateParity ? 'true' : 'false'},
+      enableModularDirectCandidateReplacement: ${enableModularDirectCandidateReplacement ? 'true' : 'false'},
       persistInterceptorDiagnostics: true,
       interceptorDiagnosticsEndpoint: ${JSON.stringify(interceptorDiagnosticsEndpoint)}
     };

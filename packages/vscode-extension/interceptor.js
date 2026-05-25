@@ -178,6 +178,13 @@ const MODULAR_DIRECT_CANDIDATE_FAMILIES = new Set([
   "aria-label",
   "placeholder",
 ]);
+const MODULAR_DIRECT_CANDIDATE_REPLACEMENT_FAMILIES = new Set([
+  "test-id",
+  "id",
+  "name",
+  "aria-label",
+  "placeholder",
+]);
 const DIRECT_CANDIDATE_PARITY_MAX_ITEMS = 5;
 const DIRECT_CANDIDATE_PARITY_MAX_SELECTOR_CHARS = 300;
 const INTERCEPTOR_DIAGNOSTIC_MAX_ARRAY_ITEMS = 12;
@@ -185,12 +192,14 @@ const INTERCEPTOR_DIAGNOSTIC_MAX_DEPTH = 4;
 const PERSISTED_INTERCEPTOR_DIAGNOSTIC_MESSAGES = new Set([
   "DIRECT_CANDIDATE_PARITY",
   "DIRECT_CANDIDATE_PARITY_FAILED",
+  "DIRECT_CANDIDATE_REPLACEMENT_DECISION",
   "SELECTOR_ENGINE_SHADOW_DIFF",
   "SELECTOR_ENGINE_SHADOW_FAILED",
 ]);
 const MAX_SELECTOR_VISIBLE_INDEX_MATCHES = 100;
 const MAX_TIGHT_CONTAINER_DEPTH = 8;
 const MAX_TIGHT_CONTAINER_CONTROL_LIKE_DESCENDANTS = 4;
+const MAX_CAPTURE_BOUNDED_FIELD_DEPTH = 5;
 const AIR_TARGET_NODE_ID_ATTR = "data-air-node-id";
 const TIGHT_CONTAINER_INPUT_LIKE_SELECTOR = [
   'input:not([type="hidden"])',
@@ -222,6 +231,30 @@ const TIGHT_CONTAINER_BROAD_TAGS = new Set([
   'tbody',
   'thead',
 ]);
+const BOUNDED_FIELD_STOP_TAGS = new Set([
+  'body',
+  'html',
+  'main',
+  'section',
+  'article',
+  'table',
+  'tbody',
+  'thead',
+  'form',
+]);
+const BOUNDED_FIELD_LABEL_SELECTOR = [
+  'label',
+  'legend',
+  'span',
+  'div',
+  'p',
+].join(', ');
+const BOUNDED_FIELD_CONTROL_SELECTOR = [
+  TIGHT_CONTAINER_INPUT_LIKE_SELECTOR,
+  TIGHT_CONTAINER_TRIGGER_LIKE_SELECTOR,
+  '.select-trigger',
+  '.oxd-select-text',
+].join(', ');
 const SELECTOR_CANDIDATE_HOT_PATH_EVENT_TYPES = new Set([
   'hover',
   'scroll',
@@ -585,8 +618,12 @@ class AIRInterceptor {
         window.__AIR_CONFIG__?.selectorEngineShadowLogDiffs ?? config.selectorEngineShadowLogDiffs ?? true,
       selectorEngineShadowMaxCandidates:
         window.__AIR_CONFIG__?.selectorEngineShadowMaxCandidates ?? config.selectorEngineShadowMaxCandidates ?? 12,
+      enableModularStructuralParity:
+        window.__AIR_CONFIG__?.enableModularStructuralParity ?? config.enableModularStructuralParity ?? false,
       enableModularDirectCandidateParity:
         window.__AIR_CONFIG__?.enableModularDirectCandidateParity ?? config.enableModularDirectCandidateParity ?? false,
+      enableModularDirectCandidateReplacement:
+        window.__AIR_CONFIG__?.enableModularDirectCandidateReplacement ?? config.enableModularDirectCandidateReplacement ?? false,
       persistInterceptorDiagnostics:
         window.__AIR_CONFIG__?.persistInterceptorDiagnostics ?? config.persistInterceptorDiagnostics ?? false,
       interceptorDiagnosticsEndpoint:
@@ -6574,9 +6611,10 @@ class AIRInterceptor {
     const selectorResult = this.generateOptimalSelector(element);
     const textExcerpt = this.extractText(element);
     const context = this.extractContext(element);
-    const attributes = this.extractAttributes(element);
+    let attributes = this.extractAttributes(element);
     const selectorAmbiguity = this._collectSelectorAmbiguity(element, selectorResult);
     const boundedFieldContext = this._collectBoundedFieldContext(element, selectorResult);
+    attributes = this._applyBoundedFieldAttributeCarryThrough(attributes, boundedFieldContext);
     const accessibilityEvidence = this._collectAccessibilityEvidence(element);
     const attributesHash = this.hashAttributes(attributes);
     let selectorCandidates;
@@ -6620,6 +6658,32 @@ class AIRInterceptor {
         eventType: typeof eventContext?.eventType === "string" ? eventContext.eventType : null,
         trigger: typeof eventContext?.trigger === "string" ? eventContext.trigger : null,
         message: error?.message || String(error),
+      });
+    }
+
+    try {
+      selectorCandidates = this._applyModularDirectCandidateReplacement(
+        element,
+        selectorResult,
+        eventContext,
+        selectorCandidates,
+      );
+    } catch (error) {
+      this.log("DIRECT_CANDIDATE_REPLACEMENT_DECISION", {
+        eventType: typeof eventContext?.eventType === "string" ? eventContext.eventType : null,
+        trigger: typeof eventContext?.trigger === "string" ? eventContext.trigger : null,
+        replacementAttempted: true,
+        replacedCount: 0,
+        keptOldCount: Array.isArray(selectorCandidates) ? selectorCandidates.length : 0,
+        blockedReasons: {
+          replacement_failed: 1,
+        },
+        excludedHrefCount: Array.isArray(selectorCandidates)
+          ? selectorCandidates.filter((candidate) => candidate?.family === "href").length
+          : 0,
+        message: error?.message || String(error),
+        sessionId: this.config?.sessionId || null,
+        tabId: this.config?.tabId || null,
       });
     }
 
@@ -6824,6 +6888,34 @@ class AIRInterceptor {
     }));
   }
 
+  _summarizeSelectorEngineCanonicalTargetInfo(canonicalTargetInfo) {
+    if (!canonicalTargetInfo || typeof canonicalTargetInfo !== "object") return null;
+
+    return {
+      rawTargetSummary:
+        canonicalTargetInfo.rawTargetSummary && typeof canonicalTargetInfo.rawTargetSummary === "object"
+          ? canonicalTargetInfo.rawTargetSummary
+          : null,
+      canonicalTargetSummary:
+        canonicalTargetInfo.canonicalTargetSummary && typeof canonicalTargetInfo.canonicalTargetSummary === "object"
+          ? canonicalTargetInfo.canonicalTargetSummary
+          : null,
+      canonicalReason:
+        typeof canonicalTargetInfo.canonicalReason === "string"
+          ? canonicalTargetInfo.canonicalReason
+          : null,
+      canonicalConfidence:
+        typeof canonicalTargetInfo.canonicalConfidence === "number"
+          ? canonicalTargetInfo.canonicalConfidence
+          : null,
+      canonicalDiffers: canonicalTargetInfo.canonicalDiffers === true,
+      blockedReason:
+        typeof canonicalTargetInfo.blockedReason === "string"
+          ? canonicalTargetInfo.blockedReason
+          : null,
+    };
+  }
+
   _truncateParitySelector(selector) {
     const normalized = typeof selector === "string" ? selector : "";
     if (normalized.length <= DIRECT_CANDIDATE_PARITY_MAX_SELECTOR_CHARS) return normalized;
@@ -6908,6 +7000,249 @@ class AIRInterceptor {
     return diffs;
   }
 
+  _collectReplacementEligibleDirectCandidates(candidates) {
+    if (!Array.isArray(candidates)) return [];
+    return candidates.filter((candidate) => MODULAR_DIRECT_CANDIDATE_REPLACEMENT_FAMILIES.has(candidate?.family));
+  }
+
+  _incrementReplacementBlockedReason(blockedReasons, reason) {
+    if (!reason) return;
+    blockedReasons[reason] = (blockedReasons[reason] || 0) + 1;
+  }
+
+  _buildReplacementFamilyQueues(candidates) {
+    const queues = new Map();
+    for (const candidate of candidates) {
+      const family = typeof candidate?.family === "string" ? candidate.family : null;
+      if (!family) continue;
+      if (!queues.has(family)) {
+        queues.set(family, []);
+      }
+      queues.get(family).push(candidate);
+    }
+    return queues;
+  }
+
+  _isSafeModularReplacementCandidate(element, oldCandidate, modularCandidate) {
+    if (!oldCandidate || !modularCandidate) {
+      return {
+        safe: false,
+        reason: "missing-modular-candidate",
+      };
+    }
+
+    if (oldCandidate.family !== modularCandidate.family) {
+      return {
+        safe: false,
+        reason: "family-mismatch",
+      };
+    }
+
+    if (
+      typeof oldCandidate.selector !== "string" ||
+      typeof modularCandidate.selector !== "string" ||
+      oldCandidate.selector.trim() !== modularCandidate.selector.trim()
+    ) {
+      return {
+        safe: false,
+        reason: "selector-mismatch",
+      };
+    }
+
+    if (modularCandidate.engine !== "css") {
+      return {
+        safe: false,
+        reason: "non-css-engine",
+      };
+    }
+
+    if (typeof modularCandidate.matchCount !== "number" || modularCandidate.matchCount !== 1) {
+      return {
+        safe: false,
+        reason: "non-unique-match-count",
+      };
+    }
+
+    if (typeof modularCandidate.visibleMatchCount !== "number") {
+      return {
+        safe: false,
+        reason: "missing-visible-match-count",
+      };
+    }
+
+    if (modularCandidate.visibleMatchCount !== 1) {
+      return {
+        safe: false,
+        reason: "non-unique-visible-match-count",
+      };
+    }
+
+    if (Array.isArray(modularCandidate.warningCodes) && modularCandidate.warningCodes.length > 0) {
+      return {
+        safe: false,
+        reason: "warning-risk",
+      };
+    }
+
+    if (oldCandidate.family === "id" && this._isLikelyDynamicId(element?.id)) {
+      return {
+        safe: false,
+        reason: "dynamic-or-opaque-id",
+      };
+    }
+
+    if (
+      typeof oldCandidate.matchCount === "number" &&
+      oldCandidate.matchCount !== modularCandidate.matchCount
+    ) {
+      return {
+        safe: false,
+        reason: "match-count-mismatch",
+      };
+    }
+
+    if (
+      typeof oldCandidate.visibleMatchCount === "number" &&
+      oldCandidate.visibleMatchCount !== modularCandidate.visibleMatchCount
+    ) {
+      return {
+        safe: false,
+        reason: "visible-match-count-mismatch",
+      };
+    }
+
+    if (
+      typeof oldCandidate.strength === "string" &&
+      typeof modularCandidate.strength === "string" &&
+      oldCandidate.strength !== modularCandidate.strength
+    ) {
+      return {
+        safe: false,
+        reason: "strength-mismatch",
+      };
+    }
+
+    return {
+      safe: true,
+      reason: null,
+    };
+  }
+
+  _mergeSafeModularReplacementCandidate(oldCandidate, modularCandidate) {
+    const mergedCandidate = {
+      ...oldCandidate,
+      selector: modularCandidate.selector,
+      engine: modularCandidate.engine,
+      family: modularCandidate.family,
+      strength: modularCandidate.strength,
+      matchCount: modularCandidate.matchCount,
+      visibleMatchCount: modularCandidate.visibleMatchCount,
+    };
+
+    if (Array.isArray(modularCandidate.warningCodes) && modularCandidate.warningCodes.length > 0) {
+      mergedCandidate.warningCodes = [...modularCandidate.warningCodes];
+    } else {
+      delete mergedCandidate.warningCodes;
+    }
+
+    return mergedCandidate;
+  }
+
+  _applyModularDirectCandidateReplacement(element, selectorResult, eventContext, currentCandidates) {
+    if (!this.config?.enableModularDirectCandidateReplacement) {
+      return currentCandidates;
+    }
+
+    const replacementAttempted = true;
+    const blockedReasons = {};
+    const candidateList = Array.isArray(currentCandidates) ? currentCandidates : [];
+    const excludedHrefCount = candidateList.filter((candidate) => candidate?.family === "href").length;
+
+    if (candidateList.length === 0) {
+      this.log("DIRECT_CANDIDATE_REPLACEMENT_DECISION", {
+        eventType: typeof eventContext?.eventType === "string" ? eventContext.eventType : null,
+        trigger: typeof eventContext?.trigger === "string" ? eventContext.trigger : null,
+        replacementAttempted,
+        replacedCount: 0,
+        keptOldCount: 0,
+        blockedReasons,
+        excludedHrefCount,
+        sessionId: this.config?.sessionId || null,
+        tabId: this.config?.tabId || null,
+      });
+      return currentCandidates;
+    }
+
+    const selectorEngine = this._getSelectorEngineShadowApi();
+    if (!selectorEngine || typeof selectorEngine.collectDirectFamilySelectorCandidates !== "function") {
+      this._incrementReplacementBlockedReason(blockedReasons, "selector-engine-unavailable");
+      this.log("DIRECT_CANDIDATE_REPLACEMENT_DECISION", {
+        eventType: typeof eventContext?.eventType === "string" ? eventContext.eventType : null,
+        trigger: typeof eventContext?.trigger === "string" ? eventContext.trigger : null,
+        replacementAttempted,
+        replacedCount: 0,
+        keptOldCount: candidateList.length,
+        blockedReasons,
+        excludedHrefCount,
+        sessionId: this.config?.sessionId || null,
+        tabId: this.config?.tabId || null,
+      });
+      return currentCandidates;
+    }
+
+    const modularDirectCandidates = this._collectReplacementEligibleDirectCandidates(
+      selectorEngine.collectDirectFamilySelectorCandidates({
+        element,
+        selectorResult,
+        eventContext,
+        maxCandidates: Number(this.config?.selectorEngineShadowMaxCandidates) || 12,
+      }),
+    );
+    const modularByFamily = this._buildReplacementFamilyQueues(modularDirectCandidates);
+
+    let replacedCount = 0;
+    let keptOldCount = 0;
+
+    const replacedCandidates = candidateList.map((candidate) => {
+      const family = typeof candidate?.family === "string" ? candidate.family : null;
+
+      if (!family || !MODULAR_DIRECT_CANDIDATE_REPLACEMENT_FAMILIES.has(family)) {
+        return candidate;
+      }
+
+      const familyQueue = modularByFamily.get(family) || [];
+      const modularCandidate = familyQueue.length > 0 ? familyQueue.shift() : null;
+      const safety = this._isSafeModularReplacementCandidate(element, candidate, modularCandidate);
+
+      if (!safety.safe) {
+        keptOldCount += 1;
+        this._incrementReplacementBlockedReason(blockedReasons, safety.reason);
+        return candidate;
+      }
+
+      replacedCount += 1;
+      return this._mergeSafeModularReplacementCandidate(candidate, modularCandidate);
+    });
+
+    this.log("DIRECT_CANDIDATE_REPLACEMENT_DECISION", {
+      eventType: typeof eventContext?.eventType === "string" ? eventContext.eventType : null,
+      trigger: typeof eventContext?.trigger === "string" ? eventContext.trigger : null,
+      primarySelector: this._truncateParitySelector(
+        typeof selectorResult?.selector === "string" ? selectorResult.selector : "",
+      ),
+      replacementAttempted,
+      replacedCount,
+      keptOldCount,
+      blockedReasons,
+      excludedHrefCount,
+      sessionId: this.config?.sessionId || null,
+      tabId: this.config?.tabId || null,
+      selectorEngineVersion: typeof selectorEngine?.version === "string" ? selectorEngine.version : null,
+    });
+
+    return replacedCandidates;
+  }
+
   _runDirectCandidateParityComparison(element, selectorResult, eventContext, currentCandidates) {
     if (!this.config?.enableModularDirectCandidateParity) return;
     if (!Array.isArray(currentCandidates) || currentCandidates.length === 0) return;
@@ -6983,11 +7318,31 @@ class AIRInterceptor {
       return;
     }
 
+    const canonicalTargetInfo =
+      typeof selectorEngine.resolveCanonicalCustomControlTarget === "function"
+        ? selectorEngine.resolveCanonicalCustomControlTarget(element, eventContext)
+        : null;
+    const canonicalTargetSummary = this._summarizeSelectorEngineCanonicalTargetInfo(canonicalTargetInfo);
+
+    if (this.config?.debugMode && canonicalTargetSummary) {
+      this.log("SELECTOR_ENGINE_CANONICAL_TARGET", {
+        eventType: typeof eventContext?.eventType === "string" ? eventContext.eventType : null,
+        trigger: typeof eventContext?.trigger === "string" ? eventContext.trigger : null,
+        primarySelector: typeof selectorResult?.selector === "string" ? selectorResult.selector : null,
+        canonicalTarget: canonicalTargetSummary,
+        sessionId: this.config?.sessionId || null,
+        tabId: this.config?.tabId || null,
+        selectorEngineVersion: typeof selectorEngine?.version === "string" ? selectorEngine.version : null,
+      });
+    }
+
     const shadowCandidates = selectorEngine.collectShadowSelectorCandidates({
       element,
       selectorResult,
       eventContext,
       maxCandidates: Number(this.config?.selectorEngineShadowMaxCandidates) || 12,
+      enableStructuralParity: !!this.config?.enableModularStructuralParity,
+      canonicalTargetInfo,
     });
 
     if (!Array.isArray(shadowCandidates)) return;
@@ -7004,6 +7359,7 @@ class AIRInterceptor {
       eventType: typeof eventContext?.eventType === "string" ? eventContext.eventType : null,
       trigger: typeof eventContext?.trigger === "string" ? eventContext.trigger : null,
       primarySelector: typeof selectorResult?.selector === "string" ? selectorResult.selector : null,
+      canonicalTarget: canonicalTargetSummary,
       currentCandidates: currentSummary,
       shadowCandidates: shadowSummary,
       sessionId: this.config?.sessionId || null,
@@ -8187,8 +8543,9 @@ class AIRInterceptor {
     }
   }
 
-  _collectBoundedFieldContext(element, selectorResult) {
-    if (!element || element.nodeType !== Node.ELEMENT_NODE) return undefined;
+  _resolveBoundedFieldTargetControlKind(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
+
     const tagName = element.tagName.toLowerCase();
     const role = (element.getAttribute("role") || "").toLowerCase();
     const inputType = (element.getAttribute("type") || "").toLowerCase();
@@ -8196,27 +8553,434 @@ class AIRInterceptor {
     const hasContentEditableAttr = element.hasAttribute("contenteditable");
     const isContentEditable = element.isContentEditable || (hasContentEditableAttr && contentEditableAttr !== "false");
 
-    // Determine control kind
-    let targetControlKind = null;
     if (tagName === "input" && inputType === "search") {
-      targetControlKind = "searchbox";
-    } else if (["input", "textarea", "select"].includes(tagName)) {
-      targetControlKind = tagName;
-    } else if (role === "searchbox") {
-      targetControlKind = "searchbox";
-    } else if (role === "combobox") {
-      targetControlKind = "combobox";
-    } else if (isContentEditable) {
-      targetControlKind = "contenteditable";
-    } else if (
+      return "searchbox";
+    }
+    if (["input", "textarea", "select"].includes(tagName)) {
+      return tagName;
+    }
+    if (role === "searchbox") {
+      return "searchbox";
+    }
+    if (role === "combobox") {
+      return "combobox";
+    }
+    if (isContentEditable) {
+      return "contenteditable";
+    }
+    if (
       element.getAttribute("aria-haspopup") === "listbox" ||
       element.classList.contains("oxd-select-text") ||
       element.classList.contains("select-trigger")
     ) {
-      targetControlKind = "custom-trigger";
+      return "custom-trigger";
     }
 
+    return null;
+  }
+
+  _buildBoundedFieldBaseContext(targetControlKind) {
+    return {
+      fieldLabelText: null,
+      fieldRelation: null,
+      targetControlKind,
+      visibleControlCountInContainer: null,
+      targetIndexWithinContainer: null,
+      boundedContainerSummary: null,
+      boundedContainerSelectorCandidates: undefined,
+      cleanParentSelector: null,
+      cleanChildSelector: null,
+      containerSelector: null,
+      competingControlCount: null,
+      duplicateLabelCount: null,
+      isValid: false,
+      blockedReason: null,
+    };
+  }
+
+  _countVisibleExactFieldLabels(documentRef, labelText) {
+    const normalizedLabelText = this._normalizeFieldSemanticText(labelText, 200);
+    if (!documentRef || !normalizedLabelText) return 0;
+
+    let candidates = [];
+    try {
+      candidates = Array.from(documentRef.querySelectorAll(BOUNDED_FIELD_LABEL_SELECTOR))
+        .filter((candidate) => this._isElementVisible(candidate))
+        .filter((candidate) =>
+          this._normalizeFieldSemanticText(candidate.textContent || "", 200) === normalizedLabelText,
+        );
+    } catch {
+      candidates = [];
+    }
+
+    return candidates
+      .filter((candidate) => !candidates.some((other) => other !== candidate && candidate.contains(other)))
+      .length;
+  }
+
+  _getVisibleBoundedFieldControls(container) {
+    if (!container || typeof container.querySelectorAll !== "function") return [];
+
+    try {
+      const controls = Array.from(container.querySelectorAll(BOUNDED_FIELD_CONTROL_SELECTOR))
+        .filter((candidate) => this._isElementVisible(candidate));
+      const unique = [];
+      for (const control of controls) {
+        if (unique.includes(control)) continue;
+        unique.push(control);
+      }
+      return unique.filter((control) =>
+        !unique.some((other) => other !== control && other.contains(control)),
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  _getVisibleBoundedFieldLabelCandidates(container, controls = []) {
+    if (!container || typeof container.querySelectorAll !== "function") return [];
+
+    let candidates = [];
+    try {
+      candidates = Array.from(container.querySelectorAll(BOUNDED_FIELD_LABEL_SELECTOR))
+        .filter((candidate) => this._isElementVisible(candidate))
+        .filter((candidate) => {
+          const text = this._normalizeFieldSemanticText(candidate.textContent || "", 200);
+          if (!text) return false;
+          if (controls.some((control) => control === candidate || control.contains(candidate) || candidate.contains(control))) {
+            return false;
+          }
+          return true;
+        });
+    } catch {
+      candidates = [];
+    }
+
+    const leafCandidates = candidates.filter((candidate) =>
+      !candidates.some((other) => other !== candidate && candidate.contains(other)),
+    );
+    const semanticCandidates = leafCandidates.filter((candidate) => {
+      const tagName = candidate.tagName?.toLowerCase?.() || "";
+      return tagName === "label" || tagName === "legend";
+    });
+
+    if (semanticCandidates.length === 1) return semanticCandidates;
+    return leafCandidates;
+  }
+
+  _buildBoundedFieldContainerSelectorCandidates(container) {
+    if (!container || container.nodeType !== Node.ELEMENT_NODE) {
+      return {
+        boundedContainerSelectorCandidates: undefined,
+        cleanParentSelector: null,
+        containerSelector: null,
+      };
+    }
+
+    const candidates = [];
+    const tagName = container.tagName?.toLowerCase?.() || "div";
+    const dataTestId = container.getAttribute("data-testid");
+    if (dataTestId) {
+      candidates.push({
+        selector: `[data-testid="${escapeCssString(dataTestId)}"]`,
+        kind: "data-testid",
+        isClean: true,
+      });
+    }
+
+    for (const attrName of ["data-cy", "data-qa"]) {
+      const attrValue = container.getAttribute(attrName);
+      if (!attrValue) continue;
+      candidates.push({
+        selector: `${tagName}[${attrName}="${escapeCssString(attrValue)}"]`,
+        kind: attrName,
+        isClean: true,
+      });
+    }
+
+    if (container.id && !this._isLikelyDynamicId(container.id)) {
+      candidates.push({
+        selector: `#${safeCssEscape(container.id)}`,
+        kind: "id",
+        isClean: true,
+      });
+    }
+
+    const classCandidate = this._getBestStableClassCandidate(container);
+    if (classCandidate?.token) {
+      const analysis = this._analyzeClassToken(classCandidate.token);
+      candidates.push({
+        selector: `.${safeCssEscape(classCandidate.token)}`,
+        kind: analysis.isFramework ? "framework-class" : "semantic-class",
+        isClean: !analysis.isFramework,
+      });
+    }
+
+    const boundedContainerSelectorCandidates = candidates.length > 0 ? candidates : undefined;
+    const cleanParentSelector = candidates.find((candidate) => candidate.isClean)?.selector || null;
+    const containerSelector = candidates[0]?.selector || null;
+
+    return {
+      boundedContainerSelectorCandidates,
+      cleanParentSelector,
+      containerSelector,
+    };
+  }
+
+  _summarizeBoundedFieldContainer(container) {
+    const tagName = container?.tagName?.toLowerCase?.() || "div";
+    const classToken = getSafeElementClassTokens(container)[0];
+    if (classToken) return `${tagName}.${classToken}`;
+    const role = container?.getAttribute?.("role");
+    if (role) return `${tagName}[role="${role}"]`;
+    return tagName;
+  }
+
+  _findExplicitCustomTriggerContainer(labelElement, target) {
+    let current = labelElement;
+    let depth = 0;
+
+    while (current && depth < MAX_CAPTURE_BOUNDED_FIELD_DEPTH) {
+      const tagName = current.tagName?.toLowerCase?.() || "";
+      if (BOUNDED_FIELD_STOP_TAGS.has(tagName)) break;
+
+      const controls = this._getVisibleBoundedFieldControls(current);
+      const targetIndexWithinContainer = controls.indexOf(target);
+
+      if (targetIndexWithinContainer >= 0 && controls.length === 1) {
+        return {
+          container: current,
+          controls,
+          targetIndexWithinContainer,
+          blockedReason: null,
+        };
+      }
+
+      if (targetIndexWithinContainer >= 0 && controls.length > 1) {
+        return {
+          container: current,
+          controls,
+          targetIndexWithinContainer,
+          blockedReason: "bounded-field-multiple-targets",
+        };
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    return {
+      container: null,
+      controls: [],
+      targetIndexWithinContainer: null,
+      blockedReason: "bounded-field-broad-container",
+    };
+  }
+
+  _findCustomTriggerBoundedContainerLabelProof(target) {
+    let current = target?.parentElement || null;
+    let depth = 0;
+
+    while (current && depth < MAX_CAPTURE_BOUNDED_FIELD_DEPTH) {
+      const tagName = current.tagName?.toLowerCase?.() || "";
+      if (BOUNDED_FIELD_STOP_TAGS.has(tagName)) break;
+
+      const controls = this._getVisibleBoundedFieldControls(current);
+      const targetIndexWithinContainer = controls.indexOf(target);
+      if (targetIndexWithinContainer < 0) {
+        current = current.parentElement;
+        depth += 1;
+        continue;
+      }
+
+      const labels = this._getVisibleBoundedFieldLabelCandidates(current, controls);
+      if (labels.length === 1 && controls.length === 1) {
+        return {
+          labelElement: labels[0],
+          container: current,
+          controls,
+          targetIndexWithinContainer,
+          fieldRelation: labels[0].parentElement === current ? "sibling-label" : "bounded-container",
+          blockedReason: null,
+        };
+      }
+
+      if (labels.length > 1 && controls.length === 1) {
+        return {
+          labelElement: null,
+          container: current,
+          controls,
+          targetIndexWithinContainer,
+          fieldRelation: null,
+          blockedReason: "bounded-field-duplicate-label",
+        };
+      }
+
+      if (labels.length === 1 && controls.length > 1) {
+        return {
+          labelElement: labels[0],
+          container: current,
+          controls,
+          targetIndexWithinContainer,
+          fieldRelation: null,
+          blockedReason: "bounded-field-multiple-targets",
+        };
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    return {
+      labelElement: null,
+      container: null,
+      controls: [],
+      targetIndexWithinContainer: null,
+      fieldRelation: null,
+      blockedReason: "bounded-field-broad-container",
+    };
+  }
+
+  _buildCustomTriggerBoundedFieldContext({
+    element,
+    selectorResult,
+    fieldLabelText,
+    fieldRelation,
+    container,
+    controls,
+    targetIndexWithinContainer,
+  }) {
+    const base = this._buildBoundedFieldBaseContext("custom-trigger");
+    const cleanChildSelector = this._buildTightContainerChildSelector(element, selectorResult, "trigger-like", true);
+    if (!fieldLabelText || !container || !cleanChildSelector || targetIndexWithinContainer === null || targetIndexWithinContainer === undefined) {
+      return {
+        ...base,
+        blockedReason: !fieldLabelText
+          ? "bounded-field-no-label"
+          : (!container ? "bounded-field-broad-container" : (!cleanChildSelector ? "no-clean-child-selector" : "bounded-field-target-binding-failed")),
+      };
+    }
+
+    const selectorInfo = this._buildBoundedFieldContainerSelectorCandidates(container);
+    const visibleControlCountInContainer = Array.isArray(controls) ? controls.length : 0;
+    const duplicateLabelCount = this._countVisibleExactFieldLabels(element.ownerDocument || document, fieldLabelText);
+    const isValid =
+      visibleControlCountInContainer === 1 &&
+      !!selectorInfo.containerSelector &&
+      !!cleanChildSelector &&
+      targetIndexWithinContainer >= 0;
+
+    return {
+      ...base,
+      fieldLabelText,
+      fieldRelation,
+      visibleControlCountInContainer,
+      targetIndexWithinContainer,
+      boundedContainerSummary: this._summarizeBoundedFieldContainer(container),
+      boundedContainerSelectorCandidates: selectorInfo.boundedContainerSelectorCandidates,
+      cleanParentSelector: selectorInfo.cleanParentSelector,
+      cleanChildSelector,
+      containerSelector: selectorInfo.containerSelector,
+      competingControlCount: Math.max(0, visibleControlCountInContainer - 1),
+      duplicateLabelCount: duplicateLabelCount > 0 ? duplicateLabelCount : 1,
+      isValid,
+      blockedReason: isValid ? null : (!selectorInfo.containerSelector ? "bounded-field-no-renderable-scope" : "bounded-field-multiple-targets"),
+    };
+  }
+
+  _collectCustomTriggerBoundedFieldContext(element, selectorResult) {
+    const base = this._buildBoundedFieldBaseContext("custom-trigger");
+    if (!element || element.nodeType !== Node.ELEMENT_NODE || element.isConnected === false) {
+      return {
+        ...base,
+        blockedReason: "detached-target",
+      };
+    }
+
+    const documentRef = element.ownerDocument || document;
+    const wrappedLabel = element.closest("label");
+    if (wrappedLabel) {
+      const wrappedLabelText = this._normalizeFieldSemanticText(wrappedLabel.textContent || "", 200);
+      const wrappedProof = this._findExplicitCustomTriggerContainer(wrappedLabel, element);
+      if (wrappedLabelText && !wrappedProof.blockedReason) {
+        return this._buildCustomTriggerBoundedFieldContext({
+          element,
+          selectorResult,
+          fieldLabelText: wrappedLabelText,
+          fieldRelation: "wrapped-label",
+          container: wrappedProof.container,
+          controls: wrappedProof.controls,
+          targetIndexWithinContainer: wrappedProof.targetIndexWithinContainer,
+        });
+      }
+    }
+
+    if (element.id) {
+      const associatedLabel = documentRef.querySelector(`label[for="${safeCssEscape(element.id)}"]`);
+      const associatedLabelText = this._normalizeFieldSemanticText(associatedLabel?.textContent || "", 200);
+      if (associatedLabel && associatedLabelText) {
+        const associatedProof = this._findExplicitCustomTriggerContainer(associatedLabel, element);
+        if (!associatedProof.blockedReason) {
+          return this._buildCustomTriggerBoundedFieldContext({
+            element,
+            selectorResult,
+            fieldLabelText: associatedLabelText,
+            fieldRelation: "label-for",
+            container: associatedProof.container,
+            controls: associatedProof.controls,
+            targetIndexWithinContainer: associatedProof.targetIndexWithinContainer,
+          });
+        }
+      }
+    }
+
+    const boundedProof = this._findCustomTriggerBoundedContainerLabelProof(element);
+    if (!boundedProof.labelElement || boundedProof.blockedReason) {
+      return {
+        ...base,
+        blockedReason: boundedProof.blockedReason || "bounded-field-no-label",
+      };
+    }
+
+    const fieldLabelText = this._normalizeFieldSemanticText(boundedProof.labelElement.textContent || "", 200);
+    return this._buildCustomTriggerBoundedFieldContext({
+      element,
+      selectorResult,
+      fieldLabelText,
+      fieldRelation: boundedProof.fieldRelation,
+      container: boundedProof.container,
+      controls: boundedProof.controls,
+      targetIndexWithinContainer: boundedProof.targetIndexWithinContainer,
+    });
+  }
+
+  _applyBoundedFieldAttributeCarryThrough(attributes, boundedFieldContext) {
+    const baseAttributes = attributes && typeof attributes === "object"
+      ? { ...attributes }
+      : {};
+    const fieldLabelText = typeof boundedFieldContext?.fieldLabelText === "string"
+      ? boundedFieldContext.fieldLabelText.trim()
+      : "";
+
+    if (!fieldLabelText || boundedFieldContext?.isValid !== true || baseAttributes.fieldLabelText) {
+      return baseAttributes;
+    }
+
+    return {
+      ...baseAttributes,
+      fieldLabelText,
+    };
+  }
+
+  _collectBoundedFieldContext(element, selectorResult) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return undefined;
+    const tagName = element.tagName.toLowerCase();
+    const targetControlKind = this._resolveBoundedFieldTargetControlKind(element);
+
     if (!targetControlKind) return undefined;
+    if (targetControlKind === "custom-trigger") {
+      return this._collectCustomTriggerBoundedFieldContext(element, selectorResult);
+    }
 
     const documentRef = element.ownerDocument || document;
 
@@ -9462,6 +10226,7 @@ async flushPending() {
 
   _normalizeInterceptorDiagnosticLevel(message) {
     if (message === "DIRECT_CANDIDATE_PARITY") return "decision";
+    if (message === "DIRECT_CANDIDATE_REPLACEMENT_DECISION") return "decision";
     if (message === "SELECTOR_ENGINE_SHADOW_DIFF") return "debug";
     if (message === "DIRECT_CANDIDATE_PARITY_FAILED") return "error";
     if (message === "SELECTOR_ENGINE_SHADOW_FAILED") return "error";

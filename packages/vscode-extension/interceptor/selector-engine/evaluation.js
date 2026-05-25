@@ -4,10 +4,14 @@ import {
 } from './types.js';
 import {
   dedupeCandidates,
+  getNormalizedElementText,
   getQueryRoot,
   isVisible,
+  parseHasTextSelector,
   queryAll,
 } from './utils.js';
+
+const MAX_TEXT_QUERY_SCOPE = 500;
 
 function resolveStrength(candidateInput, metadata) {
   const isUnique = metadata.matchCount === 1 && metadata.visibleMatchCount === 1;
@@ -26,12 +30,78 @@ function resolveStrength(candidateInput, metadata) {
   }
 }
 
+function resolveTextQuery(candidateInput) {
+  const textQuery = candidateInput?.textQuery;
+  if (textQuery && typeof textQuery === 'object') {
+    const scopeSelector = typeof textQuery.scopeSelector === 'string'
+      ? textQuery.scopeSelector.trim()
+      : '';
+    const text = typeof textQuery.text === 'string'
+      ? textQuery.text.trim()
+      : '';
+    const matchMode = typeof textQuery.matchMode === 'string'
+      ? textQuery.matchMode.trim()
+      : 'contains';
+
+    if (scopeSelector && text && matchMode === 'contains') {
+      return {
+        scopeSelector,
+        text,
+        matchMode,
+      };
+    }
+  }
+
+  return parseHasTextSelector(candidateInput?.selector);
+}
+
+function queryTextMatches(root, candidateInput) {
+  const textQuery = resolveTextQuery(candidateInput);
+  if (!root || !textQuery || textQuery.matchMode !== 'contains') {
+    return {
+      matches: [],
+      warningCodes: ['blocked-text-evaluation'],
+    };
+  }
+
+  const scopeMatches = queryAll(root, textQuery.scopeSelector);
+  if (scopeMatches.length > MAX_TEXT_QUERY_SCOPE) {
+    return {
+      matches: [],
+      warningCodes: ['blocked-text-evaluation'],
+    };
+  }
+
+  const matches = scopeMatches.filter((candidate) => {
+    const normalizedText = getNormalizedElementText(candidate);
+    return normalizedText.includes(textQuery.text);
+  });
+
+  return {
+    matches,
+    warningCodes: [],
+  };
+}
+
+function collectMatches(root, candidateInput) {
+  if (candidateInput?.family === 'text') {
+    return queryTextMatches(root, candidateInput);
+  }
+
+  return {
+    matches: queryAll(root, candidateInput?.selector),
+    warningCodes: [],
+  };
+}
+
 export function collectMatchMetadata(element, candidateInput) {
-  const root = getQueryRoot(candidateInput.queryTarget || element);
-  const matches = queryAll(root, candidateInput.selector);
+  const targetElement = candidateInput.queryTarget || element;
+  const root = getQueryRoot(targetElement);
+  const queryResult = collectMatches(root, candidateInput);
+  const matches = queryResult.matches;
   const matchCount = matches.length;
-  const positionInAllMatches = matches.indexOf(element);
-  const warningCodes = [];
+  const positionInAllMatches = matches.indexOf(targetElement);
+  const warningCodes = [...queryResult.warningCodes];
 
   if (matchCount > 1) warningCodes.push('multiple-matches');
   if (positionInAllMatches < 0) warningCodes.push('target-not-in-matches');
@@ -42,7 +112,7 @@ export function collectMatchMetadata(element, candidateInput) {
   if (matchCount <= MAX_VISIBLE_MATCHES_FOR_INDEX) {
     const visibleMatches = matches.filter((candidate) => isVisible(candidate));
     visibleMatchCount = visibleMatches.length;
-    positionInVisibleMatches = visibleMatches.indexOf(element);
+    positionInVisibleMatches = visibleMatches.indexOf(targetElement);
     if (visibleMatchCount > 1) warningCodes.push('multiple-visible-matches');
   } else {
     warningCodes.push('too-many-matches-for-visible-index');
@@ -81,4 +151,3 @@ export function finalizeCandidates(element, candidates, maxCandidates = DEFAULT_
     };
   });
 }
-

@@ -496,10 +496,82 @@ describe('input field semantic context enrichment', () => {
         visibleMatchCount: 2,
         isAmbiguous: true,
       }));
+      expect(fingerprint.attributes.fieldLabelText).toBe('User Role');
       expect(fingerprint.boundedFieldContext).toEqual(expect.objectContaining({
         fieldLabelText: 'User Role',
+        fieldRelation: 'sibling-label',
         targetControlKind: 'custom-trigger',
+        targetIndexWithinContainer: 0,
+        cleanParentSelector: '.field-row',
+        cleanChildSelector: 'div[aria-haspopup="listbox"]',
         isValid: true,
+      }));
+      expect(fingerprint.boundedFieldContext?.boundedContainerSelectorCandidates).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            selector: '.field-row',
+            kind: 'semantic-class',
+            isClean: true,
+          }),
+        ]),
+      );
+    });
+  });
+
+  it('carries nested wrapper label context for repeated custom triggers without changing the raw target', () => {
+    return withBrowserGlobals(`
+      <div class="field-row">
+        <label>User Role</label>
+        <div class="select-shell">
+          <div class="select-trigger" aria-haspopup="listbox">-- Select --</div>
+        </div>
+      </div>
+      <div class="field-row">
+        <label>Status</label>
+        <div class="select-shell">
+          <div class="select-trigger" aria-haspopup="listbox">-- Select --</div>
+        </div>
+      </div>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('.field-row .select-trigger') as HTMLDivElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target);
+
+      expect(fingerprint.selector).toBe('.select-trigger');
+      expect(fingerprint.attributes.fieldLabelText).toBe('User Role');
+      expect(fingerprint.boundedFieldContext).toEqual(expect.objectContaining({
+        fieldLabelText: 'User Role',
+        fieldRelation: 'sibling-label',
+        targetControlKind: 'custom-trigger',
+        visibleControlCountInContainer: 1,
+        targetIndexWithinContainer: 0,
+        cleanParentSelector: '.field-row',
+        cleanChildSelector: 'div[aria-haspopup="listbox"]',
+        isValid: true,
+      }));
+    });
+  });
+
+  it('fails closed for custom triggers when one label container contains multiple visible controls', () => {
+    return withBrowserGlobals(`
+      <div class="field-row">
+        <label>User Role</label>
+        <div class="select-trigger" aria-haspopup="listbox">-- Select --</div>
+        <div class="select-trigger" aria-haspopup="listbox">-- Select --</div>
+      </div>
+    `, 'https://example.test/admin', () => {
+      const interceptor = makeSelectorProbe();
+      const target = document.querySelector('.field-row .select-trigger') as HTMLDivElement;
+
+      const fingerprint = (interceptor as any).generateFingerprint(target);
+
+      expect(fingerprint.attributes.fieldLabelText).toBeUndefined();
+      expect(fingerprint.boundedFieldContext).toEqual(expect.objectContaining({
+        fieldLabelText: null,
+        targetControlKind: 'custom-trigger',
+        isValid: false,
+        blockedReason: 'bounded-field-multiple-targets',
       }));
     });
   });

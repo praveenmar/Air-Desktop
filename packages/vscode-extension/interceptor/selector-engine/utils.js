@@ -17,6 +17,35 @@ export function normalizeText(value) {
   return safeTrim(String(value || '').replace(/\s+/g, ' '));
 }
 
+export function getNormalizedElementText(element) {
+  if (!element) return '';
+  return normalizeText(element.innerText || element.textContent || '');
+}
+
+export function unescapeTextLiteral(value) {
+  return String(value || '')
+    .replace(/\\\\/g, '\\')
+    .replace(/\\"/g, '"');
+}
+
+export function parseHasTextSelector(selector) {
+  const normalizedSelector = safeTrim(selector);
+  if (!normalizedSelector) return null;
+
+  const match = normalizedSelector.match(/^([^:]+):has-text\("((?:\\.|[^"])*)"\)$/);
+  if (!match) return null;
+
+  const scopeSelector = safeTrim(match[1] || '');
+  const text = normalizeText(unescapeTextLiteral(match[2] || ''));
+  if (!scopeSelector || !text) return null;
+
+  return {
+    scopeSelector,
+    text,
+    matchMode: 'contains',
+  };
+}
+
 export function isLikelyDynamicId(id) {
   const normalized = safeTrim(id);
   if (!normalized) return true;
@@ -86,4 +115,3 @@ export function getSafeClassTokens(element) {
     .map((token) => safeTrim(token))
     .filter(Boolean);
 }
-
