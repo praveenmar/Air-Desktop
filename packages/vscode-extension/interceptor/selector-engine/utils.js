@@ -21,8 +21,7 @@ export function getNormalizedElementText(element) {
   if (!element) return '';
   return normalizeText(element.innerText || element.textContent || '');
 }
-
-export function unescapeTextLiteral(value) {
+export function unescapeTextLiteral(value) {
   return String(value || '')
     .replace(/\\\\/g, '\\')
     .replace(/\\"/g, '"');
@@ -32,16 +31,18 @@ export function parseHasTextSelector(selector) {
   const normalizedSelector = safeTrim(selector);
   if (!normalizedSelector) return null;
 
-  const match = normalizedSelector.match(/^([^:]+):has-text\("((?:\\.|[^"])*)"\)$/);
+  const match = normalizedSelector.match(/^([^:]+):has-text\("((?:\\.|[^"])*)"\)(.*)$/);
   if (!match) return null;
 
   const scopeSelector = safeTrim(match[1] || '');
   const text = normalizeText(unescapeTextLiteral(match[2] || ''));
+  const childSelector = safeTrim(match[3] || '');
   if (!scopeSelector || !text) return null;
 
   return {
     scopeSelector,
     text,
+    childSelector,
     matchMode: 'contains',
   };
 }

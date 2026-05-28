@@ -143,10 +143,10 @@ describe('selector engine bounded-field selector bridging', () => {
       expect(userRoleProposals.blockedReason).toBeNull();
       expect(statusProposals.blockedReason).toBeNull();
       expect(userRoleProposals.proposals[0]).toEqual(expect.objectContaining({
-        selector: '[data-testid="user-role-field"] div.select-trigger-input',
+        selector: '[data-testid="user-role-field"]:has-text("User Role") div.select-trigger-input',
       }));
       expect(statusProposals.proposals[0]).toEqual(expect.objectContaining({
-        selector: '[data-testid="status-field"] div.select-trigger-input',
+        selector: '[data-testid="status-field"]:has-text("Status") div.select-trigger-input',
       }));
       expect(userRoleProposals.proposals[0]?.selector).not.toBe(statusProposals.proposals[0]?.selector);
     });

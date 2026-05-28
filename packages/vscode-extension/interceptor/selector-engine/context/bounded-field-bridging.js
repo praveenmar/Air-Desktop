@@ -1,7 +1,7 @@
 import { DEFAULT_MAX_CANDIDATES } from '../types.js';
 import { finalizeCandidates } from '../evaluation.js';
 import { resolveCanonicalCustomControlTargetInternal } from '../canonical-target.js';
-import { buildProposalCandidateInput } from '../proposal-contract.js';
+import { buildProposalCandidateInput, buildScopedTextSelector } from '../proposal-contract.js';
 import {
   getSafeClassTokens,
   isLikelyDynamicId,
@@ -113,9 +113,25 @@ function buildLabelAnchoredCustomTriggerXPath(proof, queryTarget) {
 }
 
 function buildProposalInputs(proof, scopeSelector, childSelector, queryTarget) {
-  const scopedSelector = buildScopedSelector(scopeSelector, childSelector);
   const candidates = [];
 
+  if (proof?.fieldLabelText && scopeSelector && childSelector) {
+    const textScopedParent = buildScopedTextSelector(scopeSelector, proof.fieldLabelText);
+    const textScopedSelector = buildScopedSelector(textScopedParent, childSelector);
+    if (textScopedSelector) {
+      const textScopedCandidate = buildProposalCandidateInput({
+        selector: textScopedSelector,
+        family: 'parent-scoped-text-css',
+        proposalSource: 'bounded-field',
+        queryTarget,
+        proposalTierHint: null,
+        warningCodes: [],
+      });
+      if (textScopedCandidate) candidates.push(textScopedCandidate);
+    }
+  }
+
+  const scopedSelector = buildScopedSelector(scopeSelector, childSelector);
   if (scopedSelector) {
     const scopedCandidate = buildProposalCandidateInput({
       selector: scopedSelector,

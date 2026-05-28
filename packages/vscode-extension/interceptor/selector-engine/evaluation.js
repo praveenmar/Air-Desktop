@@ -48,6 +48,7 @@ function resolveTextQuery(candidateInput) {
       return {
         scopeSelector,
         text,
+        childSelector: typeof textQuery.childSelector === 'string' ? textQuery.childSelector.trim() : '',
         matchMode,
       };
     }
@@ -78,14 +79,26 @@ function queryTextMatches(root, candidateInput) {
     return normalizedText.includes(textQuery.text);
   });
 
+  if (!textQuery.childSelector) {
+    return {
+      matches,
+      warningCodes: [],
+    };
+  }
+
+  const finalMatches = [];
+  for (const parent of matches) {
+    finalMatches.push(...queryAll(parent, textQuery.childSelector));
+  }
+
   return {
-    matches,
+    matches: finalMatches.filter((match, index, list) => list.indexOf(match) === index),
     warningCodes: [],
   };
 }
 
 function collectMatches(root, candidateInput) {
-  if (candidateInput?.family === 'text') {
+  if (candidateInput?.family === 'text' || candidateInput?.family === 'parent-scoped-text-css') {
     return queryTextMatches(root, candidateInput);
   }
 
