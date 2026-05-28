@@ -3,7 +3,6 @@ import { finalizeCandidates } from '../evaluation.js';
 import { resolveCanonicalCustomControlTargetInternal } from '../canonical-target.js';
 import {
   buildProposalCandidateInput,
-  buildScopedSelector,
   buildScopedTextSelector,
 } from '../proposal-contract.js';
 import {
@@ -14,6 +13,10 @@ import {
   safeCssEscape,
   safeTrim,
 } from '../utils.js';
+import { isFastVisible } from '../shared/visibility.js';
+import { getBestStableClassToken } from '../shared/dom-attributes.js';
+import { normalizeLabelText } from '../shared/text.js';
+import { buildScopedSelector } from '../shared/selectors.js';
 import { resolveOptionPanelContextEvidence } from './option-panel.js';
 
 const ACTIONABLE_DESCENDANT_SELECTOR = [
@@ -34,33 +37,7 @@ function resolveProposalTarget(element, eventContext, optionPanelContextEvidence
   return resolvedCanonicalTargetInfo?.canonicalTarget || element || null;
 }
 
-function isFastVisible(element) {
-  if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
-  if (element.isConnected === false) return false;
-  if (element.hidden) return false;
-  if (element.getAttribute?.('aria-hidden') === 'true') return false;
-  const inlineStyle = element.style || null;
-  if (inlineStyle && (inlineStyle.display === 'none' || inlineStyle.visibility === 'hidden')) {
-    return false;
-  }
-  return true;
-}
 
-function normalizeLabelText(value) {
-  const normalized = normalizeText(value)
-    .replace(/[:*]\s*$/, '')
-    .trim();
-  return normalized || null;
-}
-
-function getBestStableClassToken(element) {
-  const tokens = getSafeClassTokens(element)
-    .filter((token) => !/^(?:is|has)-/i.test(token))
-    .filter((token) => !/^(?:css-|sc-)/i.test(token))
-    .filter((token) => token.length >= 4)
-    .sort((left, right) => left.length - right.length);
-  return tokens[0] || null;
-}
 
 function buildDescendantSelector(element) {
   if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;

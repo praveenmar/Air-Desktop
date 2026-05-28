@@ -1,4 +1,12 @@
-import { getSafeClassTokens, normalizeText, safeTrim } from './utils.js';
+import { getSafeClassTokens, normalizeText } from './utils.js';
+import { isFastVisible } from './shared/visibility.js';
+import { getRole } from './shared/dom-attributes.js';
+import { summarizeTarget as _summarizeTarget } from './shared/target-summary.js';
+
+function summarizeTarget(element) {
+  return _summarizeTarget(element, { includeClassList: true, includeTabIndex: true });
+}
+
 
 const MAX_CANONICAL_DESCENDANT_DEPTH = 3;
 const MAX_CANONICAL_INSPECTED_DESCENDANTS = 12;
@@ -29,19 +37,6 @@ function isCustomControlEvent(eventContext) {
   return CUSTOM_CONTROL_EVENT_TYPES.has(eventType);
 }
 
-function isFastVisible(element) {
-  if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
-  if (element.isConnected === false) return false;
-  if (element.hidden) return false;
-  if (element.getAttribute?.('aria-hidden') === 'true') return false;
-
-  const inlineStyle = element.style || null;
-  if (inlineStyle && (inlineStyle.display === 'none' || inlineStyle.visibility === 'hidden')) {
-    return false;
-  }
-
-  return true;
-}
 
 function isInputLike(element) {
   const tagName = element?.tagName?.toLowerCase?.() || '';
@@ -86,25 +81,6 @@ function isLeafLike(element) {
   });
 }
 
-function getRole(element) {
-  return safeTrim(element?.getAttribute?.('role') || '').toLowerCase();
-}
-
-function summarizeTarget(element) {
-  if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
-
-  const classes = getSafeClassTokens(element).slice(0, 3);
-  const textExcerpt = getElementText(element).slice(0, 80) || null;
-  const tabIndexAttr = element.getAttribute?.('tabindex');
-
-  return {
-    tagName: element.tagName?.toLowerCase?.() || null,
-    role: getRole(element) || null,
-    classList: classes.length > 0 ? classes.join(' ') : null,
-    textExcerpt,
-    tabIndex: tabIndexAttr !== null ? tabIndexAttr : null,
-  };
-}
 
 function getDescendantEntries(root) {
   const queue = Array.from(root?.children || []).map((child) => ({

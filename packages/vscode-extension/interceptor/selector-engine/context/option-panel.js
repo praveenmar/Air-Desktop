@@ -8,6 +8,15 @@ import {
 } from '../utils.js';
 import { resolveAccessibilityEvidence } from '../accessibility/role-name.js';
 import { resolveCanonicalCustomControlTargetInternal } from '../canonical-target.js';
+import { isFastVisible, countVisibleMatches } from '../shared/visibility.js';
+import { getRole } from '../shared/dom-attributes.js';
+import { escapeTextLiteral, normalizeLabelText, extractReferencedText } from '../shared/text.js';
+import { summarizeTarget as _summarizeTarget } from '../shared/target-summary.js';
+import { buildSelectorForElement } from '../shared/selectors.js';
+
+function summarizeTarget(element) {
+  return _summarizeTarget(element, { includeClassList: true });
+}
 
 const PANEL_CONTAINER_ROLES = new Set([
   'listbox',
@@ -44,57 +53,6 @@ const HEADING_SELECTOR = 'h1, h2, h3, h4, h5, h6, [role="heading"], legend, labe
 const MAX_CONTAINER_DEPTH = 6;
 const MAX_PARENT_TRIGGER_SCAN = 5;
 
-function isFastVisible(element) {
-  if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
-  if (element.isConnected === false) return false;
-  if (element.hidden) return false;
-  if (element.getAttribute?.('aria-hidden') === 'true') return false;
-  const inlineStyle = element.style || null;
-  if (inlineStyle && (inlineStyle.display === 'none' || inlineStyle.visibility === 'hidden')) {
-    return false;
-  }
-  return true;
-}
-
-function getRole(element) {
-  return safeTrim(element?.getAttribute?.('role') || '').toLowerCase() || null;
-}
-
-function summarizeTarget(element) {
-  if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
-  const classes = getSafeClassTokens(element).slice(0, 3);
-  return {
-    tagName: element.tagName?.toLowerCase?.() || null,
-    role: getRole(element),
-    classList: classes.length > 0 ? classes.join(' ') : null,
-    textExcerpt: normalizeText(element.innerText || element.textContent || '').slice(0, 80) || null,
-  };
-}
-
-function normalizeLabelText(value) {
-  const normalized = normalizeText(value)
-    .replace(/[:*]\s*$/, '')
-    .trim();
-  return normalized || null;
-}
-
-function escapeTextLiteral(value) {
-  return String(value || '')
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"');
-}
-
-function extractReferencedText(documentRef, idList) {
-  if (!documentRef || typeof idList !== 'string') return null;
-  const parts = [];
-  for (const refId of idList.split(/\s+/).filter(Boolean)) {
-    const ref = documentRef.getElementById?.(refId);
-    const text = normalizeLabelText(ref?.textContent || '');
-    if (!text) continue;
-    if (!parts.includes(text)) parts.push(text);
-  }
-  return parts.length > 0 ? parts.join(' ') : null;
-}
 
 function inferPanelItemRole(target, accessibilityProof) {
   const explicitRole = getRole(target);
@@ -243,54 +201,6 @@ function buildContainerSummary(container) {
   return classToken ? `${tagName}.${classToken}` : tagName;
 }
 
-function getBestStableClassToken(element) {
-  const tokens = getSafeClassTokens(element)
-    .filter((token) => !/^(?:is|has)-/i.test(token))
-    .filter((token) => !/^(?:css-|sc-)/i.test(token))
-    .filter((token) => token.length >= 4)
-    .sort((left, right) => left.length - right.length);
-  return tokens[0] || null;
-}
-
-function buildSelectorForElement(element, options = {}) {
-  if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
-  const tagName = element.tagName?.toLowerCase?.() || '';
-  if (!tagName) return null;
-
-  for (const attrName of options.preferredAttributes || ['data-testid', 'data-cy', 'data-qa']) {
-    const selector = buildAttributeSelector(
-      options.tagScoped === false ? null : tagName,
-      attrName,
-      element.getAttribute(attrName),
-      { tagScoped: options.tagScoped !== false },
-    );
-    if (selector) return selector;
-  }
-
-  if (element.id && !isLikelyDynamicId(element.id)) {
-    return `#${safeCssEscape(element.id)}`;
-  }
-
-  if (options.allowHref && tagName === 'a') {
-    const hrefSelector = buildAttributeSelector(tagName, 'href', element.getAttribute('href'));
-    if (hrefSelector) return hrefSelector;
-  }
-
-  if (options.allowValue && tagName === 'option') {
-    const valueSelector = buildAttributeSelector(tagName, 'value', element.getAttribute('value'));
-    if (valueSelector) return valueSelector;
-  }
-
-  if (options.allowRole !== false) {
-    const role = getRole(element);
-    if (role) return `${tagName}[role="${escapeTextLiteral(role)}"]`;
-  }
-
-  const classToken = getBestStableClassToken(element);
-  if (classToken) return `${tagName}.${safeCssEscape(classToken)}`;
-
-  return tagName;
-}
 
 function buildTriggerSelector(trigger, containerId) {
   if (!trigger || trigger.nodeType !== Node.ELEMENT_NODE) return null;
@@ -337,14 +247,6 @@ function collectVisibleItemTargets(container, itemRole, targetTagName) {
   return matches;
 }
 
-function countVisibleMatches(root, selector) {
-  if (!root || typeof root.querySelectorAll !== 'function' || !selector) return 0;
-  try {
-    return Array.from(root.querySelectorAll(selector)).filter(isFastVisible).length;
-  } catch {
-    return 0;
-  }
-}
 
 function countDuplicateItemText(visibleItems, targetText) {
   const normalizedTargetText = normalizeLabelText(targetText || '');

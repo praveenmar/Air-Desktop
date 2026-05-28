@@ -5,6 +5,7 @@ import {
   safeCssEscape,
   safeTrim,
 } from '../utils.js';
+import { isFastVisibleForCandidateDiscovery } from '../shared/visibility.js';
 
 const MAX_TIGHT_CONTAINER_DEPTH = 8;
 const MAX_TIGHT_CONTAINER_CONTROL_LIKE_DESCENDANTS = 4;
@@ -305,23 +306,7 @@ function getComposedParentElement(node) {
   return null;
 }
 
-function isFastVisibleForCandidateDiscovery(element) {
-  if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
-  if (element.isConnected === false) return false;
-  if (element.hidden) return false;
-  if (element.getAttribute?.('aria-hidden') === 'true') return false;
 
-  const tagName = element.tagName?.toLowerCase?.() || '';
-  const inputType = (element.getAttribute?.('type') || '').toLowerCase();
-  if (tagName === 'input' && inputType === 'hidden') return false;
-
-  const inlineStyle = element.style || null;
-  if (inlineStyle && (inlineStyle.display === 'none' || inlineStyle.visibility === 'hidden')) {
-    return false;
-  }
-
-  return true;
-}
 
 function getFastVisibleControlLikeDescendants(container, mode) {
   if (!container || container.nodeType !== Node.ELEMENT_NODE) return [];

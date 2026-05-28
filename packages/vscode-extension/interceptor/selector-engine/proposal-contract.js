@@ -4,18 +4,11 @@ function safeTrim(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function escapeTextLiteral(value) {
-  return String(value || '')
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"');
-}
+import { escapeTextLiteral } from './shared/text.js';
 
-export function buildScopedSelector(parentSelector, childSelector) {
-  const parent = safeTrim(parentSelector);
-  const child = safeTrim(childSelector);
-  if (!parent || !child) return null;
-  return `${parent} ${child}`;
-}
+
+
+
 
 export function buildScopedTextSelector(scopeSelector, text) {
   const scope = safeTrim(scopeSelector);

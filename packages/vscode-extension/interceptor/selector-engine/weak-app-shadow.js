@@ -7,10 +7,9 @@ import {
   safeCssEscape,
   safeTrim,
 } from './utils.js';
+import { escapeTextLiteral } from './shared/text.js';
 
-function escapeTextLiteral(value) {
-  return String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-}
+
 
 function hasPreferredSelector(candidates) {
   return Array.isArray(candidates) && candidates.some((candidate) => (

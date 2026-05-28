@@ -1,13 +1,22 @@
 import {
   buildAttributeSelector,
   getSafeClassTokens,
-  isLikelyDynamicId,
-  normalizeText,
   safeCssEscape,
+  isLikelyDynamicId,
   safeTrim,
+  normalizeText,
 } from '../utils.js';
+import { isFastVisible, queryVisibleElements, countVisibleMatches } from '../shared/visibility.js';
+import { getRole } from '../shared/dom-attributes.js';
+import { escapeTextLiteral, normalizeLabelText, extractReferencedText } from '../shared/text.js';
+import { summarizeTarget as _summarizeTarget } from '../shared/target-summary.js';
+import { buildSelectorForElement } from '../shared/selectors.js';
 import { resolveAccessibilityEvidence } from '../accessibility/role-name.js';
 import { resolveCanonicalCustomControlTargetInternal } from '../canonical-target.js';
+
+function summarizeTarget(element) {
+  return _summarizeTarget(element, { includeClassList: true });
+}
 
 const TABLE_SELECTOR = 'table, [role="table"], [role="grid"]';
 const ROW_SELECTOR = 'tr, [role="row"]';
@@ -16,54 +25,6 @@ const ACTION_SELECTOR = 'button, [role="button"], input[type="submit"], input[ty
 const HEADER_CELL_SELECTOR = 'thead th, th[scope="col"], [role="columnheader"]';
 const MAX_IDENTITY_TOKENS = 3;
 
-function isFastVisible(element) {
-  if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
-  if (element.isConnected === false) return false;
-  if (element.hidden) return false;
-  if (element.getAttribute?.('aria-hidden') === 'true') return false;
-  const inlineStyle = element.style || null;
-  if (inlineStyle && (inlineStyle.display === 'none' || inlineStyle.visibility === 'hidden')) {
-    return false;
-  }
-  return true;
-}
-
-function getRole(element) {
-  return safeTrim(element?.getAttribute?.('role') || '').toLowerCase() || null;
-}
-
-function summarizeTarget(element) {
-  if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
-  const classes = getSafeClassTokens(element).slice(0, 3);
-  return {
-    tagName: element.tagName?.toLowerCase?.() || null,
-    role: getRole(element),
-    classList: classes.length > 0 ? classes.join(' ') : null,
-    textExcerpt: normalizeText(element.innerText || element.textContent || '').slice(0, 80) || null,
-  };
-}
-
-function normalizeLabelText(value) {
-  const normalized = normalizeText(value)
-    .replace(/[:*]\s*$/, '')
-    .trim();
-  return normalized || null;
-}
-
-function escapeTextLiteral(value) {
-  return String(value || '')
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"');
-}
-
-function queryVisibleElements(root, selector) {
-  if (!root || typeof root.querySelectorAll !== 'function') return [];
-  try {
-    return Array.from(root.querySelectorAll(selector)).filter(isFastVisible);
-  } catch {
-    return [];
-  }
-}
 
 function findTable(target) {
   return target?.closest?.(TABLE_SELECTOR) || null;
@@ -73,51 +34,6 @@ function findRow(target) {
   return target?.closest?.(ROW_SELECTOR) || null;
 }
 
-function buildSelectorForElement(element, options = {}) {
-  if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
-  const tagName = element.tagName?.toLowerCase?.() || '';
-  if (!tagName) return null;
-
-  for (const attrName of options.preferredAttributes || ['data-testid', 'data-cy', 'data-qa']) {
-    const selector = buildAttributeSelector(
-      options.tagScoped === false ? null : tagName,
-      attrName,
-      element.getAttribute(attrName),
-      { tagScoped: options.tagScoped !== false },
-    );
-    if (selector) return selector;
-  }
-
-  if (element.id && !isLikelyDynamicId(element.id)) {
-    return `#${safeCssEscape(element.id)}`;
-  }
-
-  if (options.allowHref && tagName === 'a') {
-    const hrefSelector = buildAttributeSelector(tagName, 'href', element.getAttribute('href'));
-    if (hrefSelector) return hrefSelector;
-  }
-
-  if (options.allowType && tagName === 'input') {
-    const typeSelector = buildAttributeSelector(tagName, 'type', element.getAttribute('type'));
-    if (typeSelector) return typeSelector;
-  }
-
-  const role = getRole(element);
-  if (options.allowRole !== false && role) {
-    return `${tagName}[role="${role.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"]`;
-  }
-
-  const classToken = getSafeClassTokens(element)
-    .filter((token) => !/^(?:is|has)-/i.test(token))
-    .filter((token) => !/^(?:css-|sc-)/i.test(token))
-    .filter((token) => token.length >= 4)
-    .sort((left, right) => left.length - right.length)[0];
-  if (classToken) {
-    return `${tagName}.${safeCssEscape(classToken)}`;
-  }
-
-  return tagName;
-}
 
 function buildTableSummary(table) {
   if (!table || table.nodeType !== Node.ELEMENT_NODE) return null;
@@ -128,17 +44,6 @@ function buildTableSummary(table) {
   return classToken ? `${tagName}.${classToken}` : tagName;
 }
 
-function extractReferencedText(documentRef, idList) {
-  if (!documentRef || typeof idList !== 'string') return null;
-  const parts = [];
-  for (const refId of idList.split(/\s+/).filter(Boolean)) {
-    const ref = documentRef.getElementById?.(refId);
-    const text = normalizeLabelText(ref?.textContent || '');
-    if (!text) continue;
-    if (!parts.includes(text)) parts.push(text);
-  }
-  return parts.length > 0 ? parts.join(' ') : null;
-}
 
 function findTableLabel(table) {
   if (!table || table.nodeType !== Node.ELEMENT_NODE) {
@@ -358,14 +263,6 @@ function getTargetActionIndexWithinRow(row, target, actionSelector, actionName) 
   return matches.indexOf(target);
 }
 
-function countVisibleMatches(root, selector) {
-  if (!root || typeof root.querySelectorAll !== 'function' || !selector) return 0;
-  try {
-    return Array.from(root.querySelectorAll(selector)).filter(isFastVisible).length;
-  } catch {
-    return 0;
-  }
-}
 
 function buildRowSelector(row) {
   if (!row || row.nodeType !== Node.ELEMENT_NODE) return 'tr';

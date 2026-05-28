@@ -7,6 +7,7 @@ import {
   isLikelyDynamicId,
   safeTrim,
 } from '../utils.js';
+import { getBestStableClassToken } from '../shared/dom-attributes.js';
 import { resolveTableRowContextEvidence } from './table-row.js';
 
 function resolveProposalTarget(element, eventContext, tableRowContextEvidence, canonicalTargetInfo) {
@@ -39,14 +40,6 @@ function buildClassPredicate(classToken) {
   return `contains(concat(" ", normalize-space(@class), " "), "${tokenWithPadding}")`;
 }
 
-function getBestStableClassToken(element) {
-  const tokens = getSafeClassTokens(element)
-    .filter((token) => !/^(?:is|has)-/i.test(token))
-    .filter((token) => !/^(?:css-|sc-)/i.test(token))
-    .filter((token) => token.length >= 4)
-    .sort((left, right) => left.length - right.length);
-  return tokens[0] || null;
-}
 
 function getTableElement(element) {
   return element?.closest?.('table, [role="table"], [role="grid"]') || null;

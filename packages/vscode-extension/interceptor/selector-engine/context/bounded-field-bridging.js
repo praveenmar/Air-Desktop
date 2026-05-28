@@ -7,14 +7,9 @@ import {
   isLikelyDynamicId,
   safeTrim,
 } from '../utils.js';
+import { getBestStableClassToken } from '../shared/dom-attributes.js';
+import { buildScopedSelector } from '../shared/selectors.js';
 import { resolveBoundedFieldContextEvidence } from './bounded-field.js';
-
-function buildScopedSelector(parentSelector, childSelector) {
-  const parent = typeof parentSelector === 'string' ? parentSelector.trim() : '';
-  const child = typeof childSelector === 'string' ? childSelector.trim() : '';
-  if (!parent || !child) return null;
-  return `${parent} ${child}`;
-}
 
 function resolveProposalTarget(element, eventContext, boundedFieldContextEvidence, canonicalTargetInfo) {
   if (boundedFieldContextEvidence?.usedCanonicalTarget !== true) return element || null;
@@ -53,14 +48,7 @@ function buildClassPredicate(classToken) {
   return `contains(concat(" ", normalize-space(@class), " "), "${tokenWithPadding}")`;
 }
 
-function getBestStableClassToken(element) {
-  const tokens = getSafeClassTokens(element)
-    .filter((token) => !/^(?:is|has)-/i.test(token))
-    .filter((token) => !/^(?:css-|sc-)/i.test(token))
-    .filter((token) => token.length >= 4)
-    .sort((left, right) => left.length - right.length);
-  return tokens[0] || null;
-}
+
 
 function buildElementXPath(element, { allowDescendant = false } = {}) {
   if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;

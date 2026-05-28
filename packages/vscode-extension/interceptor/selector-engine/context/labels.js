@@ -7,6 +7,14 @@ import {
   safeTrim,
 } from '../utils.js';
 import { resolveCanonicalCustomControlTargetInternal } from '../canonical-target.js';
+import { isFastVisible, queryVisibleElements } from '../shared/visibility.js';
+import { getRole } from '../shared/dom-attributes.js';
+import { normalizeLabelText, extractReferencedText } from '../shared/text.js';
+import { summarizeTarget as _summarizeTarget } from '../shared/target-summary.js';
+
+function summarizeTarget(element) {
+  return _summarizeTarget(element, { includeClassList: true, includeTabIndex: true });
+}
 
 const MAX_CONTAINER_DEPTH = 5;
 const STOP_TAGS = new Set([
@@ -44,44 +52,6 @@ const TRIGGER_LIKE_SELECTOR = [
 ].join(', ');
 const LABEL_CANDIDATE_SELECTOR = 'label, legend, span, div, p';
 
-function isFastVisible(element) {
-  if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
-  if (element.isConnected === false) return false;
-  if (element.hidden) return false;
-  if (element.getAttribute?.('aria-hidden') === 'true') return false;
-
-  const inlineStyle = element.style || null;
-  if (inlineStyle && (inlineStyle.display === 'none' || inlineStyle.visibility === 'hidden')) {
-    return false;
-  }
-
-  return true;
-}
-
-function normalizeLabelText(value) {
-  const normalized = normalizeText(value)
-    .replace(/[:*]\s*$/, '')
-    .trim();
-  return normalized || null;
-}
-
-function getRole(element) {
-  return safeTrim(element?.getAttribute?.('role') || '').toLowerCase();
-}
-
-function summarizeTarget(element) {
-  if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
-
-  const classes = getSafeClassTokens(element).slice(0, 3);
-  return {
-    tagName: element.tagName?.toLowerCase?.() || null,
-    role: getRole(element) || null,
-    classList: classes.length > 0 ? classes.join(' ') : null,
-    textExcerpt: normalizeText(element.innerText || element.textContent || '').slice(0, 80) || null,
-    tabIndex: element.getAttribute?.('tabindex') ?? null,
-  };
-}
-
 function resolveControlKind(element, eventContext) {
   const tagName = element?.tagName?.toLowerCase?.() || '';
   const role = getRole(element);
@@ -118,18 +88,6 @@ function resolveEffectiveTarget(element, canonicalTargetInfo) {
     return canonicalTargetInfo.canonicalTarget;
   }
   return element;
-}
-
-function extractReferencedText(documentRef, idList) {
-  if (!documentRef || typeof idList !== 'string') return null;
-  const parts = [];
-  for (const refId of idList.split(/\s+/).filter(Boolean)) {
-    const ref = documentRef.getElementById?.(refId);
-    const text = normalizeLabelText(ref?.textContent || '');
-    if (!text) continue;
-    if (!parts.includes(text)) parts.push(text);
-  }
-  return parts.length > 0 ? parts.join(' ') : null;
 }
 
 function collectExplicitLabelProof(target) {
@@ -172,15 +130,6 @@ function collectExplicitLabelProof(target) {
   }
 
   return null;
-}
-
-function queryVisibleElements(root, selector) {
-  if (!root || typeof root.querySelectorAll !== 'function') return [];
-  try {
-    return Array.from(root.querySelectorAll(selector)).filter(isFastVisible);
-  } catch {
-    return [];
-  }
 }
 
 function getVisibleControlLikeTargets(root, controlKind) {

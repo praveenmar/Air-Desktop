@@ -4,6 +4,13 @@ import {
   safeTrim,
 } from '../utils.js';
 import { resolveCanonicalCustomControlTargetInternal } from '../canonical-target.js';
+import { getRole } from '../shared/dom-attributes.js';
+import { summarizeTarget as _summarizeTarget } from '../shared/target-summary.js';
+
+function summarizeTarget(element) {
+  return _summarizeTarget(element, { includeAriaLabels: true, includeTextExcerpt: true });
+}
+
 
 const TEXTBOX_INPUT_TYPES = new Set([
   '',
@@ -35,20 +42,6 @@ function normalizeAccessibleText(text) {
   return normalized.length > 100 ? normalized.slice(0, 100) : normalized;
 }
 
-function getRole(element) {
-  return safeTrim(element?.getAttribute?.('role') || '').toLowerCase() || null;
-}
-
-function summarizeTarget(element) {
-  if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
-  return {
-    tagName: element.tagName?.toLowerCase?.() || null,
-    role: getRole(element),
-    textExcerpt: normalizeText(element.innerText || element.textContent || '').slice(0, 80) || null,
-    ariaLabel: element.getAttribute?.('aria-label') || null,
-    ariaLabelledBy: element.getAttribute?.('aria-labelledby') || null,
-  };
-}
 
 function inferNativeRole(element) {
   const tagName = (element?.tagName || '').toLowerCase();
