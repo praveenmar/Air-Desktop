@@ -6637,6 +6637,7 @@ class AIRInterceptor {
         selectorResult,
         eventContext,
         selectorCandidates,
+        boundedFieldContext,
       );
     } catch (error) {
       this.log("SELECTOR_ENGINE_SHADOW_FAILED", {
@@ -6914,6 +6915,634 @@ class AIRInterceptor {
           ? canonicalTargetInfo.blockedReason
           : null,
     };
+  }
+
+  _summarizeSelectorEngineProposalResult(proposalResult) {
+    if (!proposalResult || typeof proposalResult !== "object") return null;
+
+    return {
+      fieldLabelText:
+        typeof proposalResult.fieldLabelText === "string" ? proposalResult.fieldLabelText : null,
+      fieldRelation:
+        typeof proposalResult.fieldRelation === "string" ? proposalResult.fieldRelation : null,
+      targetControlKind:
+        typeof proposalResult.targetControlKind === "string"
+          ? proposalResult.targetControlKind
+          : null,
+      usedCanonicalTarget: proposalResult.usedCanonicalTarget === true,
+      scopeSelector:
+        typeof proposalResult.scopeSelector === "string" ? proposalResult.scopeSelector : null,
+      childSelector:
+        typeof proposalResult.childSelector === "string" ? proposalResult.childSelector : null,
+      blockedReason:
+        typeof proposalResult.blockedReason === "string" ? proposalResult.blockedReason : null,
+      proposals: this._summarizeSelectorEngineCandidates(proposalResult.proposals),
+    };
+  }
+
+  _summarizeSelectorEnginePreferenceEntry(entry) {
+    if (!entry || typeof entry !== "object") return null;
+
+    return {
+      selector: typeof entry.selector === "string" ? entry.selector : null,
+      family: typeof entry.family === "string" ? entry.family : null,
+      engine: typeof entry.engine === "string" ? entry.engine : null,
+      proposalSource:
+        typeof entry.proposalSource === "string" ? entry.proposalSource : null,
+      path: typeof entry.path === "string" ? entry.path : null,
+      strategy: typeof entry.strategy === "string" ? entry.strategy : null,
+      tier: typeof entry.tier === "string" ? entry.tier : null,
+      score: typeof entry.score === "number" ? entry.score : null,
+      matchCount: typeof entry.matchCount === "number" ? entry.matchCount : null,
+      visibleMatchCount:
+        typeof entry.visibleMatchCount === "number" ? entry.visibleMatchCount : null,
+      positionInAllMatches:
+        typeof entry.positionInAllMatches === "number" ? entry.positionInAllMatches : null,
+      positionInVisibleMatches:
+        typeof entry.positionInVisibleMatches === "number"
+          ? entry.positionInVisibleMatches
+          : null,
+      reasons: Array.isArray(entry.reasons) ? entry.reasons : [],
+      summary: this._isPlainObject(entry.summary) ? entry.summary : null,
+    };
+  }
+
+  _summarizeSelectorEnginePreferenceShadow(preferenceShadow) {
+    if (!preferenceShadow || typeof preferenceShadow !== "object") return null;
+
+    const summarizeEntries = (entries, limit = 8) => {
+      if (!Array.isArray(entries)) return [];
+      return entries
+        .slice(0, limit)
+        .map((entry) => this._summarizeSelectorEnginePreferenceEntry(entry))
+        .filter(Boolean);
+    };
+
+    return {
+      bestSelector: this._summarizeSelectorEnginePreferenceEntry(preferenceShadow.bestSelector),
+      bestProof: this._summarizeSelectorEnginePreferenceEntry(preferenceShadow.bestProof),
+      selectorTierCounts: this._isPlainObject(preferenceShadow.selectorTierCounts)
+        ? preferenceShadow.selectorTierCounts
+        : null,
+      proofTierCounts: this._isPlainObject(preferenceShadow.proofTierCounts)
+        ? preferenceShadow.proofTierCounts
+        : null,
+      selectorChoices: summarizeEntries(preferenceShadow.selectorChoices),
+      proofChoices: summarizeEntries(preferenceShadow.proofChoices),
+    };
+  }
+
+  _summarizeSelectorEngineWeakShadowCoverage(weakShadowCoverage) {
+    if (!weakShadowCoverage || typeof weakShadowCoverage !== "object") return null;
+
+    return {
+      targetSummary:
+        this._isPlainObject(weakShadowCoverage.targetSummary)
+          ? weakShadowCoverage.targetSummary
+          : null,
+      needsWeakCoverage: weakShadowCoverage.needsWeakCoverage === true,
+      blockedReason:
+        typeof weakShadowCoverage.blockedReason === "string"
+          ? weakShadowCoverage.blockedReason
+          : null,
+      fallbacks: Array.isArray(weakShadowCoverage.fallbacks)
+        ? weakShadowCoverage.fallbacks
+          .slice(0, 8)
+          .map((entry) => this._summarizeSelectorEnginePreferenceEntry(entry))
+          .filter(Boolean)
+        : [],
+    };
+  }
+
+  _collectSelectorEngineCandidateFamilies(candidates, limit = 8) {
+    if (!Array.isArray(candidates)) return [];
+    const families = [];
+    for (const candidate of candidates) {
+      const family = typeof candidate?.family === "string" ? candidate.family : null;
+      if (!family || families.includes(family)) continue;
+      families.push(family);
+      if (families.length >= limit) break;
+    }
+    return families;
+  }
+
+  _summarizeSelectorEngineCompactTargetSummary(targetSummary) {
+    if (!this._isPlainObject(targetSummary)) return null;
+
+    return {
+      tagName: typeof targetSummary.tagName === "string" ? targetSummary.tagName : null,
+      role: typeof targetSummary.role === "string" ? targetSummary.role : null,
+      classList: typeof targetSummary.classList === "string" ? targetSummary.classList : null,
+      textExcerpt:
+        typeof targetSummary.textExcerpt === "string" ? targetSummary.textExcerpt : null,
+    };
+  }
+
+  _summarizeSelectorEngineCompactPreferenceEntry(entry) {
+    if (!entry || typeof entry !== "object") return null;
+
+    return {
+      selector: typeof entry.selector === "string" ? entry.selector : null,
+      family: typeof entry.family === "string" ? entry.family : null,
+      proposalSource:
+        typeof entry.proposalSource === "string" ? entry.proposalSource : null,
+      path: typeof entry.path === "string" ? entry.path : null,
+      strategy: typeof entry.strategy === "string" ? entry.strategy : null,
+      tier: typeof entry.tier === "string" ? entry.tier : null,
+      score: typeof entry.score === "number" ? entry.score : null,
+      matchCount: typeof entry.matchCount === "number" ? entry.matchCount : null,
+      visibleMatchCount:
+        typeof entry.visibleMatchCount === "number" ? entry.visibleMatchCount : null,
+      reasons: Array.isArray(entry.reasons) ? entry.reasons.slice(0, 4) : [],
+    };
+  }
+
+  _summarizeSelectorEngineCompactPreferenceShadow(preferenceShadow) {
+    if (!preferenceShadow || typeof preferenceShadow !== "object") return null;
+
+    return {
+      bestSelector: this._summarizeSelectorEngineCompactPreferenceEntry(
+        preferenceShadow.bestSelector,
+      ),
+      bestProof: this._summarizeSelectorEngineCompactPreferenceEntry(
+        preferenceShadow.bestProof,
+      ),
+      selectorTierCounts: this._isPlainObject(preferenceShadow.selectorTierCounts)
+        ? preferenceShadow.selectorTierCounts
+        : null,
+      proofTierCounts: this._isPlainObject(preferenceShadow.proofTierCounts)
+        ? preferenceShadow.proofTierCounts
+        : null,
+    };
+  }
+
+  _summarizeSelectorEngineCompactWeakCoverage(weakShadowCoverage) {
+    if (!weakShadowCoverage || typeof weakShadowCoverage !== "object") return null;
+
+    const topFallback = Array.isArray(weakShadowCoverage.fallbacks)
+      ? weakShadowCoverage.fallbacks[0]
+      : null;
+
+    return {
+      needsWeakCoverage: weakShadowCoverage.needsWeakCoverage === true,
+      blockedReason:
+        typeof weakShadowCoverage.blockedReason === "string"
+          ? weakShadowCoverage.blockedReason
+          : null,
+      fallbackCount: Array.isArray(weakShadowCoverage.fallbacks)
+        ? weakShadowCoverage.fallbacks.length
+        : 0,
+      topFallback: this._summarizeSelectorEngineCompactPreferenceEntry(topFallback),
+    };
+  }
+
+  _summarizeSelectorEngineCompactCanonicalTarget(canonicalTargetSummary) {
+    if (!canonicalTargetSummary || typeof canonicalTargetSummary !== "object") return null;
+
+    return {
+      rawTarget: this._summarizeSelectorEngineCompactTargetSummary(
+        canonicalTargetSummary.rawTargetSummary,
+      ),
+      canonicalTarget: this._summarizeSelectorEngineCompactTargetSummary(
+        canonicalTargetSummary.canonicalTargetSummary,
+      ),
+      canonicalReason:
+        typeof canonicalTargetSummary.canonicalReason === "string"
+          ? canonicalTargetSummary.canonicalReason
+          : null,
+      canonicalConfidence:
+        typeof canonicalTargetSummary.canonicalConfidence === "number"
+          ? canonicalTargetSummary.canonicalConfidence
+          : null,
+      canonicalDiffers: canonicalTargetSummary.canonicalDiffers === true,
+      blockedReason:
+        typeof canonicalTargetSummary.blockedReason === "string"
+          ? canonicalTargetSummary.blockedReason
+          : null,
+    };
+  }
+
+  _summarizeSelectorEngineCompactLabelContext(labelContextEvidence) {
+    if (!labelContextEvidence || typeof labelContextEvidence !== "object") return null;
+
+    return {
+      fieldLabelText:
+        typeof labelContextEvidence.fieldLabelText === "string"
+          ? labelContextEvidence.fieldLabelText
+          : null,
+      fieldRelation:
+        typeof labelContextEvidence.fieldRelation === "string"
+          ? labelContextEvidence.fieldRelation
+          : null,
+      targetControlKind:
+        typeof labelContextEvidence.targetControlKind === "string"
+          ? labelContextEvidence.targetControlKind
+          : null,
+      isValid: labelContextEvidence.isValid === true,
+      blockedReason:
+        typeof labelContextEvidence.blockedReason === "string"
+          ? labelContextEvidence.blockedReason
+          : null,
+      duplicateLabelCount:
+        typeof labelContextEvidence.duplicateLabelCount === "number"
+          ? labelContextEvidence.duplicateLabelCount
+          : null,
+    };
+  }
+
+  _summarizeSelectorEngineCompactAccessibility(accessibilityEvidence) {
+    if (!accessibilityEvidence || typeof accessibilityEvidence !== "object") return null;
+
+    return {
+      role: typeof accessibilityEvidence.role === "string" ? accessibilityEvidence.role : null,
+      accessibleName:
+        typeof accessibilityEvidence.accessibleName === "string"
+          ? accessibilityEvidence.accessibleName
+          : null,
+      nameSource:
+        typeof accessibilityEvidence.nameSource === "string"
+          ? accessibilityEvidence.nameSource
+          : null,
+      usedCanonicalTarget: accessibilityEvidence.usedCanonicalTarget === true,
+      blockedReason:
+        typeof accessibilityEvidence.blockedReason === "string"
+          ? accessibilityEvidence.blockedReason
+          : null,
+    };
+  }
+
+  _summarizeSelectorEngineCompactBoundedField(
+    boundedFieldContextEvidence,
+    boundedFieldSelectorProposals,
+    boundedFieldShadowExposure,
+  ) {
+    if (
+      !boundedFieldContextEvidence
+      && !boundedFieldSelectorProposals
+      && !boundedFieldShadowExposure
+    ) {
+      return null;
+    }
+
+    const proposalResult = boundedFieldSelectorProposals || null;
+    const topProposal = Array.isArray(proposalResult?.proposals)
+      ? proposalResult.proposals[0]
+      : null;
+
+    return {
+      fieldLabelText:
+        typeof boundedFieldContextEvidence?.fieldLabelText === "string"
+          ? boundedFieldContextEvidence.fieldLabelText
+          : null,
+      fieldRelation:
+        typeof boundedFieldContextEvidence?.fieldRelation === "string"
+          ? boundedFieldContextEvidence.fieldRelation
+          : null,
+      targetControlKind:
+        typeof boundedFieldContextEvidence?.targetControlKind === "string"
+          ? boundedFieldContextEvidence.targetControlKind
+          : null,
+      isValid: boundedFieldContextEvidence?.isValid === true,
+      blockedReason:
+        typeof boundedFieldContextEvidence?.blockedReason === "string"
+          ? boundedFieldContextEvidence.blockedReason
+          : null,
+      targetIndexWithinContainer:
+        typeof boundedFieldContextEvidence?.targetIndexWithinContainer === "number"
+          ? boundedFieldContextEvidence.targetIndexWithinContainer
+          : null,
+      duplicateLabelCount:
+        typeof boundedFieldContextEvidence?.duplicateLabelCount === "number"
+          ? boundedFieldContextEvidence.duplicateLabelCount
+          : null,
+      usedCanonicalTarget: proposalResult?.usedCanonicalTarget === true,
+      proposalCount: Array.isArray(proposalResult?.proposals) ? proposalResult.proposals.length : 0,
+      topProposal: this._summarizeSelectorEngineCompactPreferenceEntry(topProposal),
+      proposalBlockedReason:
+        typeof proposalResult?.blockedReason === "string" ? proposalResult.blockedReason : null,
+      parityStatus:
+        typeof boundedFieldShadowExposure?.parityStatus === "string"
+          ? boundedFieldShadowExposure.parityStatus
+          : null,
+      mismatchReasonCounts: this._isPlainObject(boundedFieldShadowExposure?.mismatchReasonCounts)
+        ? boundedFieldShadowExposure.mismatchReasonCounts
+        : null,
+    };
+  }
+
+  _summarizeSelectorEngineCompactOptionPanel(optionPanelContextEvidence) {
+    if (!optionPanelContextEvidence || typeof optionPanelContextEvidence !== "object") return null;
+
+    return {
+      itemRole:
+        typeof optionPanelContextEvidence.itemRole === "string"
+          ? optionPanelContextEvidence.itemRole
+          : null,
+      itemName:
+        typeof optionPanelContextEvidence.itemName === "string"
+          ? optionPanelContextEvidence.itemName
+          : null,
+      triggerRelation:
+        typeof optionPanelContextEvidence.triggerRelation === "string"
+          ? optionPanelContextEvidence.triggerRelation
+          : null,
+      uniquePanelBinding: optionPanelContextEvidence.uniquePanelBinding === true,
+      uniqueTargetBinding: optionPanelContextEvidence.uniqueTargetBinding === true,
+      requiresPositionalDisambiguation:
+        optionPanelContextEvidence.requiresPositionalDisambiguation === true,
+      isValid: optionPanelContextEvidence.isValid === true,
+      blockedReason:
+        typeof optionPanelContextEvidence.blockedReason === "string"
+          ? optionPanelContextEvidence.blockedReason
+          : null,
+      targetIndexWithinContainer:
+        typeof optionPanelContextEvidence.targetIndexWithinContainer === "number"
+          ? optionPanelContextEvidence.targetIndexWithinContainer
+          : null,
+    };
+  }
+
+  _summarizeSelectorEngineCompactTableRow(tableRowContextEvidence) {
+    if (!tableRowContextEvidence || typeof tableRowContextEvidence !== "object") return null;
+
+    return {
+      tableLabelText:
+        typeof tableRowContextEvidence.tableLabelText === "string"
+          ? tableRowContextEvidence.tableLabelText
+          : null,
+      actionName:
+        typeof tableRowContextEvidence.actionName === "string"
+          ? tableRowContextEvidence.actionName
+          : null,
+      rowIdentityTexts: Array.isArray(tableRowContextEvidence.rowIdentityTexts)
+        ? tableRowContextEvidence.rowIdentityTexts.slice(0, 3)
+        : [],
+      uniqueTableBinding: tableRowContextEvidence.uniqueTableBinding === true,
+      uniqueRowBinding: tableRowContextEvidence.uniqueRowBinding === true,
+      uniqueActionBinding: tableRowContextEvidence.uniqueActionBinding === true,
+      requiresPositionalDisambiguation:
+        tableRowContextEvidence.requiresPositionalDisambiguation === true,
+      isValid: tableRowContextEvidence.isValid === true,
+      blockedReason:
+        typeof tableRowContextEvidence.blockedReason === "string"
+          ? tableRowContextEvidence.blockedReason
+          : null,
+      targetRowIndexWithinTable:
+        typeof tableRowContextEvidence.targetRowIndexWithinTable === "number"
+          ? tableRowContextEvidence.targetRowIndexWithinTable
+          : null,
+      targetActionIndexWithinRow:
+        typeof tableRowContextEvidence.targetActionIndexWithinRow === "number"
+          ? tableRowContextEvidence.targetActionIndexWithinRow
+          : null,
+    };
+  }
+
+  _buildCompactSelectorEngineShadowProofPayload({
+    selectorEngine,
+    selectorResult,
+    eventContext,
+    currentSummary,
+    shadowSummary,
+    canonicalTargetSummary,
+    labelContextEvidence,
+    accessibilityEvidence,
+    boundedFieldContextEvidence,
+    boundedFieldSelectorProposals,
+    boundedFieldShadowExposure,
+    optionPanelContextEvidence,
+    tableRowContextEvidence,
+    selectorPreferenceShadow,
+    weakAppShadowCoverage,
+    timingsMs,
+  }) {
+    return this._sanitizeInterceptorDiagnosticValue({
+      eventId: eventContext?.eventId || eventContext?.id || null,
+      traceId: eventContext?.traceId || null,
+      eventType: typeof eventContext?.eventType === "string" ? eventContext.eventType : null,
+      trigger: typeof eventContext?.trigger === "string" ? eventContext.trigger : null,
+      primarySelector:
+        typeof selectorResult?.selector === "string" ? selectorResult.selector : null,
+      canonicalTarget:
+        this._summarizeSelectorEngineCompactCanonicalTarget(canonicalTargetSummary),
+      currentCandidateCount: Array.isArray(currentSummary) ? currentSummary.length : 0,
+      currentCandidateFamilies: this._collectSelectorEngineCandidateFamilies(currentSummary),
+      shadowCandidateCount: Array.isArray(shadowSummary) ? shadowSummary.length : 0,
+      shadowCandidateFamilies: this._collectSelectorEngineCandidateFamilies(shadowSummary),
+      labelContext:
+        this._summarizeSelectorEngineCompactLabelContext(labelContextEvidence),
+      accessibility:
+        this._summarizeSelectorEngineCompactAccessibility(accessibilityEvidence),
+      boundedField: this._summarizeSelectorEngineCompactBoundedField(
+        boundedFieldContextEvidence,
+        boundedFieldSelectorProposals,
+        boundedFieldShadowExposure,
+      ),
+      optionPanel:
+        this._summarizeSelectorEngineCompactOptionPanel(optionPanelContextEvidence),
+      tableRow:
+        this._summarizeSelectorEngineCompactTableRow(tableRowContextEvidence),
+      selectorPreference:
+        this._summarizeSelectorEngineCompactPreferenceShadow(selectorPreferenceShadow),
+      weakCoverage:
+        this._summarizeSelectorEngineCompactWeakCoverage(weakAppShadowCoverage),
+      proofTimingsMs: timingsMs,
+      sessionId: this.config?.sessionId || null,
+      tabId: this.config?.tabId || null,
+      selectorEngineVersion:
+        typeof selectorEngine?.version === "string" ? selectorEngine.version : null,
+    });
+  }
+
+  _measureSelectorEngineShadowCall(timingsMs, key, collector) {
+    const startedAt =
+      typeof performance !== "undefined" && typeof performance.now === "function"
+        ? performance.now()
+        : Date.now();
+    const value = collector();
+    const endedAt =
+      typeof performance !== "undefined" && typeof performance.now === "function"
+        ? performance.now()
+        : Date.now();
+    timingsMs[key] = Number((endedAt - startedAt).toFixed(2));
+    return value;
+  }
+
+  _stringifySelectorEngineShadowProofPayload(payload) {
+    try {
+      return JSON.stringify(payload);
+    } catch (error) {
+      return JSON.stringify({
+        serializationFailed: true,
+        message: error?.message || String(error),
+      });
+    }
+  }
+
+  _logSelectorEngineShadowProof({
+    selectorEngine,
+    element,
+    selectorResult,
+    eventContext,
+    currentSummary,
+    shadowCandidates,
+    shadowSummary,
+    canonicalTargetInfo,
+    canonicalTargetSummary,
+    legacyBoundedFieldContext,
+  }) {
+    if (!this.config?.debugMode || !this.config?.selectorEngineShadowLogDiffs) return;
+    if (!selectorEngine || typeof selectorEngine !== "object") return;
+
+    const timingsMs = {};
+    const labelContextEvidence =
+      typeof selectorEngine.resolveLabelContextEvidence === "function"
+        ? this._measureSelectorEngineShadowCall(timingsMs, "labelContext", () =>
+          selectorEngine.resolveLabelContextEvidence({
+            element,
+            selectorResult,
+            eventContext,
+            canonicalTargetInfo,
+          }))
+        : null;
+    const accessibilityEvidence =
+      typeof selectorEngine.resolveAccessibilityEvidence === "function"
+        ? this._measureSelectorEngineShadowCall(timingsMs, "accessibility", () =>
+          selectorEngine.resolveAccessibilityEvidence({
+            element,
+            eventContext,
+            canonicalTargetInfo,
+          }))
+        : null;
+    const boundedFieldContextEvidence =
+      typeof selectorEngine.resolveBoundedFieldContextEvidence === "function"
+        ? this._measureSelectorEngineShadowCall(timingsMs, "boundedField", () =>
+          selectorEngine.resolveBoundedFieldContextEvidence({
+            element,
+            selectorResult,
+            eventContext,
+            labelContextEvidence,
+            accessibilityEvidence,
+          }))
+        : null;
+    const boundedFieldSelectorProposals =
+      typeof selectorEngine.collectBoundedFieldSelectorProposals === "function"
+        ? this._measureSelectorEngineShadowCall(timingsMs, "boundedFieldProposals", () =>
+          selectorEngine.collectBoundedFieldSelectorProposals({
+            element,
+            selectorResult,
+            eventContext,
+            boundedFieldContextEvidence,
+            canonicalTargetInfo,
+            maxCandidates: Number(this.config?.selectorEngineShadowMaxCandidates) || 12,
+          }))
+        : null;
+    const boundedFieldShadowExposure =
+      typeof selectorEngine.buildBoundedFieldShadowExposure === "function"
+        ? this._measureSelectorEngineShadowCall(timingsMs, "boundedFieldShadow", () =>
+          selectorEngine.buildBoundedFieldShadowExposure({
+            legacyContext: legacyBoundedFieldContext,
+            modularContext: boundedFieldContextEvidence,
+          }))
+        : null;
+    const optionPanelContextEvidence =
+      typeof selectorEngine.resolveOptionPanelContextEvidence === "function"
+        ? this._measureSelectorEngineShadowCall(timingsMs, "optionPanel", () =>
+          selectorEngine.resolveOptionPanelContextEvidence({
+            element,
+            eventContext,
+            canonicalTargetInfo,
+            accessibilityEvidence,
+          }))
+        : null;
+    const optionPanelSelectorProposals =
+      typeof selectorEngine.collectOptionPanelSelectorProposals === "function"
+        ? this._measureSelectorEngineShadowCall(timingsMs, "optionPanelProposals", () =>
+          selectorEngine.collectOptionPanelSelectorProposals({
+            element,
+            eventContext,
+            optionPanelContextEvidence,
+            canonicalTargetInfo,
+            maxCandidates: Number(this.config?.selectorEngineShadowMaxCandidates) || 12,
+          }))
+        : null;
+    const tableRowContextEvidence =
+      typeof selectorEngine.resolveTableRowContextEvidence === "function"
+        ? this._measureSelectorEngineShadowCall(timingsMs, "tableRow", () =>
+          selectorEngine.resolveTableRowContextEvidence({
+            element,
+            eventContext,
+            canonicalTargetInfo,
+            accessibilityEvidence,
+          }))
+        : null;
+    const tableRowSelectorProposals =
+      typeof selectorEngine.collectTableRowSelectorProposals === "function"
+        ? this._measureSelectorEngineShadowCall(timingsMs, "tableRowProposals", () =>
+          selectorEngine.collectTableRowSelectorProposals({
+            element,
+            eventContext,
+            tableRowContextEvidence,
+            canonicalTargetInfo,
+            maxCandidates: Number(this.config?.selectorEngineShadowMaxCandidates) || 12,
+          }))
+        : null;
+
+    const proposalCandidates = [
+      ...(Array.isArray(boundedFieldSelectorProposals?.proposals) ? boundedFieldSelectorProposals.proposals : []),
+      ...(Array.isArray(optionPanelSelectorProposals?.proposals) ? optionPanelSelectorProposals.proposals : []),
+      ...(Array.isArray(tableRowSelectorProposals?.proposals) ? tableRowSelectorProposals.proposals : []),
+    ];
+    const selectorPreferenceShadow =
+      typeof selectorEngine.buildSelectorPreferenceShadow === "function"
+        ? this._measureSelectorEngineShadowCall(timingsMs, "preference", () =>
+          selectorEngine.buildSelectorPreferenceShadow({
+            candidates: shadowCandidates,
+            proposalCandidates,
+            boundedFieldContextEvidence,
+            labelContextEvidence,
+            accessibilityEvidence,
+            boundedFieldShadowExposure,
+            optionPanelContextEvidence,
+            tableRowContextEvidence,
+          }))
+        : null;
+    const weakAppShadowCoverage =
+      typeof selectorEngine.collectWeakAppShadowCoverage === "function"
+        ? this._measureSelectorEngineShadowCall(timingsMs, "weakCoverage", () =>
+          selectorEngine.collectWeakAppShadowCoverage({
+            element,
+            currentCandidates: [
+              ...(Array.isArray(shadowCandidates) ? shadowCandidates : []),
+              ...proposalCandidates,
+            ],
+            boundedFieldContextEvidence,
+          }))
+        : null;
+
+    const payload = this._buildCompactSelectorEngineShadowProofPayload({
+      selectorEngine,
+      selectorResult,
+      eventContext,
+      currentSummary,
+      shadowSummary,
+      canonicalTargetSummary,
+      labelContextEvidence,
+      accessibilityEvidence,
+      boundedFieldContextEvidence,
+      boundedFieldSelectorProposals,
+      boundedFieldShadowExposure,
+      optionPanelContextEvidence,
+      tableRowContextEvidence,
+      selectorPreferenceShadow,
+      weakAppShadowCoverage,
+      timingsMs,
+    });
+
+    this.log(
+      "SELECTOR_ENGINE_SHADOW_PROOF",
+      this._stringifySelectorEngineShadowProofPayload(payload),
+    );
   }
 
   _truncateParitySelector(selector) {
@@ -7310,7 +7939,13 @@ class AIRInterceptor {
     });
   }
 
-  _runSelectorEngineShadowComparison(element, selectorResult, eventContext, currentCandidates) {
+  _runSelectorEngineShadowComparison(
+    element,
+    selectorResult,
+    eventContext,
+    currentCandidates,
+    legacyBoundedFieldContext,
+  ) {
     if (!this.config?.selectorEngineShadowMode) return;
 
     const selectorEngine = this._getSelectorEngineShadowApi();
@@ -7351,6 +7986,28 @@ class AIRInterceptor {
     const shadowSummary = this._summarizeSelectorEngineCandidates(shadowCandidates);
     const currentSignature = JSON.stringify(currentSummary);
     const shadowSignature = JSON.stringify(shadowSummary);
+
+    try {
+      this._logSelectorEngineShadowProof({
+        selectorEngine,
+        element,
+        selectorResult,
+        eventContext,
+        currentSummary,
+        shadowCandidates,
+        shadowSummary,
+        canonicalTargetInfo,
+        canonicalTargetSummary,
+        legacyBoundedFieldContext,
+      });
+    } catch (error) {
+      this.log("SELECTOR_ENGINE_SHADOW_PROOF_FAILED", {
+        eventType: typeof eventContext?.eventType === "string" ? eventContext.eventType : null,
+        trigger: typeof eventContext?.trigger === "string" ? eventContext.trigger : null,
+        primarySelector: typeof selectorResult?.selector === "string" ? selectorResult.selector : null,
+        message: error?.message || String(error),
+      });
+    }
 
     if (currentSignature === shadowSignature) return;
     if (!this.config?.selectorEngineShadowLogDiffs) return;

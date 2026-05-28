@@ -20,6 +20,7 @@ function summarizeCandidate(candidate, tier, score, reasons) {
     family: candidate?.family || 'unknown',
     engine: candidate?.engine || 'css',
     proposalSource: candidate?.proposalSource || null,
+    proposalTierHint: candidate?.proposalTierHint || null,
     tier,
     score,
     reasons,
@@ -85,6 +86,24 @@ export function classifySelectorCandidatePreference(candidate) {
     score += 12;
     reasons.push('proof-derived-bounded-field');
   }
+  if (candidate?.proposalSource === 'option-panel') {
+    score += 16;
+    reasons.push('proof-derived-option-panel');
+  }
+  if (candidate?.proposalSource === 'table-row') {
+    score += 32;
+    reasons.push('proof-derived-table-row');
+  }
+  if (candidate?.proposalTierHint === 'preferred') {
+    score += 10;
+    reasons.push('proposal-tier-hint:preferred');
+  } else if (candidate?.proposalTierHint === 'fallback') {
+    score += 2;
+    reasons.push('proposal-tier-hint:fallback');
+  } else if (candidate?.proposalTierHint === 'last-resort') {
+    score -= 18;
+    reasons.push('proposal-tier-hint:last-resort');
+  }
 
   if (candidate?.usesDynamicClass) {
     score -= 8;
@@ -120,7 +139,12 @@ export function classifySelectorCandidatePreference(candidate) {
   }
 
   let tier = 'fallback';
-  if (score >= 80) tier = 'preferred';
+  if (
+    candidate?.usesIndex === true
+    || candidate?.requiresPositionalDisambiguation === true
+    || hasWarning(candidate, 'positional-fallback-only')
+  ) tier = 'last-resort';
+  else if (score >= 80) tier = 'preferred';
   else if (score < 50) tier = 'last-resort';
 
   return summarizeCandidate(candidate, tier, score, reasons);

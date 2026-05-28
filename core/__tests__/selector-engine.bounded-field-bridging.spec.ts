@@ -273,6 +273,116 @@ describe('selector engine bounded-field selector bridging', () => {
     });
   });
 
+  it('emits a label-anchored fallback for repeated custom triggers when generic field wrappers are shared', async () => {
+    await withBrowserGlobals(`
+      <div class="oxd-input-group">
+        <div class="oxd-input-group__label-wrapper"><label>User Role</label></div>
+        <div class="oxd-select-wrapper">
+          <div class="oxd-select-text">
+            <div class="oxd-select-text-input" tabindex="0">-- Select --</div>
+            <i class="oxd-icon bi-caret-down-fill"></i>
+          </div>
+        </div>
+      </div>
+      <div class="oxd-input-group">
+        <div class="oxd-input-group__label-wrapper"><label>Status</label></div>
+        <div class="oxd-select-wrapper">
+          <div class="oxd-select-text">
+            <div class="oxd-select-text-input" tabindex="0">-- Select --</div>
+            <i class="oxd-icon bi-caret-down-fill"></i>
+          </div>
+        </div>
+      </div>
+    `, 'https://example.test/admin', async () => {
+      const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
+      const target = document.querySelectorAll('.oxd-select-text-input')[0] as HTMLDivElement;
+      const proof = selectorEngine.resolveBoundedFieldContextEvidence({
+        element: target,
+        selectorResult: {
+          selector: '.oxd-select-text-input',
+          priority: 'class',
+          rank: 7,
+        },
+        eventContext: {
+          eventType: 'custom-control-open',
+          trigger: 'trigger-click',
+        },
+      });
+
+      const proposals = selectorEngine.collectBoundedFieldSelectorProposals({
+        element: target,
+        selectorResult: {
+          selector: '.oxd-select-text-input',
+          priority: 'class',
+          rank: 7,
+        },
+        eventContext: {
+          eventType: 'custom-control-open',
+          trigger: 'trigger-click',
+        },
+        boundedFieldContextEvidence: proof,
+      });
+      const preference = selectorEngine.buildSelectorPreferenceShadow({
+        proposalCandidates: proposals.proposals,
+        boundedFieldContextEvidence: proof,
+      });
+
+      expect(proof.fieldLabelText).toBe('User Role');
+      expect(proposals.proposals).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          selector: '//div[contains(concat(" ", normalize-space(@class), " "), " oxd-input-group ")][.//*[normalize-space(.)="User Role"]]//div[contains(concat(" ", normalize-space(@class), " "), " oxd-select-text-input ")]',
+          family: 'xpath',
+          proposalSource: 'bounded-field',
+          warningCodes: expect.arrayContaining(['label-anchored-trigger-scope']),
+        }),
+      ]));
+      expect(preference.bestSelector).toEqual(expect.objectContaining({
+        family: 'xpath',
+        proposalSource: 'bounded-field',
+      }));
+    });
+  });
+
+  it('keeps the label-anchored bounded-field XPath generic across non-div field wrappers', async () => {
+    await withBrowserGlobals(`
+      <section class="filter-field">
+        <span class="field-label">Region</span>
+        <div class="trigger-shell" aria-haspopup="listbox">
+          <span class="trigger-value" tabindex="0">-- Select --</span>
+        </div>
+      </section>
+      <section class="filter-field">
+        <span class="field-label">Department</span>
+        <div class="trigger-shell" aria-haspopup="listbox">
+          <span class="trigger-value" tabindex="0">-- Select --</span>
+        </div>
+      </section>
+    `, 'https://example.test/filters', async () => {
+      const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
+      const target = document.querySelector('.trigger-value') as HTMLSpanElement;
+
+      const proposals = selectorEngine.collectBoundedFieldSelectorProposals({
+        element: target,
+        selectorResult: {
+          selector: '.trigger-shell',
+          priority: 'class',
+          rank: 7,
+        },
+        eventContext: {
+          eventType: 'custom-control-open',
+          trigger: 'trigger-click',
+        },
+      });
+      const xpathProposal = proposals.proposals.find((candidate: { family: string }) => candidate.family === 'xpath');
+
+      expect(xpathProposal).toEqual(expect.objectContaining({
+        selector: '//section[contains(concat(" ", normalize-space(@class), " "), " filter-field ")][.//*[normalize-space(.)="Region"]]//span[contains(concat(" ", normalize-space(@class), " "), " trigger-value ")]',
+        matchCount: 1,
+        proposalSource: 'bounded-field',
+      }));
+    });
+  });
+
   it('blocks proposal generation when there is no clean renderable parent scope', async () => {
     await withBrowserGlobals(`
       <div>

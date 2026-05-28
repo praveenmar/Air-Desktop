@@ -13,7 +13,6 @@ const STOP_TAGS = new Set([
   'body',
   'html',
   'main',
-  'section',
   'article',
   'table',
   'tbody',
@@ -39,6 +38,9 @@ const TRIGGER_LIKE_SELECTOR = [
   'button[aria-haspopup]',
   'input[role="combobox"]',
   '[contenteditable="true"]',
+  '.select-trigger',
+  '.oxd-select-text',
+  '.oxd-select-wrapper',
 ].join(', ');
 const LABEL_CANDIDATE_SELECTOR = 'label, legend, span, div, p';
 
@@ -183,28 +185,136 @@ function queryVisibleElements(root, selector) {
 
 function getVisibleControlLikeTargets(root, controlKind) {
   if (!root || !controlKind) return [];
-  if (controlKind === 'custom-trigger') {
-    return queryVisibleElements(root, TRIGGER_LIKE_SELECTOR);
-  }
-  return queryVisibleElements(root, INPUT_LIKE_SELECTOR);
+  const selector = controlKind === 'custom-trigger' ? TRIGGER_LIKE_SELECTOR : INPUT_LIKE_SELECTOR;
+  const matches = queryVisibleElements(root, selector);
+  return matches.filter((match) => !matches.some((other) => other !== match && other.contains(match)));
 }
 
-function findContainerLabelCandidates(container, target) {
+function buildAncestorPath(element) {
+  const path = [];
+  let current = element || null;
+  while (current && current.nodeType === Node.ELEMENT_NODE) {
+    path.push(current);
+    current = current.parentElement || null;
+  }
+  return path;
+}
+
+function getDomDistance(left, right) {
+  if (!left || !right) return Number.POSITIVE_INFINITY;
+  if (left === right) return 0;
+
+  const leftPath = buildAncestorPath(left);
+  const rightPath = buildAncestorPath(right);
+  for (let leftIndex = 0; leftIndex < leftPath.length; leftIndex += 1) {
+    const sharedIndex = rightPath.indexOf(leftPath[leftIndex]);
+    if (sharedIndex >= 0) {
+      return leftIndex + sharedIndex;
+    }
+  }
+
+  return leftPath.length + rightPath.length;
+}
+
+function collectControlStateTexts(controls) {
+  const texts = new Set();
+  for (const control of controls || []) {
+    const normalized = normalizeLabelText(control?.textContent || '');
+    if (normalized && normalized.length <= 80) texts.add(normalized);
+  }
+  return Array.from(texts);
+}
+
+function hasSelectorMatch(root, selector) {
+  if (!root || typeof root.querySelector !== 'function') return false;
+  try {
+    return !!root.querySelector(selector);
+  } catch {
+    return false;
+  }
+}
+
+function isAggregateWrapperCandidate(element, entryText, controlTexts) {
+  if (!element || !entryText) return false;
+
+  if (element.children.length > 1 && element.tagName?.toLowerCase?.() !== 'label') {
+    return true;
+  }
+
+  return controlTexts.some((controlText) => (
+    controlText
+    && controlText.length >= 3
+    && controlText !== entryText
+    && entryText.includes(controlText)
+  ));
+}
+
+function findContainerLabelCandidates(container, target, controlBoundary, controls = [], targetControl = null) {
   const targetText = normalizeLabelText(target?.textContent || '');
-  const candidates = queryVisibleElements(container, LABEL_CANDIDATE_SELECTOR)
-    .filter((candidate) => !candidate.contains(target))
+  const boundary = controlBoundary || target;
+  const controlTexts = collectControlStateTexts(controls);
+
+  const rawCandidates = queryVisibleElements(container, LABEL_CANDIDATE_SELECTOR)
+    .filter((candidate) => !candidate.contains(boundary) && !boundary.contains(candidate))
     .map((candidate) => ({
       element: candidate,
       text: normalizeLabelText(candidate.textContent || ''),
+      tagName: candidate.tagName?.toLowerCase?.() || '',
     }))
     .filter((entry) => !!entry.text)
     .filter((entry) => entry.text.length <= 80)
     .filter((entry) => entry.text !== targetText)
     .filter((entry) => !/^(?:select|choose|search|open)$/i.test(entry.text));
 
-  return candidates.filter((entry) => (
-    !candidates.some((other) => other !== entry && other.element.contains(entry.element))
-  ));
+  const scoredCandidates = rawCandidates.map((entry) => {
+    const isTrueLabel = entry.tagName === 'label' || entry.tagName === 'legend';
+    const hasControlDescendants = (
+      entry.element.children.length > 0
+      && (hasSelectorMatch(entry.element, INPUT_LIKE_SELECTOR) || hasSelectorMatch(entry.element, TRIGGER_LIKE_SELECTOR))
+    );
+    const hasOptionDescendants = hasSelectorMatch(entry.element, '[role="option"], [role="menuitem"], .oxd-select-option, .oxd-dropdown-menu');
+    const isAggregateWrapper = !isTrueLabel && isAggregateWrapperCandidate(entry.element, entry.text, controlTexts);
+    const sameParentAsControl = !!(targetControl && entry.element.parentElement === targetControl.parentElement);
+    const isPrecedingControl = !!(
+      targetControl
+      && !!(entry.element.compareDocumentPosition(targetControl) & Node.DOCUMENT_POSITION_FOLLOWING)
+    );
+    const domDistance = targetControl ? getDomDistance(entry.element, targetControl) : Number.POSITIVE_INFINITY;
+
+    let score = 0;
+    if (isTrueLabel) score += 20;
+    if (entry.text.length < 30) score += 2;
+    if (sameParentAsControl) score += 6;
+    if (isPrecedingControl) score += 6;
+    if (Number.isFinite(domDistance)) score -= Math.min(domDistance, 12);
+
+    return {
+      ...entry,
+      score,
+      isTrueLabel,
+      hasControlDescendants,
+      hasOptionDescendants,
+      isAggregateWrapper,
+    };
+  });
+
+  const candidates = scoredCandidates.filter((entry) => {
+    if (entry.hasControlDescendants || entry.hasOptionDescendants || entry.isAggregateWrapper) {
+      return false;
+    }
+
+    const containers = scoredCandidates.filter(other => other !== entry && other.element.contains(entry.element));
+    if (containers.length > 0) {
+      return containers.every(c => entry.score > c.score);
+    }
+    const descendants = scoredCandidates.filter(other => other !== entry && entry.element.contains(other.element));
+    if (descendants.length > 0) {
+      return descendants.every(d => entry.score >= d.score);
+    }
+    return true;
+  });
+
+  return candidates.sort((a, b) => b.score - a.score);
 }
 
 function buildContainerSummary(container) {
@@ -353,7 +463,14 @@ function countDocumentLabelDuplicates(target, fieldLabelText) {
   return labels.filter((label) => normalizeLabelText(label.textContent || '') === normalized).length;
 }
 
-function findBoundedContainerProof(scopeTarget, childTarget, selectorResult, controlKind) {
+function resolveControlBoundary(scopeTarget, effectiveTarget, controlKind) {
+  const genericSelector = controlKind === 'custom-trigger' ? TRIGGER_LIKE_SELECTOR : INPUT_LIKE_SELECTOR;
+  return scopeTarget?.closest?.(genericSelector) || effectiveTarget || scopeTarget || null;
+}
+
+function findBoundedContainerProof(scopeTarget, effectiveTarget, childTarget, selectorResult, controlKind) {
+  const controlBoundary = resolveControlBoundary(scopeTarget, effectiveTarget, controlKind);
+
   let current = scopeTarget?.parentElement || null;
   let depth = 0;
 
@@ -361,11 +478,19 @@ function findBoundedContainerProof(scopeTarget, childTarget, selectorResult, con
     const tagName = current.tagName?.toLowerCase?.() || '';
     if (STOP_TAGS.has(tagName)) break;
 
-    const labelCandidates = findContainerLabelCandidates(current, childTarget);
     const controls = getVisibleControlLikeTargets(current, controlKind);
-    const targetIndex = controls.indexOf(scopeTarget);
+    const targetControl = controls.find(
+      (control) => control === controlBoundary || control.contains(controlBoundary) || controlBoundary.contains(control),
+    );
+    const targetIndex = targetControl ? controls.indexOf(targetControl) : -1;
+    const strictBoundary = targetControl || controlBoundary;
 
-    if (labelCandidates.length > 1 && targetIndex >= 0) {
+    const labelCandidates = findContainerLabelCandidates(current, childTarget, strictBoundary, controls, targetControl);
+    const topLabel = labelCandidates[0];
+    const hasClearWinner = labelCandidates.length === 1
+      || (labelCandidates.length > 1 && topLabel.score > labelCandidates[1].score);
+
+    if (labelCandidates.length > 1 && !hasClearWinner && targetIndex >= 0) {
       return {
         isValid: false,
         blockedReason: 'bounded-field-duplicate-label',
@@ -373,12 +498,12 @@ function findBoundedContainerProof(scopeTarget, childTarget, selectorResult, con
       };
     }
 
-    if (labelCandidates.length === 1 && controls.length === 1 && targetIndex === 0) {
+    if (labelCandidates.length > 0 && hasClearWinner && controls.length === 1 && targetIndex === 0) {
       const selectors = deriveContainerSelectorCandidates(current);
-      const fieldLabelText = labelCandidates[0].text;
+      const fieldLabelText = topLabel.text;
       return {
         fieldLabelText,
-        fieldRelation: labelCandidates[0].element.parentElement === current ? 'sibling-label' : 'bounded-container',
+        fieldRelation: topLabel.element.parentElement === current ? 'sibling-label' : 'bounded-container',
         visibleControlCountInContainer: 1,
         competingControlCount: 0,
         targetIndexWithinContainer: 0,
@@ -394,7 +519,7 @@ function findBoundedContainerProof(scopeTarget, childTarget, selectorResult, con
       };
     }
 
-    if (labelCandidates.length === 1 && targetIndex >= 0 && controls.length > 1) {
+    if (labelCandidates.length > 0 && hasClearWinner && targetIndex >= 0 && controls.length > 1) {
       return {
         isValid: false,
         blockedReason: 'bounded-field-multiple-targets',
@@ -488,6 +613,7 @@ export function resolveLabelContextEvidence({
 
   const boundedProof = findBoundedContainerProof(
     scopeTarget,
+    effectiveTarget,
     effectiveTarget,
     selectorResult,
     targetControlKind,

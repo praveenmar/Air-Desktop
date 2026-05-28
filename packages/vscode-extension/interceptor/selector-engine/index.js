@@ -10,7 +10,9 @@ import { compareBoundedFieldContextEvidence } from './context/bounded-field-pari
 import { buildBoundedFieldShadowExposure } from './context/bounded-field-shadow.js';
 import { resolveLabelContextEvidence } from './context/labels.js';
 import { resolveOptionPanelContextEvidence } from './context/option-panel.js';
+import { collectOptionPanelSelectorProposals } from './context/option-panel-bridging.js';
 import { resolveTableRowContextEvidence } from './context/table-row.js';
+import { collectTableRowSelectorProposals } from './context/table-row-bridging.js';
 import { debugLog, debugLogOnce } from './debug.js';
 import { finalizeCandidates } from './evaluation.js';
 import { collectStructuralCandidates } from './generators/structural.js';
@@ -28,7 +30,9 @@ export { compareBoundedFieldContextEvidence };
 export { buildBoundedFieldShadowExposure };
 export { resolveLabelContextEvidence };
 export { resolveOptionPanelContextEvidence };
+export { collectOptionPanelSelectorProposals };
 export { resolveTableRowContextEvidence };
+export { collectTableRowSelectorProposals };
 export { classifySelectorCandidatePreference };
 export { buildSelectorPreferenceShadow };
 export { collectWeakAppShadowCoverage };
@@ -136,7 +140,9 @@ const api = {
   buildBoundedFieldShadowExposure,
   resolveLabelContextEvidence,
   resolveOptionPanelContextEvidence,
+  collectOptionPanelSelectorProposals,
   resolveTableRowContextEvidence,
+  collectTableRowSelectorProposals,
   classifySelectorCandidatePreference,
   buildSelectorPreferenceShadow,
   collectWeakAppShadowCoverage,

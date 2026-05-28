@@ -132,6 +132,58 @@ describe('selector engine shadow label context proof', () => {
     });
   });
 
+  it('binds OrangeHRM-style custom trigger shells back to the labelled container', async () => {
+    await withBrowserGlobals(`
+      <div class="oxd-input-group">
+        <label>User Role</label>
+        <div class="oxd-select-wrapper">
+          <div class="oxd-select-text">
+            <div class="oxd-select-text-input" tabindex="0">-- Select --</div>
+          </div>
+        </div>
+      </div>
+      <div class="oxd-input-group">
+        <label>Status</label>
+        <div class="oxd-select-wrapper">
+          <div class="oxd-select-text">
+            <div class="oxd-select-text-input" tabindex="0">-- Select --</div>
+          </div>
+        </div>
+      </div>
+    `, 'https://example.test/admin', async () => {
+      const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
+      const rawTarget = document.querySelector('.oxd-select-text') as HTMLDivElement;
+      const canonicalTargetInfo = selectorEngine.resolveCanonicalCustomControlTarget(rawTarget, {
+        eventType: 'custom-control-open',
+        trigger: 'trigger-click',
+      });
+
+      const proof = selectorEngine.resolveLabelContextEvidence({
+        element: rawTarget,
+        selectorResult: {
+          selector: '.oxd-select-text',
+          priority: 'class',
+          rank: 7,
+        },
+        eventContext: {
+          eventType: 'custom-control-open',
+          trigger: 'trigger-click',
+        },
+        canonicalTargetInfo,
+      });
+
+      expect(proof.isValid).toBe(true);
+      expect(proof.fieldLabelText).toBe('User Role');
+      expect(proof.fieldRelation).toBe('sibling-label');
+      expect(proof.targetControlKind).toBe('custom-trigger');
+      expect(proof.usedCanonicalTarget).toBe(true);
+      expect(proof.visibleControlCountInContainer).toBe(1);
+      expect(proof.cleanChildSelector).toBe('div.oxd-select-text-input');
+      expect(proof.containerSelector).toBe('div.oxd-input-group');
+      expect(proof.blockedReason).toBeNull();
+    });
+  });
+
   it('fails closed when a labelled container still has multiple trigger-like targets', async () => {
     await withBrowserGlobals(`
       <div data-testid="user-role-field">
@@ -171,6 +223,177 @@ describe('selector engine shadow label context proof', () => {
       expect(proof.fieldLabelText).toBeNull();
       expect(proof.blockedReason).toBe('bounded-field-multiple-targets');
       expect(proof.warningCodes).toContain('bounded-field-multiple-targets');
+    });
+  });
+
+  describe('false label carry-through prevention for custom triggers', () => {
+    const orangeHrmHtml = `
+      <div class="oxd-input-group">
+        <div class="oxd-input-group__label-wrapper">
+          <label>User Role</label>
+        </div>
+        <div class="oxd-select-wrapper">
+          <div class="oxd-select-text">
+            <span class="oxd-select-text-value">Admin</span>
+            <i class="oxd-icon"></i>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const runLabelResolution = async (selector: string) => {
+      const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
+      const rawTarget = document.querySelector(selector) as HTMLElement;
+      const canonicalTargetInfo = selectorEngine.resolveCanonicalCustomControlTarget(rawTarget, {
+        eventType: 'custom-control-open',
+        trigger: 'trigger-click',
+      });
+
+      return selectorEngine.resolveLabelContextEvidence({
+        element: rawTarget,
+        selectorResult: {
+          selector,
+          priority: 'class',
+          rank: 7,
+        },
+        eventContext: {
+          eventType: 'custom-control-open',
+          trigger: 'trigger-click',
+        },
+        canonicalTargetInfo,
+      });
+    };
+
+    it('resolves the correct label when clicking the trigger container', async () => {
+      await withBrowserGlobals(orangeHrmHtml, 'https://example.test/admin', async () => {
+        const proof = await runLabelResolution('.oxd-select-text');
+        expect(proof.isValid).toBe(true);
+        expect(proof.fieldLabelText).toBe('User Role');
+      });
+    });
+
+    it('resolves the correct label when clicking the inner value text', async () => {
+      await withBrowserGlobals(orangeHrmHtml, 'https://example.test/admin', async () => {
+        const proof = await runLabelResolution('.oxd-select-text-value');
+        expect(proof.isValid).toBe(true);
+        expect(proof.fieldLabelText).toBe('User Role');
+      });
+    });
+
+    it('resolves the correct label when clicking the icon leaf node', async () => {
+      await withBrowserGlobals(orangeHrmHtml, 'https://example.test/admin', async () => {
+        const proof = await runLabelResolution('.oxd-icon');
+        expect(proof.isValid).toBe(true);
+        expect(proof.fieldLabelText).toBe('User Role');
+      });
+    });
+
+    it('keeps broad repeated-dropdown containers blocked when clicking an icon leaf', async () => {
+      await withBrowserGlobals(`
+        <div class="filters-panel">
+          <label>Filters</label>
+          <div class="oxd-select-wrapper">
+            <div class="oxd-select-text">
+              <span class="oxd-select-text-value">Admin</span>
+              <i class="oxd-icon"></i>
+            </div>
+          </div>
+          <div class="oxd-select-wrapper">
+            <div class="oxd-select-text">
+              <span class="oxd-select-text-value">Enabled</span>
+              <i class="oxd-icon"></i>
+            </div>
+          </div>
+        </div>
+      `, 'https://example.test/admin', async () => {
+        const proof = await runLabelResolution('.oxd-select-wrapper .oxd-icon');
+        expect(proof.isValid).toBe(false);
+        expect(proof.fieldLabelText).toBeNull();
+        expect(proof.blockedReason).toBe('bounded-field-multiple-targets');
+        expect(proof.warningCodes).toContain('bounded-field-multiple-targets');
+      });
+    });
+
+    it('pairs repeated OrangeHRM dropdowns to the correct field labels', async () => {
+      await withBrowserGlobals(`
+        <div class="oxd-grid-row">
+          <div class="oxd-grid-item">
+            <div class="oxd-input-group">
+              <div class="oxd-input-group__label-wrapper">
+                <label>User Role</label>
+              </div>
+              <div class="oxd-select-wrapper">
+                <div class="oxd-select-text">
+                  <div class="oxd-select-text-input" tabindex="0">-- Select --</div>
+                  <div class="oxd-select-dropdown">
+                    <div class="oxd-select-option" role="option">Admin</div>
+                    <div class="oxd-select-option" role="option">ESS</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="oxd-grid-item">
+            <div class="oxd-input-group">
+              <div class="oxd-input-group__label-wrapper">
+                <label>Status</label>
+              </div>
+              <div class="oxd-select-wrapper">
+                <div class="oxd-select-text">
+                  <div class="oxd-select-text-input" tabindex="0">-- Select --</div>
+                  <div class="oxd-select-dropdown">
+                    <div class="oxd-select-option" role="option">Enabled</div>
+                    <div class="oxd-select-option" role="option">Disabled</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      `, 'https://example.test/admin', async () => {
+        const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
+        const firstTarget = document.querySelector('.oxd-grid-item:first-of-type .oxd-select-text') as HTMLElement;
+        const secondTarget = document.querySelector('.oxd-grid-item:last-of-type .oxd-select-text') as HTMLElement;
+
+        const firstProof = selectorEngine.resolveLabelContextEvidence({
+          element: firstTarget,
+          selectorResult: {
+            selector: '.oxd-select-text',
+            priority: 'class',
+            rank: 7,
+          },
+          eventContext: {
+            eventType: 'custom-control-open',
+            trigger: 'trigger-click',
+          },
+          canonicalTargetInfo: selectorEngine.resolveCanonicalCustomControlTarget(firstTarget, {
+            eventType: 'custom-control-open',
+            trigger: 'trigger-click',
+          }),
+        });
+
+        const secondProof = selectorEngine.resolveLabelContextEvidence({
+          element: secondTarget,
+          selectorResult: {
+            selector: '.oxd-select-text',
+            priority: 'class',
+            rank: 7,
+          },
+          eventContext: {
+            eventType: 'custom-control-open',
+            trigger: 'trigger-click',
+          },
+          canonicalTargetInfo: selectorEngine.resolveCanonicalCustomControlTarget(secondTarget, {
+            eventType: 'custom-control-open',
+            trigger: 'trigger-click',
+          }),
+        });
+
+        expect(firstProof.isValid).toBe(true);
+        expect(firstProof.fieldLabelText).toBe('User Role');
+        expect(secondProof.isValid).toBe(true);
+        expect(secondProof.fieldLabelText).toBe('Status');
+      });
     });
   });
 });

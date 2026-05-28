@@ -90,6 +90,9 @@ export function queryXPathAll(root, expression, contextNode) {
     || root?.ownerDocument
     || (root?.nodeType === Node.DOCUMENT_NODE ? root : document);
   if (!documentRef || typeof documentRef.evaluate !== 'function') return [];
+  const xpathResultRef = documentRef.defaultView?.XPathResult
+    || (typeof XPathResult !== 'undefined' ? XPathResult : null);
+  if (!xpathResultRef) return [];
 
   const evaluationContext = normalizedExpression.startsWith('.')
     ? (contextNode || documentRef.documentElement || documentRef)
@@ -100,7 +103,7 @@ export function queryXPathAll(root, expression, contextNode) {
       normalizedExpression,
       evaluationContext,
       null,
-      XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+      xpathResultRef.ORDERED_NODE_SNAPSHOT_TYPE,
       null,
     );
     const matches = [];

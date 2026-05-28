@@ -189,6 +189,48 @@ describe('selector engine preference tiers', () => {
     ]));
   });
 
+  it('prefers a unique option-panel proposal over a broad text fallback for an open option', async () => {
+    const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
+    const preference = selectorEngine.buildSelectorPreferenceShadow({
+      candidates: [
+        {
+          selector: 'div:has-text("Enabled")',
+          family: 'text',
+          engine: 'css',
+          strength: 'weak',
+          matchCount: 4,
+          visibleMatchCount: 3,
+          warningCodes: ['multiple-matches', 'multiple-visible-matches'],
+        },
+      ],
+      proposalCandidates: [
+        {
+          selector: 'div.oxd-select-dropdown div.oxd-select-option:has-text("Enabled")',
+          family: 'text',
+          engine: 'css',
+          proposalSource: 'option-panel',
+          proposalTierHint: 'preferred',
+          strength: 'medium',
+          matchCount: 1,
+          visibleMatchCount: 1,
+          warningCodes: [],
+        },
+      ],
+    });
+
+    expect(preference.bestSelector).toEqual(expect.objectContaining({
+      selector: 'div.oxd-select-dropdown div.oxd-select-option:has-text("Enabled")',
+      proposalSource: 'option-panel',
+      tier: 'preferred',
+    }));
+    expect(preference.selectorChoices).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        selector: 'div:has-text("Enabled")',
+        tier: 'last-resort',
+      }),
+    ]));
+  });
+
   it('prefers valid option-panel context over generic accessibility proof for listbox options', async () => {
     await withBrowserGlobals(`
       <button type="button" aria-haspopup="listbox" aria-controls="user-role-list">Open</button>

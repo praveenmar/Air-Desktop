@@ -46,3 +46,6 @@ tmp/
 interceptor logs.txt
 
 /docs
+after.json
+before.json
+scratch/run-air-orangehrm-selector-debug.js
