@@ -109,17 +109,39 @@ function hasKnownTargetIndex(proof) {
 }
 
 function canEmitStructuralProposal(proof) {
-  return !!proof?.scopedItemSelector && proof?.itemSelectorMatchCountInContainer === 1;
+  if (!proof?.scopedItemSelector || proof?.itemSelectorMatchCountInContainer !== 1) return false;
+  
+  const isGeneric = (proof.containerSelector === '*' || !proof.containerSelector) && 
+                    (!proof.itemSelector || proof.itemSelector.match(/^[a-z]+$/));
+  if (isGeneric && !hasCompleteTriggerBinding(proof) && proof?.uniquePanelBinding !== true) {
+    return false;
+  }
+  return true;
 }
 
 function canEmitScopedTextProposal(proof) {
-  return !!proof?.itemName && !!(proof?.scopedTextSelector || proof?.scopedItemSelector);
+  if (!proof?.itemName) return false;
+  if (!proof?.scopedTextSelector && !proof?.scopedItemSelector) return false;
+
+  const isGeneric = (proof.containerSelector === '*' || !proof.containerSelector) && 
+                    (!proof.itemSelector || proof.itemSelector.match(/^[a-z]+$/));
+  if (isGeneric && !hasCompleteTriggerBinding(proof) && proof?.uniquePanelBinding !== true) {
+    return false;
+  }
+  return true;
 }
 
 function canEmitPositionalProposal(proof) {
+  if (!hasKnownTargetIndex(proof)) return false;
+  
+  const isGeneric = (proof.containerSelector === '*' || !proof.containerSelector) && 
+                    (!proof.itemSelector || proof.itemSelector.match(/^[a-z]+$/));
+  if (isGeneric && !hasCompleteTriggerBinding(proof) && proof?.uniquePanelBinding !== true) {
+    return false;
+  }
+  
   return proof?.requiresPositionalDisambiguation === true
     && proof?.uniquePanelBinding === true
-    && hasKnownTargetIndex(proof)
     && !!proof?.containerSelector
     && !!proof?.itemSelector;
 }
@@ -302,6 +324,33 @@ export function collectOptionPanelSelectorProposals({
     buildProposalInputs(proof, queryTarget, proposalMode),
     maxCandidates,
   );
+
+  if (
+    proof?.triggerRelation === 'open-dropdown-context' &&
+    proof?.uniquePanelBinding === true &&
+    proof?.uniqueTargetBinding === true &&
+    proof?.isValid === true &&
+    !proof?.blockedReason
+  ) {
+    for (const proposal of proposals) {
+      if (proposal.visibleMatchCount === 0 || proof.rawTargetSummary?.isConnected === false) {
+        proposal.requiresTriggerActivation = true;
+        proposal.activationSelector = proof.triggerSelector || null;
+        proposal.postActivationSelector = proposal.selector;
+        proposal.replayPrerequisite = 'open-trigger';
+
+        if (!Array.isArray(proposal.warningCodes)) {
+          proposal.warningCodes = [];
+        }
+        if (!proposal.warningCodes.includes('requires-open-panel')) {
+          proposal.warningCodes.push('requires-open-panel');
+        }
+        if (proposal.visibleMatchCount === 0 && !proposal.warningCodes.includes('closed-panel-at-evaluation')) {
+          proposal.warningCodes.push('closed-panel-at-evaluation');
+        }
+      }
+    }
+  }
 
   return {
     itemRole: proof?.itemRole || null,

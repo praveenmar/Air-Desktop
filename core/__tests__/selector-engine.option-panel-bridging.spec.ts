@@ -278,4 +278,170 @@ describe('selector engine option-panel selector bridging', () => {
       expect(proposals.proposals).toEqual([]);
     });
   });
+
+  it('Test 1: detached option with trigger proof becomes trigger-bound', async () => {
+    await withBrowserGlobals(`
+      <div id="dummy"></div>
+    `, 'https://example.test', async () => {
+      const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
+      const detachedOption = document.createElement('div');
+      detachedOption.setAttribute('role', 'option');
+      detachedOption.textContent = 'DetachedAdmin';
+
+      const proof = selectorEngine.resolveOptionPanelContextEvidence({
+        element: detachedOption,
+        eventContext: {
+          eventType: 'click',
+          trigger: 'click',
+          openDropdownContext: {
+            triggerSelector: 'button.open-menu',
+            triggerRole: 'button',
+            triggerName: 'Menu',
+          },
+          optionInteractionContext: {
+            optionText: 'DetachedAdmin',
+            optionRole: 'option',
+            optionTag: 'div',
+            panelRole: 'listbox',
+            panelSelector: '.panel',
+            isConnected: false,
+          }
+        },
+      });
+
+      const proposals = selectorEngine.collectOptionPanelSelectorProposals({
+        element: detachedOption,
+        eventContext: { eventType: 'click', trigger: 'click' },
+        optionPanelContextEvidence: proof,
+      });
+
+      const preference = selectorEngine.buildSelectorPreferenceShadow({
+        proposalCandidates: proposals.proposals,
+        optionPanelContextEvidence: proof,
+      });
+
+      expect(proposals.blockedReason).toBeNull();
+      expect(proposals.proposals.length).toBeGreaterThan(0);
+      
+      const best = preference.bestSelector;
+      expect(best.proposalSource).toBe('option-panel');
+      expect(best.requiresTriggerActivation).toBe(true);
+      expect(best.replayPrerequisite).toBe('open-trigger');
+      expect(best.activationSelector).toBe('button.open-menu');
+      expect(best.postActivationSelector).toBeTruthy();
+      expect(best.reasons).toContain('requires-open-panel');
+      expect(best.warningCodes).toContain('closed-panel-at-evaluation');
+      expect(best.tier).toBe('preferred');
+    });
+  });
+
+  it('Test 2: detached option without trigger proof fails closed', async () => {
+    await withBrowserGlobals(`
+      <div id="dummy"></div>
+    `, 'https://example.test', async () => {
+      const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
+      const detachedOption = document.createElement('div');
+      detachedOption.setAttribute('role', 'option');
+      detachedOption.textContent = 'DetachedAdmin';
+
+      const proof = selectorEngine.resolveOptionPanelContextEvidence({
+        element: detachedOption,
+        eventContext: {
+          eventType: 'click',
+          trigger: 'click',
+          openDropdownContext: null,
+          optionInteractionContext: {
+            optionText: 'DetachedAdmin',
+            optionRole: 'option',
+            isConnected: false,
+          }
+        },
+      });
+
+      expect(proof.blockedReason).toBe('option-panel-detached-missing-trigger-proof');
+    });
+  });
+
+  it('Test 3: trigger proof without option proof fails closed', async () => {
+    await withBrowserGlobals(`
+      <div id="dummy"></div>
+    `, 'https://example.test', async () => {
+      const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
+      const detachedOption = document.createElement('div');
+
+      const proof = selectorEngine.resolveOptionPanelContextEvidence({
+        element: detachedOption,
+        eventContext: {
+          eventType: 'click',
+          trigger: 'click',
+          openDropdownContext: {
+            triggerSelector: 'button.open-menu',
+          },
+          optionInteractionContext: {
+            isConnected: false,
+          }
+        },
+      });
+
+      expect(proof.blockedReason).toBe('option-panel-detached-missing-option-proof');
+    });
+  });
+
+  it('Test 4: normal visible menu option remains normal', async () => {
+    await withBrowserGlobals(`
+      <button type="button" aria-controls="user-menu">Menu</button>
+      <ul id="user-menu" role="menu">
+        <li><a role="menuitem" href="/logout">Logout</a></li>
+      </ul>
+    `, 'https://example.test', async () => {
+      const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
+      const target = document.querySelector('a[href="/logout"]') as HTMLAnchorElement;
+
+      const proof = selectorEngine.resolveOptionPanelContextEvidence({
+        element: target,
+        eventContext: { eventType: 'click', trigger: 'click' },
+      });
+
+      const proposals = selectorEngine.collectOptionPanelSelectorProposals({
+        element: target,
+        eventContext: { eventType: 'click', trigger: 'click' },
+        optionPanelContextEvidence: proof,
+      });
+
+      const preference = selectorEngine.buildSelectorPreferenceShadow({
+        proposalCandidates: proposals.proposals,
+        optionPanelContextEvidence: proof,
+      });
+
+      const best = preference.bestSelector;
+      expect(best.requiresTriggerActivation).toBeFalsy();
+      expect(best.reasons).not.toContain('requires-open-panel');
+    });
+  });
+
+  it('Test 5: direct field regression maintains direct selector priority', async () => {
+    await withBrowserGlobals(`
+      <div class="field-group">
+        <label>Username</label>
+        <input name="username" type="text" />
+      </div>
+    `, 'https://example.test', async () => {
+      const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
+      const target = document.querySelector('input[name="username"]') as HTMLInputElement;
+
+      const proposals = selectorEngine.collectShadowSelectorCandidates({
+        element: target,
+        eventContext: { eventType: 'click', trigger: 'click' },
+      });
+
+      const preference = selectorEngine.buildSelectorPreferenceShadow({
+        proposalCandidates: proposals,
+      });
+
+      const best = preference.bestSelector;
+      expect(best.selector).toBe('input[name="username"]');
+      expect(best.family).toBe('name');
+      expect(best.tier).toBe('preferred');
+    });
+  });
 });

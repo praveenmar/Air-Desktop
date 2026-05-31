@@ -264,7 +264,10 @@ export function resolveOptionPanelContextEvidence({
 } = {}) {
   const rawTarget = element || null;
   if (!rawTarget || rawTarget.nodeType !== Node.ELEMENT_NODE || rawTarget.isConnected === false) {
-    return {
+    const openCtx = eventContext?.openDropdownContext;
+    const optCtx = eventContext?.optionInteractionContext;
+
+    const baseResult = {
       rawTargetSummary: summarizeTarget(rawTarget),
       effectiveTargetSummary: null,
       proofTargetSummary: null,
@@ -289,6 +292,42 @@ export function resolveOptionPanelContextEvidence({
       isValid: false,
       blockedReason: 'detached-target',
     };
+
+    if (openCtx || optCtx) {
+      if (!openCtx?.triggerSelector) {
+        return { ...baseResult, blockedReason: 'option-panel-detached-missing-trigger-proof' };
+      }
+      if (!optCtx?.optionText && !optCtx?.optionRole && typeof optCtx?.optionIndex !== 'number') {
+        return { ...baseResult, blockedReason: 'option-panel-detached-missing-option-proof' };
+      }
+
+      const itemSelector = optCtx.optionTag ? optCtx.optionTag : '*';
+      const containerSelector = optCtx.panelSelector || '*';
+      const itemName = optCtx.optionText || null;
+      const scopedItemSelector = containerSelector === '*' && itemSelector === '*' ? null : `${containerSelector} ${itemSelector}`.trim();
+      
+      return {
+        ...baseResult,
+        itemRole: optCtx.optionRole || null,
+        itemName,
+        itemNameSource: itemName ? 'text' : 'none',
+        containerRole: optCtx.panelRole || null,
+        containerSelector,
+        itemSelector,
+        scopedItemSelector,
+        scopedTextSelector: itemName && scopedItemSelector ? `${scopedItemSelector}:has-text("${itemName}")` : null,
+        triggerSelector: openCtx.triggerSelector,
+        triggerRelation: 'open-dropdown-context',
+        targetIndexWithinContainer: typeof optCtx.optionIndex === 'number' ? optCtx.optionIndex : null,
+        uniquePanelBinding: true,
+        uniqueTargetBinding: true,
+        isValid: true,
+        blockedReason: null,
+        proofSource: 'open-dropdown-context',
+      };
+    }
+
+    return baseResult;
   }
 
   const resolvedCanonicalTargetInfo = canonicalTargetInfo?.canonicalTarget

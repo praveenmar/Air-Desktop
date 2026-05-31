@@ -27,6 +27,10 @@ function summarizeCandidate(candidate, tier, score, reasons) {
     strength: candidate?.strength || null,
     matchCount: candidate?.matchCount ?? null,
     visibleMatchCount: candidate?.visibleMatchCount ?? null,
+    requiresTriggerActivation: candidate?.requiresTriggerActivation === true,
+    replayPrerequisite: candidate?.replayPrerequisite || null,
+    activationSelector: candidate?.activationSelector || null,
+    postActivationSelector: candidate?.postActivationSelector || null,
     warningCodes: Array.isArray(candidate?.warningCodes) ? candidate.warningCodes.slice() : [],
   };
 }
@@ -90,9 +94,20 @@ export function classifySelectorCandidatePreference(candidate) {
     score += 12;
     reasons.push('proof-derived-bounded-field');
   }
+  const isTriggerBoundDetached =
+    candidate?.proposalSource === 'option-panel' &&
+    candidate?.requiresTriggerActivation === true &&
+    candidate?.replayPrerequisite === 'open-trigger';
+
   if (candidate?.proposalSource === 'option-panel') {
     score += 16;
     reasons.push('proof-derived-option-panel');
+    if (isTriggerBoundDetached) {
+      reasons.push('trigger-linked', 'requires-open-panel');
+      if (candidate.visibleMatchCount === 0) {
+        reasons.push('closed-panel-at-evaluation');
+      }
+    }
   }
   if (candidate?.proposalSource === 'table-row') {
     score += 32;
@@ -130,7 +145,9 @@ export function classifySelectorCandidatePreference(candidate) {
     reasons.push('multiple-visible-matches');
   }
   if (hasWarning(candidate, 'target-not-in-matches')) {
-    score -= 50;
+    if (!isTriggerBoundDetached) {
+      score -= 50;
+    }
     reasons.push('target-not-in-matches');
   }
   if (hasWarning(candidate, 'blocked-text-evaluation')) {
@@ -141,6 +158,7 @@ export function classifySelectorCandidatePreference(candidate) {
     score -= 12;
     reasons.push('too-many-matches-for-visible-index');
   }
+
   if (hasWarning(candidate, 'incomplete-trigger-binding')) {
     score -= 20;
     reasons.push('incomplete-trigger-binding');

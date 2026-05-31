@@ -5530,9 +5530,31 @@ class AIRInterceptor {
     const targetIdentityCapture = this._createTargetIdentityCapture(optionTarget, {
       nestedContext,
     });
+    const openDropdownContext = session ? {
+      triggerSelector: session.triggerFingerprint?.selector || null,
+      triggerRole: session.triggerEl?.getAttribute?.("role") || null,
+      triggerName: session.triggerEl ? (this.extractText(session.triggerEl) || '').trim() : null,
+      triggerFingerprint: session.triggerFingerprint || null,
+      triggerEl: session.triggerEl || null,
+    } : null;
+
+    const optionInteractionContext = {
+      optionText: (el ? (this.extractText(el) || '').trim() : null),
+      optionRole: optionRole || null,
+      optionTag: el?.tagName ? el.tagName.toLowerCase() : null,
+      optionIndex: typeof index === 'number' ? index : null,
+      panelRole: containerRole || null,
+      panelSelector: optionContainer ? (this.generateFingerprint(optionContainer)?.selector || null) : null,
+      visibleOptionCount: null,
+      duplicateOptionTextCount: null,
+      isConnected: el?.isConnected ?? false,
+    };
+
     const optionFingerprint = this.generateFingerprint(optionTarget, {
       eventType,
       trigger: "option-click",
+      openDropdownContext,
+      optionInteractionContext,
     });
     const snapshotTarget = optionTarget || session?.triggerEl || this._getComposedEventTarget(clickEvent) || null;
     const subtreeSnapshot = snapshotTarget
