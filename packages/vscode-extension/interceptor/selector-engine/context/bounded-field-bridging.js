@@ -174,7 +174,7 @@ export function collectBoundedFieldSelectorProposals({
     selectorResult,
     eventContext,
   });
-  const scopeSelector = proof?.cleanParentSelector || null;
+  const scopeSelector = proof?.cleanParentSelector || proof?.containerSelector || null;
   const childSelector = proof?.cleanChildSelector || null;
   const queryTarget = resolveProposalTarget(
     element,

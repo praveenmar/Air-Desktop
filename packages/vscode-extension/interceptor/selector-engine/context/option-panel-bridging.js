@@ -224,9 +224,12 @@ function buildProposalInputs(proof, queryTarget, proposalMode) {
   const scopedTextSelector = proof?.scopedTextSelector
     || buildScopedTextSelector(proof?.scopedItemSelector || '', proof?.itemName || '');
   if (scopedTextSelector && canEmitScopedTextProposal(proof) && proof?.uniqueTargetBinding === true) {
+    const isParentScoped = !!proof?.scopedItemSelector || !!proof?.containerSelector;
+    const resolvedFamily = isParentScoped ? 'parent-scoped-text-css' : 'text';
+    
     const scopedTextCandidate = buildProposalCandidateInput({
       selector: scopedTextSelector,
-      family: 'text',
+      family: resolvedFamily,
       proposalSource: 'option-panel',
       queryTarget,
       proposalTierHint: tierHint,

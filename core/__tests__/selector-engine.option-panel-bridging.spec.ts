@@ -70,7 +70,7 @@ describe('selector engine option-panel selector bridging', () => {
       expect(proposals.proposals).toEqual([
         expect.objectContaining({
           selector: '#user-role-list div[role="option"]:has-text("Admin")',
-          family: 'text',
+          family: 'parent-scoped-text-css',
           proposalSource: 'option-panel',
           proposalTierHint: 'preferred',
         }),
@@ -117,7 +117,7 @@ describe('selector engine option-panel selector bridging', () => {
       expect(proposals.proposals).toEqual([
         expect.objectContaining({
           selector: '#user-role-list div[role="option"]:has-text("Admin")',
-          family: 'text',
+          family: 'parent-scoped-text-css',
           proposalSource: 'option-panel',
           proposalTierHint: 'fallback',
           warningCodes: expect.arrayContaining(['incomplete-trigger-binding']),
@@ -218,7 +218,7 @@ describe('selector engine option-panel selector bridging', () => {
         }),
       ]));
       expect(preference.bestSelector).toEqual(expect.objectContaining({
-        selector: '#user-menu a[href="/logout"]',
+        selector: '#user-menu li.menu-item:has-text("Logout")',
         proposalSource: 'option-panel',
         tier: 'preferred',
       }));

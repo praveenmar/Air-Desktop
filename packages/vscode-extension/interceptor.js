@@ -481,6 +481,7 @@ class AIRInterceptor {
       currentSessionId = cfg.sessionId || currentSessionId;
       strictMode = cfg.strictMode === true;
       configServerUrl = cfg.serverUrl || null;
+      config.debugFullSelectorUniverse = cfg.debugFullSelectorUniverse ?? config.debugFullSelectorUniverse;
     }
 
     // Non-strict only: allow sessionStorage fallback.
@@ -539,6 +540,7 @@ class AIRInterceptor {
     // 2. CONFIGURATION
     // ------------------------------------------------------------
     this.config = {
+      debugFullSelectorUniverse: config.debugFullSelectorUniverse || false,
       capturePageSnapshot: config.capturePageSnapshot || false,
       snapshotDepth: config.snapshotDepth ?? 10,
       snapshotTimeoutMs: config.snapshotTimeoutMs ?? 5000,
@@ -7543,6 +7545,148 @@ class AIRInterceptor {
       "SELECTOR_ENGINE_SHADOW_PROOF",
       this._stringifySelectorEngineShadowProofPayload(payload),
     );
+
+    if (this.config?.debugFullSelectorUniverse) {
+      this._printFullSelectorUniverseToConsole({
+        payload,
+        currentSummary,
+        shadowSummary,
+        selectorPreferenceShadow,
+        boundedFieldSelectorProposals,
+        optionPanelContextEvidence,
+        tableRowContextEvidence,
+        weakAppShadowCoverage
+      });
+    }
+  }
+
+  _printFullSelectorUniverseToConsole({
+    payload,
+    currentSummary,
+    shadowSummary,
+    selectorPreferenceShadow,
+    boundedFieldSelectorProposals,
+    optionPanelContextEvidence,
+    tableRowContextEvidence,
+    weakAppShadowCoverage
+  }) {
+    const isDirect = (c) => ["test-id", "id", "name", "href", "aria-label", "placeholder"].includes(c.family);
+    const allCandidates = [...(Array.isArray(currentSummary) ? currentSummary : []), ...(Array.isArray(shadowSummary) ? shadowSummary : [])];
+    
+    // De-duplicate based on selector and family
+    const seen = new Set();
+    const uniqueCandidates = allCandidates.filter(c => {
+      const key = `${c.selector}::${c.family}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    const directCandidates = uniqueCandidates.filter(isDirect);
+    const structuralCandidates = uniqueCandidates.filter(c => !isDirect(c));
+
+    console.groupCollapsed(
+      `%c[AIR Selector Universe]%c ${payload.eventType || "unknown"} on ${payload.primarySelector || "unknown"}`,
+      "color: #007acc; font-weight: bold;",
+      "color: inherit; font-weight: normal;"
+    );
+
+    console.log("%c1. Event Summary", "font-weight: bold;");
+    console.table({
+      eventType: payload.eventType,
+      trigger: payload.trigger,
+      primarySelector: payload.primarySelector
+    });
+
+    console.log("%c2. Direct/Simple Candidates", "font-weight: bold;");
+    if (directCandidates.length > 0) {
+      console.table(directCandidates.map(c => ({
+        selector: c.selector,
+        family: c.family,
+        matchCount: c.matchCount,
+        visibleMatchCount: c.visibleMatchCount,
+        warnings: c.warningCodes?.join(', ') || 'none'
+      })));
+    } else {
+      console.log("  None generated");
+    }
+
+    console.log("%c3. Secondary/Structural Candidates", "font-weight: bold;");
+    if (structuralCandidates.length > 0) {
+      console.table(structuralCandidates.map(c => ({
+        selector: c.selector,
+        family: c.family,
+        matchCount: c.matchCount,
+        visibleMatchCount: c.visibleMatchCount,
+        warnings: c.warningCodes?.join(', ') || 'none'
+      })));
+    } else {
+      console.log("  None generated");
+    }
+
+    console.log("%c4. Bounded-Field Proposals", "font-weight: bold;");
+    if (boundedFieldSelectorProposals && boundedFieldSelectorProposals.length > 0) {
+      console.table(boundedFieldSelectorProposals.map(p => ({
+        selector: p.selector,
+        family: p.family,
+        score: p.score,
+        tier: p.tier,
+        matchCount: p.matchCount,
+        visibleMatchCount: p.visibleMatchCount
+      })));
+    } else {
+      console.log("  None generated");
+    }
+
+    console.log("%c5. Option-Panel Proposals", "font-weight: bold;");
+    if (optionPanelContextEvidence && optionPanelContextEvidence.proposals && optionPanelContextEvidence.proposals.length > 0) {
+      console.table(optionPanelContextEvidence.proposals.map(p => ({
+        selector: p.selector,
+        family: p.family,
+        itemName: optionPanelContextEvidence.itemName,
+        score: p.score,
+        tier: p.tier
+      })));
+    } else {
+      console.log("  None generated");
+    }
+
+    console.log("%c6. Table-Row Proposals", "font-weight: bold;");
+    if (tableRowContextEvidence && tableRowContextEvidence.proposals && tableRowContextEvidence.proposals.length > 0) {
+      console.table(tableRowContextEvidence.proposals.map(p => ({
+        selector: p.selector,
+        family: p.family,
+        score: p.score,
+        tier: p.tier
+      })));
+    } else {
+      console.log("  None generated");
+    }
+
+    console.log("%c7. Weak Fallback Coverage", "font-weight: bold;");
+    if (weakAppShadowCoverage) {
+      console.log(weakAppShadowCoverage);
+    } else {
+      console.log("  None needed or available");
+    }
+
+    console.log("%c8. Best Selector / Best Proof", "font-weight: bold;");
+    if (selectorPreferenceShadow && selectorPreferenceShadow.bestSelector) {
+      console.log("Winner:", selectorPreferenceShadow.bestSelector.selector);
+      console.table({
+        family: selectorPreferenceShadow.bestSelector.family,
+        tier: selectorPreferenceShadow.bestSelector.tier,
+        score: selectorPreferenceShadow.bestSelector.score,
+        reasons: selectorPreferenceShadow.bestSelector.reasons?.join(', ') || 'none'
+      });
+    } else {
+      console.log("  No winner");
+    }
+    if (selectorPreferenceShadow && selectorPreferenceShadow.bestProof) {
+      console.log("Best Proof Type:", selectorPreferenceShadow.bestProof.path);
+    }
+
+    console.groupEnd();
   }
 
   _truncateParitySelector(selector) {

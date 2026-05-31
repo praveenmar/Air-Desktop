@@ -83,13 +83,13 @@ describe('selector engine bounded-field selector bridging', () => {
       expect(proposals.blockedReason).toBeNull();
       expect(proposals.proposals).toEqual(expect.arrayContaining([
         expect.objectContaining({
-          selector: '[data-testid="work-email-field"] input[name="email"]',
-          family: 'parent-scoped-css',
+          selector: '[data-testid="work-email-field"]:has-text("Email") input[name="email"]',
+          family: 'parent-scoped-text-css',
           proposalSource: 'bounded-field',
         }),
       ]));
       expect(preference.bestSelector).toEqual(expect.objectContaining({
-        selector: '[data-testid="work-email-field"] input[name="email"]',
+        selector: '[data-testid="work-email-field"]:has-text("Email") input[name="email"]',
         tier: 'preferred',
         proposalSource: 'bounded-field',
       }));
@@ -330,14 +330,15 @@ describe('selector engine bounded-field selector bridging', () => {
       expect(proof.fieldLabelText).toBe('User Role');
       expect(proposals.proposals).toEqual(expect.arrayContaining([
         expect.objectContaining({
-          selector: '//div[contains(concat(" ", normalize-space(@class), " "), " oxd-input-group ")][.//*[normalize-space(.)="User Role"]]//div[contains(concat(" ", normalize-space(@class), " "), " oxd-select-text-input ")]',
-          family: 'xpath',
+          selector: 'div.oxd-input-group:has-text("User Role") div.oxd-select-text-input',
+          family: 'parent-scoped-text-css',
           proposalSource: 'bounded-field',
-          warningCodes: expect.arrayContaining(['label-anchored-trigger-scope']),
         }),
       ]));
+      console.log('PROPOSALS', JSON.stringify(proposals.proposals, null, 2));
+      console.log('PREFERENCE', JSON.stringify(preference, null, 2));
       expect(preference.bestSelector).toEqual(expect.objectContaining({
-        family: 'xpath',
+        family: 'parent-scoped-text-css',
         proposalSource: 'bounded-field',
       }));
     });

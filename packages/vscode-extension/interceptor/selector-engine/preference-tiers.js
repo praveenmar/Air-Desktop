@@ -47,6 +47,8 @@ function baseCandidateScore(candidate) {
       return 80;
     case 'tight-container-css':
       return 74;
+    case 'parent-scoped-text-css':
+      return 72;
     case 'parent-scoped-css':
       return 68;
     case 'class':
@@ -78,7 +80,9 @@ export function classifySelectorCandidatePreference(candidate) {
   if (candidate?.family === 'tight-container-css' || candidate?.family === 'parent-scoped-css') {
     reasons.push('structural-scoping-family');
   }
-  if (candidate?.family === 'text') reasons.push('text-scoping-family');
+  if (candidate?.family === 'text' || candidate?.family === 'parent-scoped-text-css') {
+    reasons.push('text-scoping-family');
+  }
   if (candidate?.family === 'class') reasons.push('class-family');
   if (candidate?.family === 'role-attr') reasons.push('role-only-family');
   if (candidate?.family === 'xpath') reasons.push('xpath-family');
@@ -136,6 +140,10 @@ export function classifySelectorCandidatePreference(candidate) {
   if (hasWarning(candidate, 'too-many-matches-for-visible-index')) {
     score -= 12;
     reasons.push('too-many-matches-for-visible-index');
+  }
+  if (hasWarning(candidate, 'incomplete-trigger-binding')) {
+    score -= 20;
+    reasons.push('incomplete-trigger-binding');
   }
 
   let tier = 'fallback';

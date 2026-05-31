@@ -3,6 +3,7 @@ import {
   isLikelyDynamicId,
   safeCssEscape,
 } from '../utils.js';
+import { debugLog } from '../debug.js';
 
 function collectTestIdCandidates(element) {
   const candidates = [];
@@ -70,7 +71,8 @@ function collectPlaceholderCandidate(element) {
 
 export function collectDirectFamilyCandidates(element) {
   if (!element) return [];
-  return [
+  
+  const candidates = [
     ...collectTestIdCandidates(element),
     ...collectIdCandidate(element),
     ...collectNameCandidate(element),
@@ -78,6 +80,16 @@ export function collectDirectFamilyCandidates(element) {
     ...collectAriaLabelCandidate(element),
     ...collectPlaceholderCandidate(element),
   ];
+
+  debugLog('Direct candidate generation', {
+    tagName: element.tagName?.toLowerCase?.(),
+    name: element.getAttribute?.('name') || null,
+    placeholder: element.getAttribute?.('placeholder') || null,
+    generatedFamilies: candidates.map(c => c.family),
+    generatedSelectors: candidates.map(c => c.selector),
+  });
+
+  return candidates;
 }
 
 export function collectDirectCandidates(element) {
