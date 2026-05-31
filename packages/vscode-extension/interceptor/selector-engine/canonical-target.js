@@ -2,6 +2,7 @@ import { getSafeClassTokens, normalizeText } from './utils.js';
 import { isFastVisible } from './shared/visibility.js';
 import { getRole } from './shared/dom-attributes.js';
 import { summarizeTarget as _summarizeTarget } from './shared/target-summary.js';
+import { resolveCanonicalIconTarget } from './canonical-icon-target.js';
 
 function summarizeTarget(element) {
   return _summarizeTarget(element, { includeClassList: true, includeTabIndex: true });
@@ -295,4 +296,16 @@ export function resolveCanonicalCustomControlTargetInternal(rawTarget, eventCont
 
 export function resolveCanonicalCustomControlTarget(rawTarget, eventContext) {
   return stripInternalTargets(resolveCanonicalCustomControlTargetInternal(rawTarget, eventContext));
+}
+
+export function resolveCanonicalTargetInternal(rawTarget, eventContext) {
+  const iconResult = resolveCanonicalIconTarget(rawTarget);
+  if (iconResult.canonicalDiffers) {
+    return iconResult;
+  }
+  return resolveCanonicalCustomControlTargetInternal(rawTarget, eventContext);
+}
+
+export function resolveCanonicalTarget(rawTarget, eventContext) {
+  return stripInternalTargets(resolveCanonicalTargetInternal(rawTarget, eventContext));
 }

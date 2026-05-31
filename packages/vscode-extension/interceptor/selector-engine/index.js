@@ -1,7 +1,7 @@
 import { DEFAULT_MAX_CANDIDATES, SELECTOR_ENGINE_VERSION } from './types.js';
 import {
   resolveCanonicalCustomControlTarget,
-  resolveCanonicalCustomControlTargetInternal,
+  resolveCanonicalTargetInternal,
 } from './canonical-target.js';
 import { resolveAccessibilityEvidence } from './accessibility/role-name.js';
 import { resolveBoundedFieldContextEvidence } from './context/bounded-field.js';
@@ -83,7 +83,7 @@ export function collectShadowSelectorCandidates({
   if (!element) return [];
   const resolvedCanonicalTargetInfo = canonicalTargetInfo?.canonicalTarget
     ? canonicalTargetInfo
-    : resolveCanonicalCustomControlTargetInternal(element, eventContext);
+    : resolveCanonicalTargetInternal(element, eventContext);
   const baseCandidateInputs = [
     ...collectDirectCandidates(element),
     ...collectSecondaryCandidates(element),

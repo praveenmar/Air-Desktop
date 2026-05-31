@@ -13,6 +13,7 @@ import { summarizeTarget as _summarizeTarget } from '../shared/target-summary.js
 import { buildSelectorForElement } from '../shared/selectors.js';
 import { resolveAccessibilityEvidence } from '../accessibility/role-name.js';
 import { resolveCanonicalCustomControlTargetInternal } from '../canonical-target.js';
+import { chooseSemanticRowIdentity } from './semantic-row-anchor.js';
 
 function summarizeTarget(element) {
   return _summarizeTarget(element, { includeClassList: true });
@@ -21,7 +22,7 @@ function summarizeTarget(element) {
 const TABLE_SELECTOR = 'table, [role="table"], [role="grid"]';
 const ROW_SELECTOR = 'tr, [role="row"]';
 const CELL_SELECTOR = 'td, th, [role="cell"], [role="gridcell"], [role="rowheader"], [role="columnheader"]';
-const ACTION_SELECTOR = 'button, [role="button"], input[type="submit"], input[type="button"], input[type="reset"], a[href]';
+const ACTION_SELECTOR = 'button, [role="button"], input[type="submit"], input[type="button"], input[type="reset"], a[href], input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="radio"], [role="switch"]';
 const HEADER_CELL_SELECTOR = 'thead th, th[scope="col"], [role="columnheader"]';
 const MAX_IDENTITY_TOKENS = 3;
 
@@ -125,7 +126,8 @@ function buildActionSelector(target, accessibilityProof) {
   const isActionLike = isActionControl(target)
     || role === 'button'
     || role === 'link'
-    || (tagName === 'input' && ['button', 'submit', 'reset'].includes(safeTrim(target.getAttribute?.('type') || '').toLowerCase()));
+    || ['checkbox', 'radio', 'switch'].includes(role)
+    || (tagName === 'input' && ['button', 'submit', 'reset', 'checkbox', 'radio'].includes(safeTrim(target.getAttribute?.('type') || '').toLowerCase()));
 
   if (!isActionLike) return null;
 
@@ -177,55 +179,6 @@ function extractRowCellTexts(row, target, actionName) {
     .filter((entry) => !/^(?:edit|delete|remove|view|open|save|submit|go)$/i.test(entry.text));
 }
 
-function chooseRowIdentity(targetRow, allRows, target, actionName) {
-  const rowTexts = extractRowCellTexts(targetRow, target, actionName).slice(0, MAX_IDENTITY_TOKENS);
-  const identityTokens = rowTexts.map((entry) => entry.text);
-  if (identityTokens.length === 0) {
-    return {
-      rowIdentityTexts: [],
-      rowIdentityMode: 'none',
-      matchingRowIdentityCount: 0,
-    };
-  }
-
-  const rowContainsTexts = (row, texts) => {
-    const rowCellTexts = extractRowCellTexts(row, null, actionName).map((entry) => entry.text);
-    return texts.every((text) => rowCellTexts.includes(text));
-  };
-
-  for (const text of identityTokens) {
-    const count = allRows.filter((row) => rowContainsTexts(row, [text])).length;
-    if (count === 1) {
-      return {
-        rowIdentityTexts: [text],
-        rowIdentityMode: 'single-text',
-        matchingRowIdentityCount: count,
-      };
-    }
-  }
-
-  for (let leftIndex = 0; leftIndex < identityTokens.length; leftIndex += 1) {
-    for (let rightIndex = leftIndex + 1; rightIndex < identityTokens.length; rightIndex += 1) {
-      const pair = [identityTokens[leftIndex], identityTokens[rightIndex]];
-      const count = allRows.filter((row) => rowContainsTexts(row, pair)).length;
-      if (count === 1) {
-        return {
-          rowIdentityTexts: pair,
-          rowIdentityMode: 'compound-text',
-          matchingRowIdentityCount: count,
-        };
-      }
-    }
-  }
-
-  const fallbackText = identityTokens[0];
-  const fallbackCount = allRows.filter((row) => rowContainsTexts(row, [fallbackText])).length;
-  return {
-    rowIdentityTexts: [fallbackText],
-    rowIdentityMode: 'single-text',
-    matchingRowIdentityCount: fallbackCount,
-  };
-}
 
 function countMatchingActionsInRow(row, actionSelector, actionName, target) {
   if (!row) return 0;
@@ -310,6 +263,9 @@ export function resolveTableRowContextEvidence({
       columnIndex: null,
       rowIdentityTexts: [],
       rowIdentityMode: 'none',
+      rowIdentitySource: 'none',
+      rowIdentityReasons: [],
+      rejectedRowIdentityCandidates: [],
       rowScopedActionSelector: null,
       visibleRowCountInTable: null,
       targetRowIndexWithinTable: null,
@@ -363,6 +319,9 @@ export function resolveTableRowContextEvidence({
       columnIndex: null,
       rowIdentityTexts: [],
       rowIdentityMode: 'none',
+      rowIdentitySource: 'none',
+      rowIdentityReasons: [],
+      rejectedRowIdentityCandidates: [],
       rowScopedActionSelector: null,
       visibleRowCountInTable: null,
       targetRowIndexWithinTable: null,
@@ -398,6 +357,9 @@ export function resolveTableRowContextEvidence({
       columnIndex: null,
       rowIdentityTexts: [],
       rowIdentityMode: 'none',
+      rowIdentitySource: 'none',
+      rowIdentityReasons: [],
+      rejectedRowIdentityCandidates: [],
       rowScopedActionSelector: null,
       visibleRowCountInTable: getVisibleRows(table).length,
       targetRowIndexWithinTable: null,
@@ -421,33 +383,46 @@ export function resolveTableRowContextEvidence({
   const visibleRows = getVisibleRows(table);
   const targetRowIndexWithinTable = visibleRows.indexOf(row);
   const targetActionIndexWithinRow = getTargetActionIndexWithinRow(row, effectiveTarget, actionSelector, actionName);
-  const { rowIdentityTexts, rowIdentityMode, matchingRowIdentityCount } = chooseRowIdentity(
+  const columnIndex = getColumnIndex(effectiveTarget, row);
+  const headerTexts = getHeaderTexts(table);
+  const columnHeaderText = columnIndex >= 0 && columnIndex < headerTexts.length ? headerTexts[columnIndex] : null;
+
+  const { 
+    rowIdentityTexts, 
+    rowIdentityMode, 
+    matchingRowIdentityCount,
+    uniqueRowBinding: heuristicUniqueRowBinding,
+    rowIdentitySource,
+    rowIdentityReasons,
+    rejectedRowIdentityCandidates,
+    blockedReason: heuristicBlockedReason
+  } = chooseSemanticRowIdentity(
     row,
     visibleRows,
     effectiveTarget,
     actionName,
+    headerTexts,
+    extractRowCellTexts
   );
+
   const matchingActionCountInRow = countMatchingActionsInRow(row, actionSelector, actionName, effectiveTarget);
   const matchingTableCount = countVisibleMatches(documentRef, tableSelector);
   const uniqueTableBinding = matchingTableCount === 1;
-  const uniqueRowBinding = matchingRowIdentityCount === 1 && rowIdentityTexts.length > 0;
+  const uniqueRowBinding = heuristicUniqueRowBinding;
   const uniqueActionBinding = matchingActionCountInRow === 1;
   const requiresPositionalDisambiguation = (
     (!uniqueTableBinding && matchingTableCount > 1 && targetRowIndexWithinTable >= 0)
     || (!uniqueRowBinding && rowIdentityTexts.length > 0 && targetRowIndexWithinTable >= 0)
     || (!uniqueActionBinding && targetActionIndexWithinRow >= 0)
   );
-  const columnIndex = getColumnIndex(effectiveTarget, row);
-  const headerTexts = getHeaderTexts(table);
-  const columnHeaderText = columnIndex >= 0 && columnIndex < headerTexts.length ? headerTexts[columnIndex] : null;
+  
   const rowScopedActionSelector = buildRowScopedActionSelector(tableSelector, rowIdentityTexts, actionSelector, row);
 
-  let blockedReason = null;
+  let blockedReason = heuristicBlockedReason;
   if (!tableSelector) blockedReason = 'table-row-no-table-selector';
   else if (!actionSelector && !actionName) blockedReason = 'table-row-no-action-binding';
   else if (rowIdentityTexts.length === 0 && targetRowIndexWithinTable < 0) blockedReason = 'table-row-no-row-identity';
   else if (!uniqueTableBinding && matchingTableCount > 1 && targetRowIndexWithinTable < 0) blockedReason = 'table-row-multiple-tables';
-  else if (!uniqueRowBinding && rowIdentityTexts.length > 0 && targetRowIndexWithinTable < 0) blockedReason = 'table-row-duplicate-row-identity';
   else if (!uniqueActionBinding && targetActionIndexWithinRow < 0) blockedReason = 'table-row-ambiguous-action';
 
   const isValid = !!tableSelector && !!(actionSelector || actionName);
@@ -470,6 +445,9 @@ export function resolveTableRowContextEvidence({
     columnIndex: columnIndex >= 0 ? columnIndex : null,
     rowIdentityTexts,
     rowIdentityMode,
+    rowIdentitySource,
+    rowIdentityReasons,
+    rejectedRowIdentityCandidates,
     rowScopedActionSelector,
     visibleRowCountInTable: visibleRows.length,
     targetRowIndexWithinTable: targetRowIndexWithinTable >= 0 ? targetRowIndexWithinTable : null,

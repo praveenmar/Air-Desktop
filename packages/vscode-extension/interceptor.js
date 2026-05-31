@@ -5194,7 +5194,7 @@ class AIRInterceptor {
       if (!cursor || cursor === document.body) break;
 
       const role = (cursor.getAttribute("role") || "").toLowerCase();
-      const cls  = (cursor.className  || "").toLowerCase();
+      const cls  = (cursor.getAttribute("class") || "").toLowerCase();
 
       const matchesRole  = AIRInterceptor.OPTION_ROLES.has(role);
       const matchesClass = AIRInterceptor.OPTION_CLASS_PATTERNS.some(p => cls.includes(p));
@@ -5228,7 +5228,7 @@ class AIRInterceptor {
 
       const role    = (cursor.getAttribute("role")         || "").toLowerCase();
       const popup   =  cursor.getAttribute("aria-haspopup");
-      const cls     = (cursor.className                    || "").toLowerCase();
+      const cls     = (cursor.getAttribute("class")        || "").toLowerCase();
 
       const hasAriaSignal = popup != null || role === "combobox";
       const matchesClass  = AIRInterceptor.TRIGGER_CLASS_PATTERNS.some(p => cls.includes(p));
@@ -5251,7 +5251,7 @@ class AIRInterceptor {
     for (let depth = 0; depth < 8; depth++) {
       if (!cursor || cursor === document.body) break;
       const role = (cursor.getAttribute("role") || "").toLowerCase();
-      const cls  = (cursor.className            || "").toLowerCase();
+      const cls  = (cursor.getAttribute("class") || "").toLowerCase();
       if (
         AIRInterceptor.CONTAINER_ROLES.has(role) ||
         AIRInterceptor.CONTAINER_CLASS_PATTERNS.some(p => cls.includes(p))
