@@ -7336,6 +7336,7 @@ class AIRInterceptor {
     boundedFieldShadowExposure,
     optionPanelContextEvidence,
     tableRowContextEvidence,
+    genericContainerContextEvidence,
     selectorPreferenceShadow,
     weakAppShadowCoverage,
     timingsMs,
@@ -7366,6 +7367,23 @@ class AIRInterceptor {
         this._summarizeSelectorEngineCompactOptionPanel(optionPanelContextEvidence),
       tableRow:
         this._summarizeSelectorEngineCompactTableRow(tableRowContextEvidence),
+      genericContainer: genericContainerContextEvidence && typeof genericContainerContextEvidence === "object"
+        ? {
+            containerType: typeof genericContainerContextEvidence.containerType === "string" ? genericContainerContextEvidence.containerType : null,
+            containerAnchorText: typeof genericContainerContextEvidence.containerAnchorText === "string" ? genericContainerContextEvidence.containerAnchorText : null,
+            anchorSource: typeof genericContainerContextEvidence.anchorSource === "string" ? genericContainerContextEvidence.anchorSource : null,
+            actionName: typeof genericContainerContextEvidence.actionName === "string" ? genericContainerContextEvidence.actionName : null,
+            actionRole: typeof genericContainerContextEvidence.actionRole === "string" ? genericContainerContextEvidence.actionRole : null,
+            uniqueContainerBinding: genericContainerContextEvidence.uniqueContainerBinding === true,
+            uniqueAnchorBinding: genericContainerContextEvidence.uniqueAnchorBinding === true,
+            uniqueActionBinding: genericContainerContextEvidence.uniqueActionBinding === true,
+            isValid: genericContainerContextEvidence.isValid === true,
+            eligibleForSelection: genericContainerContextEvidence.eligibleForSelection === true,
+            suppressedBy: typeof genericContainerContextEvidence.suppressedBy === "string" ? genericContainerContextEvidence.suppressedBy : null,
+            blockedReason: typeof genericContainerContextEvidence.blockedReason === "string" ? genericContainerContextEvidence.blockedReason : null,
+            reasons: Array.isArray(genericContainerContextEvidence.reasons) ? genericContainerContextEvidence.reasons : [],
+          }
+        : null,
       selectorPreference:
         this._summarizeSelectorEngineCompactPreferenceShadow(selectorPreferenceShadow),
       weakCoverage:
@@ -7500,6 +7518,16 @@ class AIRInterceptor {
             accessibilityEvidence,
           }))
         : null;
+    const genericContainerContextEvidence =
+      typeof selectorEngine.resolveGenericContainerProof === "function"
+        ? this._measureSelectorEngineShadowCall(timingsMs, "genericContainer", () =>
+          selectorEngine.resolveGenericContainerProof({
+            element,
+            boundedField: boundedFieldContextEvidence,
+            tableRow: tableRowContextEvidence,
+            optionPanel: optionPanelContextEvidence,
+          }))
+        : null;
     const tableRowSelectorProposals =
       typeof selectorEngine.collectTableRowSelectorProposals === "function"
         ? this._measureSelectorEngineShadowCall(timingsMs, "tableRowProposals", () =>
@@ -7529,6 +7557,7 @@ class AIRInterceptor {
             boundedFieldShadowExposure,
             optionPanelContextEvidence,
             tableRowContextEvidence,
+            genericContainerContextEvidence,
           }))
         : null;
     const weakAppShadowCoverage =
@@ -7558,6 +7587,7 @@ class AIRInterceptor {
       boundedFieldShadowExposure,
       optionPanelContextEvidence,
       tableRowContextEvidence,
+      genericContainerContextEvidence,
       selectorPreferenceShadow,
       weakAppShadowCoverage,
       timingsMs,

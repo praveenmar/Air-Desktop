@@ -148,6 +148,17 @@ function collectCompoundAttributeCandidate(element) {
     parts.push(`[type="${escapeQuotedAttributeValue(type)}"]`);
   }
   
+  if (element.dataset) {
+    for (const key of Object.keys(element.dataset)) {
+      if (['testid', 'cy', 'qa'].includes(key)) continue;
+      const attrName = `data-${key.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`)}`;
+      const val = element.getAttribute(attrName);
+      if (val) {
+        parts.push(`[${attrName}="${escapeQuotedAttributeValue(val)}"]`);
+      }
+    }
+  }
+  
   if (parts.length >= 2) {
     return [{
       selector: `${tagName}${parts.join('')}`,

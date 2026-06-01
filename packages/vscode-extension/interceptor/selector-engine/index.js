@@ -13,6 +13,7 @@ import { resolveOptionPanelContextEvidence } from './context/option-panel.js';
 import { collectOptionPanelSelectorProposals } from './context/option-panel-bridging.js';
 import { resolveTableRowContextEvidence } from './context/table-row.js';
 import { collectTableRowSelectorProposals } from './context/table-row-bridging.js';
+import { resolveGenericContainerProof } from './context/generic-container.js';
 import { debugLog, debugLogOnce } from './debug.js';
 import { finalizeCandidates } from './evaluation.js';
 import { collectStructuralCandidates } from './generators/structural.js';
@@ -143,6 +144,7 @@ const api = {
   collectOptionPanelSelectorProposals,
   resolveTableRowContextEvidence,
   collectTableRowSelectorProposals,
+  resolveGenericContainerProof,
   classifySelectorCandidatePreference,
   buildSelectorPreferenceShadow,
   collectWeakAppShadowCoverage,
