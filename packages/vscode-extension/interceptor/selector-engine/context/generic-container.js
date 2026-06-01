@@ -147,16 +147,6 @@ export function resolveGenericContainerProof({
     return { ...basePayload, blockedReason: 'detached-target' };
   }
 
-  if (tableRow?.isValid) {
-    return { ...basePayload, suppressedBy: 'table-row', blockedReason: 'specialized-proof-already-available' };
-  }
-  if (boundedField?.isValid) {
-    return { ...basePayload, suppressedBy: 'bounded-field', blockedReason: 'specialized-proof-already-available' };
-  }
-  if (optionPanel?.isValid) {
-    return { ...basePayload, suppressedBy: 'option-panel', blockedReason: 'specialized-proof-already-available' };
-  }
-
   const actionEvidence = extractActionEvidence(element);
   if (!actionEvidence) {
     return { ...basePayload, blockedReason: 'generic-container-missing-action-name' };
@@ -213,6 +203,24 @@ export function resolveGenericContainerProof({
     return { ...basePayload, blockedReason: 'generic-container-ambiguous-action' };
   }
 
+  let suppressedBy = null;
+  let finalBlockedReason = null;
+  let eligibleForSelection = true;
+
+  if (tableRow?.isValid) {
+    suppressedBy = 'table-row';
+    finalBlockedReason = 'specialized-proof-already-available';
+    eligibleForSelection = false;
+  } else if (boundedField?.isValid) {
+    suppressedBy = 'bounded-field';
+    finalBlockedReason = 'specialized-proof-already-available';
+    eligibleForSelection = false;
+  } else if (optionPanel?.isValid) {
+    suppressedBy = 'option-panel';
+    finalBlockedReason = 'specialized-proof-already-available';
+    eligibleForSelection = false;
+  }
+
   return {
     ...basePayload,
     containerType,
@@ -224,7 +232,9 @@ export function resolveGenericContainerProof({
     uniqueAnchorBinding: true,
     uniqueActionBinding: true,
     isValid: true,
-    eligibleForSelection: true,
+    eligibleForSelection,
+    suppressedBy,
+    blockedReason: finalBlockedReason,
     reasons: [
       'valid-semantic-container',
       'visible-heading-anchor',
