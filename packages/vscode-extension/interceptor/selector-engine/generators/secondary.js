@@ -2,6 +2,7 @@ import {
   getSafeClassTokens,
   normalizeText,
   safeCssEscape,
+  safeTrim,
 } from '../utils.js';
 
 function isStateClassToken(token) {
@@ -78,11 +79,41 @@ function collectRoleCandidate(element) {
   }];
 }
 
+function escapeXPathLiteral(value) {
+  const normalized = safeTrim(value);
+  if (!normalized.includes('"')) return `"${normalized}"`;
+  if (!normalized.includes('\'')) return `'${normalized}'`;
+  const parts = normalized.split('"');
+  const tokens = [];
+  for (let index = 0; index < parts.length; index += 1) {
+    if (parts[index]) tokens.push(`"${parts[index]}"`);
+    if (index < parts.length - 1) tokens.push('\'"\'');
+  }
+  return `concat(${tokens.join(', ')})`;
+}
+
+function collectExactTextXPathCandidate(element) {
+  const text = normalizeText(element.innerText || element.textContent || '');
+  if (!text || text.length > 80) return [];
+  const tagName = element.tagName?.toLowerCase?.();
+  if (!tagName) return [];
+  
+  const selector = `//${tagName}[normalize-space(.)=${escapeXPathLiteral(text)}]`;
+  
+  return [{
+    selector,
+    engine: 'xpath',
+    family: 'xpath-text',
+    strategy: 'exact-text-xpath',
+  }];
+}
+
 export function collectSecondaryCandidates(element) {
   if (!element) return [];
   return [
     ...collectClassCandidate(element),
     ...collectTextCandidate(element),
     ...collectRoleCandidate(element),
+    ...collectExactTextXPathCandidate(element),
   ];
 }
