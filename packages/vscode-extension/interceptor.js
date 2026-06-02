@@ -7337,6 +7337,7 @@ class AIRInterceptor {
     optionPanelContextEvidence,
     tableRowContextEvidence,
     genericContainerContextEvidence,
+    genericContainerProposals,
     selectorPreferenceShadow,
     weakAppShadowCoverage,
     timingsMs,
@@ -7384,6 +7385,7 @@ class AIRInterceptor {
             reasons: Array.isArray(genericContainerContextEvidence.reasons) ? genericContainerContextEvidence.reasons : [],
           }
         : null,
+      genericContainerProposals: Array.isArray(genericContainerProposals) ? genericContainerProposals : [],
       selectorPreference:
         this._summarizeSelectorEngineCompactPreferenceShadow(selectorPreferenceShadow),
       weakCoverage:
@@ -7528,6 +7530,14 @@ class AIRInterceptor {
             optionPanel: optionPanelContextEvidence,
           }))
         : null;
+    const genericContainerProposals =
+      typeof selectorEngine.collectGenericContainerProposals === "function"
+        ? this._measureSelectorEngineShadowCall(timingsMs, "genericContainerProposals", () =>
+          selectorEngine.collectGenericContainerProposals(
+            genericContainerContextEvidence,
+            element.ownerDocument || document
+          ))
+        : null;
     const tableRowSelectorProposals =
       typeof selectorEngine.collectTableRowSelectorProposals === "function"
         ? this._measureSelectorEngineShadowCall(timingsMs, "tableRowProposals", () =>
@@ -7588,6 +7598,7 @@ class AIRInterceptor {
       optionPanelContextEvidence,
       tableRowContextEvidence,
       genericContainerContextEvidence,
+      genericContainerProposals,
       selectorPreferenceShadow,
       weakAppShadowCoverage,
       timingsMs,

@@ -37,6 +37,7 @@ function extractActionEvidence(target) {
   return {
     actionName,
     actionRole: accessibility.role || tagName,
+    actionTag: tagName,
     nameSource,
   };
 }
@@ -48,8 +49,11 @@ function extractContainerAnchor(container) {
   // 1. aria-labelledby
   const labelledBy = container.getAttribute('aria-labelledby');
   if (labelledBy) {
-    const text = extractReferencedText(container.ownerDocument || document, labelledBy);
-    if (text) return { text, source: 'aria-labelledby' };
+    const referenced = (container.ownerDocument || document).getElementById(labelledBy);
+    if (referenced) {
+      const text = extractReferencedText(container.ownerDocument || document, labelledBy);
+      if (text) return { text, source: 'aria-labelledby', element: referenced, id: labelledBy };
+    }
   }
 
   // 2. aria-label (for dialog and region)
@@ -66,7 +70,7 @@ function extractContainerAnchor(container) {
     const legend = Array.from(container.children).find((c) => c.tagName.toLowerCase() === 'legend');
     if (legend && isFastVisible(legend)) {
       const text = normalizeLabelText(legend.textContent);
-      if (text) return { text, source: 'legend' };
+      if (text) return { text, source: 'legend', element: legend };
     }
     return null; // fieldset without legend fails
   }
@@ -131,8 +135,15 @@ export function resolveGenericContainerProof({
     containerType: null,
     containerAnchorText: null,
     anchorSource: null,
+    anchorTag: null,
+    anchorId: null,
     actionName: null,
     actionRole: null,
+    actionTag: null,
+    actionNameSource: null,
+    containerTag: null,
+    containerRole: null,
+    containerSelectorKind: null,
     uniqueContainerBinding: false,
     uniqueAnchorBinding: false,
     uniqueActionBinding: false,
@@ -158,6 +169,25 @@ export function resolveGenericContainerProof({
   }
 
   const { container, containerType, anchor } = containerMatch;
+
+  let currNode = element.parentElement;
+  while (currNode && currNode !== container && currNode !== document.body) {
+    const tn = currNode.tagName.toLowerCase();
+    const r = getRole(currNode);
+    let isC = false;
+    if (tn === 'article' || tn === 'fieldset' || tn === 'dialog') isC = true;
+    else if (r === 'dialog' || r === 'alertdialog') isC = true;
+    else if (tn === 'section') isC = true;
+    else if (r === 'region') isC = true;
+    
+    if (isC) {
+      const anc = extractContainerAnchor(currNode);
+      if (anc) {
+        return { ...basePayload, blockedReason: 'generic-container-proposal-nested-container-risk' };
+      }
+    }
+    currNode = currNode.parentElement;
+  }
 
   if (anchor.source === 'heading' || anchor.source === 'legend') {
     const anchorElements = Array.from(container.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"], legend'));
@@ -224,10 +254,17 @@ export function resolveGenericContainerProof({
   return {
     ...basePayload,
     containerType,
+    containerTag: container.tagName.toLowerCase(),
+    containerRole: getRole(container) || null,
+    containerSelectorKind: containerType,
     containerAnchorText: anchor.text,
     anchorSource: anchor.source,
+    anchorTag: anchor.element ? anchor.element.tagName.toLowerCase() : null,
+    anchorId: anchor.id || null,
     actionName: actionEvidence.actionName,
     actionRole: actionEvidence.actionRole,
+    actionTag: actionEvidence.actionTag,
+    actionNameSource: actionEvidence.nameSource,
     uniqueContainerBinding: true,
     uniqueAnchorBinding: true,
     uniqueActionBinding: true,
