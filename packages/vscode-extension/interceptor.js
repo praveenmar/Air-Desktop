@@ -7592,9 +7592,9 @@ class AIRInterceptor {
           selectorPreferenceShadow,
           boundedFieldSelectorProposals: Array.isArray(boundedFieldSelectorProposals?.proposals) ? boundedFieldSelectorProposals.proposals : [],
           tableRowContextEvidence,
-          tableRowSelectorProposals: Array.isArray(tableRowContextEvidence?.proposals) ? tableRowContextEvidence.proposals : [],
+          tableRowSelectorProposals: Array.isArray(tableRowSelectorProposals?.proposals) ? tableRowSelectorProposals.proposals : [],
           optionPanelContextEvidence,
-          optionPanelSelectorProposals: Array.isArray(optionPanelContextEvidence?.proposals) ? optionPanelContextEvidence.proposals : [],
+          optionPanelSelectorProposals: Array.isArray(optionPanelSelectorProposals?.proposals) ? optionPanelSelectorProposals.proposals : [],
           genericContainerProposals
         })
       : null;
