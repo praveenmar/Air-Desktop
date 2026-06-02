@@ -3252,6 +3252,46 @@ class AIRInterceptor {
     return value !== null && typeof value === "object" && !Array.isArray(value);
   }
 
+  _inferSelectorEngine(candidate) {
+    if (!candidate || !candidate.selector) return "css";
+    if (candidate.selector.startsWith('//') || candidate.selector.startsWith('.//')) return "xpath";
+    if (candidate.family && candidate.family.includes('xpath')) return "xpath";
+    return "css"; // Everything else executes via CSS engine in Playwright
+  }
+
+  _buildSelectorResolutionForWire(decision) {
+    if (!decision) return undefined;
+    
+    const resolution = {
+      schemaVersion: "air:selector-resolution:v1",
+      status: decision.status,
+    };
+
+    if (decision.status === "unresolved") {
+      resolution.blockedReason = decision.blockedReason || "no-replay-safe-selector";
+      return resolution;
+    }
+
+    if (decision.selected) {
+      resolution.selected = {
+        selector: decision.selected.selector,
+        engine: this._inferSelectorEngine(decision.selected),
+        family: decision.selected.family,
+        source: decision.selected.source,
+        proposalSource: decision.selected.proposalSource || null,
+        matchCount: decision.selected.matchCount,
+        visibleMatchCount: decision.selected.visibleMatchCount,
+        replaySafe: decision.selected.replaySafe,
+        confidence: decision.selected.confidence || "medium",
+        warningCodes: decision.selected.warningCodes || [],
+        proofSource: decision.selected.proofSource || null,
+        selectedReason: decision.selected.selectedReason || "",
+      };
+    }
+    
+    return resolution;
+  }
+
   _getSnapshotTransportFieldNames() {
     return ["pageSnapshot", "pageState", "interactionContext"];
   }
@@ -3733,6 +3773,15 @@ class AIRInterceptor {
 
     if (this._isPlainObject(event.meta)) {
       eventCopy.meta = { ...event.meta };
+    }
+
+    if (eventCopy.fingerprint && eventCopy.fingerprint._selectorDecision) {
+      const decision = eventCopy.fingerprint._selectorDecision;
+      // We must copy the fingerprint to avoid mutating the original queued event
+      eventCopy.fingerprint = { ...eventCopy.fingerprint };
+      delete eventCopy.fingerprint._selectorDecision;
+
+      eventCopy.selectorResolution = this._buildSelectorResolutionForWire(decision);
     }
 
     const originalPayloadBytes = this._getPayloadBytes(event);
@@ -6655,8 +6704,9 @@ class AIRInterceptor {
       selectorCandidates = undefined;
     }
 
+    let _selectorDecision = null;
     try {
-      this._runSelectorEngineShadowComparison(
+      _selectorDecision = this._runSelectorEngineShadowComparison(
         element,
         selectorResult,
         eventContext,
@@ -6739,6 +6789,7 @@ class AIRInterceptor {
       boundedFieldContext,
       accessibilityEvidence,
       attributesHash,
+      _selectorDecision,
     };
   }
 
@@ -7641,6 +7692,8 @@ class AIRInterceptor {
         weakAppShadowCoverage
       });
     }
+
+    return selectorDecision;
   }
 
   _printFullSelectorUniverseToConsole({
@@ -8214,8 +8267,9 @@ class AIRInterceptor {
     const currentSignature = JSON.stringify(currentSummary);
     const shadowSignature = JSON.stringify(shadowSummary);
 
+    let shadowDecision = null;
     try {
-      this._logSelectorEngineShadowProof({
+      shadowDecision = this._logSelectorEngineShadowProof({
         selectorEngine,
         element,
         selectorResult,
@@ -8236,8 +8290,8 @@ class AIRInterceptor {
       });
     }
 
-    if (currentSignature === shadowSignature) return;
-    if (!this.config?.selectorEngineShadowLogDiffs) return;
+    if (currentSignature === shadowSignature) return shadowDecision;
+    if (!this.config?.selectorEngineShadowLogDiffs) return shadowDecision;
 
     this.log("SELECTOR_ENGINE_SHADOW_DIFF", {
       eventType: typeof eventContext?.eventType === "string" ? eventContext.eventType : null,
@@ -8250,6 +8304,8 @@ class AIRInterceptor {
       tabId: this.config?.tabId || null,
       selectorEngineVersion: typeof selectorEngine?.version === "string" ? selectorEngine.version : null,
     });
+
+    return shadowDecision;
   }
 
   _buildPrimarySelectorCandidate(element, selectorResult) {

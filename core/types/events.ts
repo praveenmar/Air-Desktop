@@ -2,6 +2,26 @@ import { z } from 'zod';
 import { ElementFingerprintSchema } from './fingerprint';
 import { SeekStrategySchema } from './context-driver';
 
+export const SelectorResolutionSchema = z.object({
+  schemaVersion: z.literal("air:selector-resolution:v1"),
+  status: z.enum(["resolved", "unresolved"]),
+  selected: z.object({
+    selector: z.string(),
+    engine: z.enum(["css", "xpath", "text"]),
+    family: z.string().optional(),
+    source: z.enum(["shadow-preference", "legacy-primary"]),
+    proposalSource: z.string().nullable().optional(),
+    matchCount: z.number().nullable().optional(),
+    visibleMatchCount: z.number().nullable().optional(),
+    replaySafe: z.boolean(),
+    confidence: z.enum(["high", "medium", "low"]).optional(),
+    warningCodes: z.array(z.string()).optional(),
+    proofSource: z.string().nullable().optional(),
+    selectedReason: z.string().optional(),
+  }).optional(),
+  blockedReason: z.string().nullable().optional()
+});
+
 /** Primary event categories */
 export const EventTypeSchema = z.enum([
   'click', 
@@ -88,6 +108,7 @@ const BaseEventSchema = z.object({
   normalizedUrl: z.string().optional(),
   nestedContext: NestedContextSchema.optional(),
   schemaVersion: z.string().optional(),
+  selectorResolution: SelectorResolutionSchema.optional(),
 });
 
 /** Action Event: Click */
