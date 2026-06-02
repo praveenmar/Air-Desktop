@@ -20,12 +20,36 @@ export function collectGenericContainerProposals(proof, doc) {
     return [];
   }
 
+  const containerTag = proof.containerTag;
+  const isRoleBackedContainer = proof.containerSelectorKind === 'region' || proof.containerSelectorKind === 'dialog' || proof.containerSelectorKind === 'alertdialog';
+  const hasValidContainerMetadata = containerTag || (isRoleBackedContainer && proof.containerRole);
+
+  const anchorTag = proof.anchorTag;
+  const hasValidAnchorMetadata = (proof.anchorSource === 'aria-labelledby' || proof.anchorSource === 'aria-label') || anchorTag;
+
+  const actionTag = proof.actionTag;
+  const hasValidActionMetadata = !!actionTag;
+
+  if (!hasValidContainerMetadata || !hasValidAnchorMetadata || !hasValidActionMetadata) {
+    return [{
+      selector: '',
+      engine: 'xpath',
+      family: 'generic-container',
+      proposalSource: 'generic-container',
+      matchCount: 0,
+      visibleMatchCount: 0,
+      isDiagnosticOnly: true,
+      eligibleForSelection: false,
+      suppressedBy: null,
+      warningCodes: ['generic-container-proposal-missing-required-metadata'],
+      blockedReason: 'generic-container-proposal-missing-required-metadata',
+    }];
+  }
+
   // 1. Container Predicate
-  let containerSelector = `//${proof.containerTag || '*'}`;
-  if (proof.containerSelectorKind === 'region' || proof.containerSelectorKind === 'dialog' || proof.containerSelectorKind === 'alertdialog') {
-    if (proof.containerRole) {
-      containerSelector = `//*[@role="${proof.containerRole}"]`;
-    }
+  let containerSelector = `//${containerTag}`;
+  if (isRoleBackedContainer && proof.containerRole) {
+    containerSelector = `//*[@role="${proof.containerRole}"]`;
   }
 
   // 2. Anchor Predicate
@@ -35,21 +59,33 @@ export function collectGenericContainerProposals(proof, doc) {
   } else if (proof.anchorSource === 'aria-label') {
     anchorPredicate = `[@aria-label=${escapeXPathLiteral(proof.containerAnchorText)}]`;
   } else {
-    const anchorTag = proof.anchorTag || '*';
     anchorPredicate = `[.//${anchorTag}[normalize-space(.)=${escapeXPathLiteral(proof.containerAnchorText)}]]`;
   }
 
   // 3. Action Predicate
   let actionPredicate = '';
-  const actionTag = proof.actionTag || '*';
   
   if (proof.actionNameSource === 'aria-label') {
     actionPredicate = `//${actionTag}[@aria-label=${escapeXPathLiteral(proof.actionName)}]`;
   } else if (proof.actionNameSource === 'title') {
     actionPredicate = `//${actionTag}[@title=${escapeXPathLiteral(proof.actionName)}]`;
   } else if (proof.actionNameSource === 'value' && actionTag === 'input') {
-    // We add @type="submit" to be safe if it's typical submit, but @value alone is strictly enough for inputs if unique.
-    actionPredicate = `//input[@type="submit" and @value=${escapeXPathLiteral(proof.actionName)}]`;
+    if (!proof.actionInputType) {
+      return [{
+        selector: '',
+        engine: 'xpath',
+        family: 'generic-container',
+        proposalSource: 'generic-container',
+        matchCount: 0,
+        visibleMatchCount: 0,
+        isDiagnosticOnly: true,
+        eligibleForSelection: false,
+        suppressedBy: null,
+        warningCodes: ['generic-container-proposal-missing-required-metadata'],
+        blockedReason: 'generic-container-proposal-missing-required-metadata',
+      }];
+    }
+    actionPredicate = `//input[@type="${proof.actionInputType}" and @value=${escapeXPathLiteral(proof.actionName)}]`;
   } else {
     // Normal Text
     actionPredicate = `//${actionTag}[normalize-space(.)=${escapeXPathLiteral(proof.actionName)}]`;
@@ -78,11 +114,18 @@ export function collectGenericContainerProposals(proof, doc) {
   let isSafe = matchCount === 1 && visibleMatchCount === 1;
   let blockedReason = null;
 
-  if (matchCount > 1) {
+  if (matchCount === 0) {
+    warningCodes.push('generic-container-proposal-no-match');
+    isSafe = false;
+  } else if (matchCount > 1) {
     warningCodes.push('generic-container-proposal-not-unique');
     isSafe = false;
   }
-  if (visibleMatchCount > 1) {
+  
+  if (matchCount > 0 && visibleMatchCount === 0) {
+    warningCodes.push('generic-container-proposal-not-visible');
+    isSafe = false;
+  } else if (visibleMatchCount > 1) {
     warningCodes.push('generic-container-proposal-not-visible-unique');
     isSafe = false;
   }

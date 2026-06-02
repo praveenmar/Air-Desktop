@@ -23,12 +23,16 @@ function extractActionEvidence(target) {
   const accessibility = resolveAccessibilityEvidence({ element: target });
   let actionName = accessibility.accessibleName;
   let nameSource = accessibility.accessibleNameSource;
+  let actionInputType = null;
 
-  if (!actionName && tagName === 'input') {
-    const val = target.getAttribute('value');
-    if (val) {
-      actionName = normalizeLabelText(val);
-      nameSource = 'value';
+  if (tagName === 'input') {
+    actionInputType = target.getAttribute('type') || null;
+    if (!actionName) {
+      const val = target.getAttribute('value');
+      if (val) {
+        actionName = normalizeLabelText(val);
+        nameSource = 'value';
+      }
     }
   }
 
@@ -38,6 +42,7 @@ function extractActionEvidence(target) {
     actionName,
     actionRole: accessibility.role || tagName,
     actionTag: tagName,
+    actionInputType,
     nameSource,
   };
 }
@@ -140,6 +145,7 @@ export function resolveGenericContainerProof({
     actionName: null,
     actionRole: null,
     actionTag: null,
+    actionInputType: null,
     actionNameSource: null,
     containerTag: null,
     containerRole: null,
@@ -264,6 +270,7 @@ export function resolveGenericContainerProof({
     actionName: actionEvidence.actionName,
     actionRole: actionEvidence.actionRole,
     actionTag: actionEvidence.actionTag,
+    actionInputType: actionEvidence.actionInputType,
     actionNameSource: actionEvidence.nameSource,
     uniqueContainerBinding: true,
     uniqueAnchorBinding: true,
