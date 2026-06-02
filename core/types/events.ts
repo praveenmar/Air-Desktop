@@ -7,7 +7,7 @@ export const SelectorResolutionSchema = z.object({
   status: z.enum(["resolved", "unresolved"]),
   selected: z.object({
     selector: z.string(),
-    engine: z.enum(["css", "xpath", "text"]),
+    engine: z.enum(["css", "xpath"]),
     family: z.string().optional(),
     source: z.enum(["shadow-preference", "legacy-primary"]),
     proposalSource: z.string().nullable().optional(),
