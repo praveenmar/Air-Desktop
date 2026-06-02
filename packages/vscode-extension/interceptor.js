@@ -7583,6 +7583,22 @@ class AIRInterceptor {
           }))
         : null;
 
+    const selectorDecision = typeof selectorEngine.buildSelectorDecision === "function"
+      ? selectorEngine.buildSelectorDecision({
+          primarySelector: typeof selectorResult?.selector === "string" ? selectorResult.selector : null,
+          selectorCandidates: Array.isArray(currentSummary) ? currentSummary : [],
+          currentSummary,
+          shadowSummary,
+          selectorPreferenceShadow,
+          boundedFieldSelectorProposals: Array.isArray(boundedFieldSelectorProposals?.proposals) ? boundedFieldSelectorProposals.proposals : [],
+          tableRowContextEvidence,
+          tableRowSelectorProposals: Array.isArray(tableRowContextEvidence?.proposals) ? tableRowContextEvidence.proposals : [],
+          optionPanelContextEvidence,
+          optionPanelSelectorProposals: Array.isArray(optionPanelContextEvidence?.proposals) ? optionPanelContextEvidence.proposals : [],
+          genericContainerProposals
+        })
+      : null;
+
     const payload = this._buildCompactSelectorEngineShadowProofPayload({
       selectorEngine,
       selectorResult,
@@ -7603,6 +7619,10 @@ class AIRInterceptor {
       weakAppShadowCoverage,
       timingsMs,
     });
+
+    if (selectorDecision) {
+      payload.selectorDecision = selectorDecision;
+    }
 
     this.log(
       "SELECTOR_ENGINE_SHADOW_PROOF",

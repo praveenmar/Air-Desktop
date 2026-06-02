@@ -23,6 +23,7 @@ import { collectSecondaryCandidates } from './generators/secondary.js';
 import { buildSelectorPreferenceShadow, classifySelectorCandidatePreference } from './preference-tiers.js';
 import { dedupeCandidates } from './utils.js';
 import { collectWeakAppShadowCoverage } from './weak-app-shadow.js';
+import { buildSelectorDecision } from './decision-normalization.js';
 
 export { resolveCanonicalCustomControlTarget };
 export { resolveAccessibilityEvidence };
@@ -39,6 +40,7 @@ export { collectGenericContainerProposals };
 export { classifySelectorCandidatePreference };
 export { buildSelectorPreferenceShadow };
 export { collectWeakAppShadowCoverage };
+export { buildSelectorDecision };
 
 function isStructuralFamily(candidate) {
   return candidate?.family === 'tight-container-css' || candidate?.family === 'parent-scoped-css';
@@ -151,6 +153,7 @@ const api = {
   classifySelectorCandidatePreference,
   buildSelectorPreferenceShadow,
   collectWeakAppShadowCoverage,
+  buildSelectorDecision,
 };
 
 if (typeof globalThis !== 'undefined') {
