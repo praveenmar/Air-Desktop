@@ -55,6 +55,8 @@ import { buildSelectorSpec } from './selector-spec';
 import { normalizeUrl } from '@air/shared';
 import { openSqliteReadonlyDatabase, SqliteDatabase } from './sqlite-client';
 import { SelectorResolutionSchema } from '../../../core/types/events';
+import { GenerationContextV1 } from '../../../core/types/generation';
+import { deriveGenerationContext } from './generation-builder';
 
 export const SELECTOR_RANK_MAP: Record<string, number> = {
   'data-testid': 1,
@@ -2419,5 +2421,23 @@ export class CodegenService {
     }
     
     return result;
+  }
+
+  /**
+   * PHASE 3D: Service Orchestration
+   * 
+   * Orchestrates the building of a full session, fetching of lightweight
+   * event metadata, and derivation of the pure GenerationContext.
+   * This is the entrypoint for future MCP codegen workflows.
+   */
+  public buildGenerationContext(sessionId: string): GenerationContextV1 {
+    const session = this.buildSession(sessionId);
+    const eventIds = session.steps
+      .map(s => s.eventId)
+      .filter((id): id is string => id !== undefined);
+    
+    const eventsById = this.getGenerationEventMetadataByIds(eventIds);
+    
+    return deriveGenerationContext({ session, eventsById });
   }
 }

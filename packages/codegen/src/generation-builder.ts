@@ -67,13 +67,13 @@ export function deriveGenerationContext(input: {
         const elementText = metadata?.fallbackHints?.elementText ?? step.fingerprint?.textExcerpt;
         const tagName = metadata?.fallbackHints?.tagName ?? step.fingerprint?.tagName;
 
-        const hints: any = {};
+        const hints: NonNullable<GenerationStepV1['fallbackHints']> = {};
         if (legacySelector) hints.legacySelector = legacySelector;
         if (elementText) hints.elementText = elementText;
         if (tagName) hints.tagName = tagName;
 
         if (Object.keys(hints).length > 0) {
-          fallbackHints = hints as GenerationStepV1['fallbackHints'];
+          fallbackHints = hints;
         }
       }
     }
@@ -98,14 +98,7 @@ export function deriveGenerationContext(input: {
       confidence: step.confidence,
     };
 
-    // Strip undefined keys to keep output clean and strictly match the schema
-    for (const key of Object.keys(mappedStep)) {
-      if ((mappedStep as any)[key] === undefined) {
-        delete (mappedStep as any)[key];
-      }
-    }
-
-    return mappedStep;
+    return stripUndefined(mappedStep) as GenerationStepV1;
   });
 
   const context: GenerationContextV1 = {
@@ -121,6 +114,19 @@ export function deriveGenerationContext(input: {
   };
 
   return GenerationContextSchemaV1.parse(context);
+}
+
+/**
+ * Type-safe helper to deeply or shallowly strip undefined fields
+ */
+function stripUndefined<T extends Record<string, unknown>>(obj: T): T {
+  const result = { ...obj };
+  for (const key of Object.keys(result) as Array<keyof T>) {
+    if (result[key] === undefined) {
+      delete result[key];
+    }
+  }
+  return result;
 }
 
 /**
@@ -170,12 +176,5 @@ function mapAssertion(assertion: CodegenAssertion): GenerationAssertion {
     source,
   };
 
-  // Clean undefined
-  for (const key of Object.keys(mapped)) {
-    if ((mapped as any)[key] === undefined) {
-      delete (mapped as any)[key];
-    }
-  }
-
-  return mapped;
+  return stripUndefined(mapped as unknown as Record<string, unknown>) as GenerationAssertion;
 }
