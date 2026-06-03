@@ -7,6 +7,15 @@
  * representation of a recorded session that gets fed to the AI code generator
  * and stored as the .semantic.json blueprint alongside every generated test.
  *
+/**
+ * packages/codegen/src/types.ts
+ *
+ * Core type contracts for the AIR code generation package.
+ *
+ * These types define the "Semantic Timeline" — the compressed, intent-driven
+ * representation of a recorded session that gets fed to the AI code generator
+ * and stored as the .semantic.json blueprint alongside every generated test.
+ *
  * Design principles:
  *   - No raw HTML, no DOM snapshots — AI context window is precious
  *   - Every step preserves WHY (intent) not just WHAT (selector)
@@ -15,6 +24,9 @@
  *   - The @air-step breadcrumb links generated code back to this blueprint
  *     enabling the future self-healing loop without schema changes
  */
+
+import type { SelectorResolutionV1 } from '../../../core/types/events';
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STEP — one user interaction in the recorded flow
@@ -1030,9 +1042,109 @@ export interface CodegenServiceOptions {
    */
   includeScrollSteps?: boolean;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// USER ASSERTION STUB — future interceptor-level assertion capture
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Stub for future Phase 2 feature: user explicitly marks elements in the
+ * browser as "assert this" during recording. The interceptor will capture
+ * these and store them in a dedicated DB table.
+ *
+ * Today this is always empty. The codegen service includes it in the
+ * CodegenSession so the MCP tool and templates can reference it without
+ * schema changes when the feature ships.
+ */
+export interface UserDefinedAssertion {
+  /** What the user wanted to verify */
+  assertionIntent: string;
+  /** The element they right-clicked / marked */
+  selector: string;
+  /** Expected value (text, attribute, etc.) */
+  expectedValue?: string;
+  /** Type of check the user indicated */
+  checkType: 'visible' | 'text' | 'value' | 'count' | 'custom';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSION — the complete semantic timeline for one recording
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface CodegenSession {
+  /** AIR session ID — ties back to the DB for healing queries */
+  sessionId: string;
+
+  /** Starting URL of the recorded flow */
+  url: string;
+
+  /** Page title at recording start */
+  title: string;
+
+  /** ISO timestamp of when recording happened */
+  recordedAt: string;
+
+  /** Total number of meaningful steps (excludes scroll, hover, network) */
+  stepCount: number;
+
+  /**
+   * The ordered sequence of user interactions.
+   * This is what the AI uses to write the test body.
+   * Filtered to only actionable steps — no scroll noise, no heartbeats.
+   */
+  steps: CodegenStep[];
+
+  /**
+   * Overall flow confidence — average probability across all navigation edges.
+   * < 0.7: warn AI that this flow has inconsistent outcomes across recordings.
+   * >= 0.9: high confidence, reliable test candidate.
+   */
+  flowConfidence: number;
+
+  /** Unique nodes visited during the flow (page count) */
+  nodeCount: number;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SERVICE OPTIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface CodegenServiceOptions {
+  /**
+   * Path to the SQLite database file.
+   * Defaults to the Electron app's userData path when not specified.
+   */
+  dbPath: string;
+
+  /**
+   * Only include steps with confidence >= this threshold.
+   * Default: 0.0 (include all steps, let AI decide what to trust)
+   */
+  minConfidence?: number;
+
+  /**
+   * Include scroll events in the semantic timeline.
+   * Default: false — scrolls are noise for most test generation scenarios.
+   * Set true if generating seek/scroll verification tests.
+   */
+  includeScrollSteps?: boolean;
+
   /**
    * Include hover events in the semantic timeline.
    * Default: false — hovers are rarely needed in Playwright tests.
    */
   includeHoverSteps?: boolean;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 3B — Lightweight generation metadata
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type GenerationEventMetadata = {
+  id: string;
+  selectorResolution?: SelectorResolutionV1;
+  fallbackHints?: {
+    legacySelector?: string;
+    elementText?: string;
+    tagName?: string;
+  };
+};
