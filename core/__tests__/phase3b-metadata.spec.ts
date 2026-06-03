@@ -34,6 +34,7 @@ describe('Phase 3B: Lightweight Metadata Extraction', () => {
         selected: {
           selector: '.btn-primary',
           engine: 'css',
+          source: 'legacy-primary',
           replaySafe: true
         }
       },
@@ -56,10 +57,28 @@ describe('Phase 3B: Lightweight Metadata Extraction', () => {
       fingerprint: { tagName: "DIV" }
     });
 
+    // Insert Test 4: Event with invalid engine schema in selectorResolution
+    const event4 = {
+      selectorResolution: {
+        schemaVersion: 'air:selector-resolution:v1',
+        status: 'resolved',
+        selected: {
+          selector: '.btn',
+          engine: 'text', // Invalid engine according to Phase 1 spec (only css or xpath)
+          source: 'legacy-primary',
+          replaySafe: true
+        }
+      },
+      fingerprint: {
+        selector: '.btn'
+      }
+    };
+
     const insert = asyncDb.prepare('INSERT INTO events (id, type, timestamp, session_id, payload) VALUES (?, ?, ?, ?, ?)');
     await insert.run('event-1', 'click', 1000, 'session-1', JSON.stringify(event1));
     await insert.run('event-2', 'input', 1001, 'session-1', JSON.stringify(event2));
     await insert.run('event-3', 'scroll', 1002, 'session-1', event3Payload);
+    await insert.run('event-4', 'click', 1003, 'session-1', JSON.stringify(event4));
 
     await asyncDb.close();
 
@@ -125,5 +144,14 @@ describe('Phase 3B: Lightweight Metadata Extraction', () => {
     expect(result.size).toBe(1); // Only event-1 is found
     expect(result.get('event-1')).toBeDefined();
     expect(result.get('event-missing')).toBeUndefined();
+  });
+
+  it('selectorResolution object with invalid engine "text" should be ignored', () => {
+    const result = service.getGenerationEventMetadataByIds(['event-4']);
+    const meta = result.get('event-4');
+    
+    expect(meta).toBeDefined();
+    expect(meta?.selectorResolution).toBeUndefined(); // Schema validation should fail and omit it
+    expect(meta?.fallbackHints?.legacySelector).toBe('.btn');
   });
 });

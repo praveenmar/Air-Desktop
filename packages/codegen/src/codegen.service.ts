@@ -53,6 +53,7 @@ import {
 import { buildSelectorSpec } from './selector-spec';
 import { normalizeUrl } from '@air/shared';
 import { openSqliteReadonlyDatabase, SqliteDatabase } from './sqlite-client';
+import { SelectorResolutionSchema } from '../../../core/types/events';
 
 export const SELECTOR_RANK_MAP: Record<string, number> = {
   'data-testid': 1,
@@ -2389,9 +2390,14 @@ export class CodegenService {
       let selectorResolution;
       try {
         if (row.selectorResolution) {
-          selectorResolution = JSON.parse(row.selectorResolution);
+          const parsed = JSON.parse(row.selectorResolution);
+          const validation = SelectorResolutionSchema.safeParse(parsed);
+          if (validation.success) {
+            selectorResolution = validation.data;
+          }
         }
       } catch (e) {
+        // Silently ignore invalid JSON per requirements
       }
 
       const metadata: GenerationEventMetadata = { id: row.id };
@@ -2399,7 +2405,7 @@ export class CodegenService {
         metadata.selectorResolution = selectorResolution;
       }
 
-      const fallbackHints: any = {};
+      const fallbackHints: GenerationEventMetadata['fallbackHints'] = {};
       if (row.legacySelector) fallbackHints.legacySelector = row.legacySelector;
       if (row.elementText) fallbackHints.elementText = row.elementText;
       if (row.tagName) fallbackHints.tagName = row.tagName;

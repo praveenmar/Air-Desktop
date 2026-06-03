@@ -7,15 +7,6 @@
  * representation of a recorded session that gets fed to the AI code generator
  * and stored as the .semantic.json blueprint alongside every generated test.
  *
-/**
- * packages/codegen/src/types.ts
- *
- * Core type contracts for the AIR code generation package.
- *
- * These types define the "Semantic Timeline" — the compressed, intent-driven
- * representation of a recorded session that gets fed to the AI code generator
- * and stored as the .semantic.json blueprint alongside every generated test.
- *
  * Design principles:
  *   - No raw HTML, no DOM snapshots — AI context window is precious
  *   - Every step preserves WHY (intent) not just WHAT (selector)
