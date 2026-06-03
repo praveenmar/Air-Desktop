@@ -2433,8 +2433,8 @@ export class CodegenService {
   public buildGenerationContext(sessionId: string): GenerationContextV1 {
     const session = this.buildSession(sessionId);
     const eventIds = session.steps
-      .map(s => s.eventId)
-      .filter((id): id is string => id !== undefined);
+      .map(step => step.eventId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
     
     const eventsById = this.getGenerationEventMetadataByIds(eventIds);
     
