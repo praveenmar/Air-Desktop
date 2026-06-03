@@ -1,8 +1,7 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    /* 1. THE FIX: Set rootDir to the 'packages' folder so it includes 'shared' */
-    "rootDir": "..", 
+    "rootDir": "../..", 
     "outDir": "./dist",
 
     "emitDeclarationOnly": true,
@@ -24,8 +23,8 @@
     "bin/**/*.ts",
     "__tests__/**/*.ts",
     "test-codegen.ts",
-    /* 2. IMPORTANT: You must also include the shared files so TS can 'see' them */
     "../shared/src/**/*.ts",
+    "../../core/types/**/*.ts",
     "index.ts"
   ],
   "exclude": [

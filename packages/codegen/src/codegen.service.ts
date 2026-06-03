@@ -42,6 +42,7 @@ import {
   FingerprintData,
   NestedContextData,
   SelectorSpec,
+  GenerationEventMetadata,
 } from './types';
 import type { ResolverConfig, SnapshotCache } from './selector-resolver';
 import type { SnapshotHandle, SnapshotInventory, SnapshotSelectionMode, StateBoundary } from './snapshot-selector';
