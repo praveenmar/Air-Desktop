@@ -11,6 +11,18 @@ const GetSessionFlowReviewArgsSchema = z.object({
   sessionId: z.string().min(1),
 });
 
+function getSessionIdFromArgs(args: unknown): string {
+  if (
+    args &&
+    typeof args === 'object' &&
+    'sessionId' in args &&
+    typeof (args as { sessionId?: unknown }).sessionId === 'string'
+  ) {
+    return (args as { sessionId: string }).sessionId;
+  }
+  return 'unknown';
+}
+
 export const getSessionFlowReviewTool: AirMcpToolHandler = {
   definition: {
     name: 'get_session_flow_review',
@@ -52,9 +64,7 @@ export const getSessionFlowReviewTool: AirMcpToolHandler = {
       const errorMessage = error instanceof Error ? error.message : String(error);
       
       if (errorMessage.includes('Session not found')) {
-        // Try to extract sessionId if possible, or just parse from args if it exists
-        const sessionId = (args as any)?.sessionId || 'unknown';
-        throw createSessionNotFoundError(sessionId);
+        throw createSessionNotFoundError(getSessionIdFromArgs(args));
       }
       
       throw createDatabaseUnavailableError(
