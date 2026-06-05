@@ -49,6 +49,8 @@ import {
 import type { ResolverConfig, SnapshotCache } from './selector-resolver';
 import type { SnapshotHandle, SnapshotInventory, SnapshotSelectionMode, StateBoundary } from './snapshot-selector';
 import { selectSnapshotForStep } from './snapshot-selector';
+import { FlowReviewService } from './flow-review.service';
+import { FlowReviewFormatter } from './flow-review.formatter';
 import {
   getUserDefinedAssertions,
   hasUserAssertionSupport,
@@ -2522,5 +2524,17 @@ export class CodegenService {
       offset,
       hasMore,
     };
+  }
+
+  /**
+   * PHASE 3E-C: MCP read path
+   * 
+   * Returns a human-readable ASCII/Markdown review of a recorded session.
+   * Driven by the FlowReview layer, avoiding raw DOM/snapshot data.
+   */
+  public getFlowReviewMarkdown(sessionId: string): string {
+    const session = this.buildSession(sessionId);
+    const review = FlowReviewService.build(session);
+    return FlowReviewFormatter.formatForConsole(review);
   }
 }
