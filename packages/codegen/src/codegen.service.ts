@@ -43,6 +43,8 @@ import {
   NestedContextData,
   SelectorSpec,
   GenerationEventMetadata,
+  ListRecordedSessionsOptions,
+  ListRecordedSessionsResult,
 } from './types';
 import type { ResolverConfig, SnapshotCache } from './selector-resolver';
 import type { SnapshotHandle, SnapshotInventory, SnapshotSelectionMode, StateBoundary } from './snapshot-selector';
@@ -2439,5 +2441,74 @@ export class CodegenService {
     const eventsById = this.getGenerationEventMetadataByIds(eventIds);
     
     return deriveGenerationContext({ session, eventsById });
+  }
+
+  /**
+   * PHASE 3E: MCP read path
+   * 
+   * Lightweight discovery of recorded sessions without building GenerationContext
+   */
+  public listRecordedSessions(options: ListRecordedSessionsOptions = {}): ListRecordedSessionsResult {
+    const rawLimit = options.limit ?? 10;
+    const limit = Math.min(Math.max(Math.floor(rawLimit), 1), 50);
+
+    const rawOffset = options.offset ?? 0;
+    const offset = Math.max(Math.floor(rawOffset), 0);
+
+    const recentDays =
+      typeof options.recentDays === 'number' && Number.isFinite(options.recentDays)
+        ? Math.min(Math.max(Math.floor(options.recentDays), 1), 365)
+        : undefined;
+
+    const whereClauses: string[] = [];
+    const params: unknown[] = [];
+
+    if (recentDays !== undefined) {
+      const cutoff = Date.now() - recentDays * 86400000;
+      whereClauses.push('started_at >= ?');
+      params.push(cutoff);
+    }
+
+    const whereSql = whereClauses.length > 0
+      ? `WHERE ${whereClauses.join(' AND ')}`
+      : '';
+
+    const query = `
+      SELECT
+        id as sessionId,
+        started_at as recordedAt,
+        last_event_at as lastEventAt,
+        event_count as eventCount,
+        status,
+        json_extract(CASE WHEN metadata = '' THEN '{}' ELSE metadata END, '$.title') as title,
+        json_extract(CASE WHEN metadata = '' THEN '{}' ELSE metadata END, '$.url') as url
+      FROM sessions
+      ${whereSql}
+      ORDER BY started_at DESC
+      LIMIT ? OFFSET ?
+    `;
+
+    const queryLimit = limit + 1;
+    const rows = this.db.prepare(query).all(...params, queryLimit, offset) as any[];
+
+    const hasMore = rows.length > limit;
+    const visibleRows = rows.slice(0, limit);
+
+    const sessions = visibleRows.map(row => ({
+      sessionId: String(row.sessionId),
+      recordedAt: typeof row.recordedAt === 'number' ? row.recordedAt : undefined,
+      lastEventAt: typeof row.lastEventAt === 'number' ? row.lastEventAt : undefined,
+      eventCount: typeof row.eventCount === 'number' ? row.eventCount : undefined,
+      status: typeof row.status === 'string' ? row.status : undefined,
+      title: typeof row.title === 'string' && row.title.length > 0 ? row.title : undefined,
+      url: typeof row.url === 'string' && row.url.length > 0 ? row.url : undefined,
+    }));
+
+    return {
+      sessions,
+      limit,
+      offset,
+      hasMore,
+    };
   }
 }

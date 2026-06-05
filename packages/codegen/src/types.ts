@@ -1056,3 +1056,26 @@ export type GenerationEventMetadata = {
     tagName?: string;
   };
 };
+
+export interface RecordedSessionSummary {
+  sessionId: string;
+  recordedAt?: number;
+  lastEventAt?: number;
+  eventCount?: number;
+  status?: string;
+  title?: string;
+  url?: string;
+}
+
+export interface ListRecordedSessionsOptions {
+  limit?: number;
+  offset?: number;
+  recentDays?: number;
+}
+
+export interface ListRecordedSessionsResult {
+  sessions: RecordedSessionSummary[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}

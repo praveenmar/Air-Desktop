@@ -15,8 +15,10 @@ export type AirMcpToolDefinition = {
 
 export type AirMcpToolHandler = {
   definition: AirMcpToolDefinition;
-  handle: (args: unknown, context: McpContext) => Promise<unknown>;
+  handle: (args: unknown, context: McpContext) => Promise<any>;
 };
+
+import { getToolHandlers } from './tools';
 
 export function createMcpServer(context: McpContext): Server {
   const server = new Server(
@@ -31,33 +33,25 @@ export function createMcpServer(context: McpContext): Server {
     }
   );
 
-  // Modular tool registry
-  const toolDefinitions: AirMcpToolDefinition[] = [];
-  
-  // Example tool definition shape (will be populated in Phase 3E-B)
-  /*
-  toolDefinitions.push({
-    name: 'list_recorded_sessions',
-    description: 'List available recorded AIR sessions',
-    inputSchema: { ... }
-  });
-  */
+  const tools = getToolHandlers();
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
-      tools: toolDefinitions,
+      tools: tools.map(tool => tool.definition),
     };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    // Modular routing
-    switch (request.params.name) {
-      default:
-        throw new McpError(
-          ErrorCode.MethodNotFound,
-          `Unknown tool: ${request.params.name}`
-        );
+    const tool = tools.find(t => t.definition.name === request.params.name);
+
+    if (!tool) {
+      throw new McpError(
+        ErrorCode.MethodNotFound,
+        `Unknown tool: ${request.params.name}`
+      );
     }
+
+    return tool.handle(request.params.arguments ?? {}, context);
   });
 
   return server;
