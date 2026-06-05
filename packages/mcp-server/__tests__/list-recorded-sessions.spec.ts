@@ -66,4 +66,32 @@ describe('Phase 3E-B: list_recorded_sessions MCP Tool', () => {
 
     expect(mockGetCodegenService).toHaveBeenCalled();
   });
+  it('Test 5: matches exact patch acceptance criteria', async () => {
+    const mockListRecordedSessions = vi.fn().mockReturnValue({
+      sessions: [{ sessionId: '1' }],
+      limit: 10,
+      offset: 0,
+      hasMore: false
+    });
+
+    const mockGetCodegenService = vi.fn().mockReturnValue({
+      listRecordedSessions: mockListRecordedSessions
+    });
+
+    const mockContext: McpContext = {
+      config: { dbPath: 'mock.db' },
+      getCodegenService: mockGetCodegenService
+    };
+
+    const response = await listRecordedSessionsTool.handle({}, mockContext) as any;
+
+    expect(mockGetCodegenService).toHaveBeenCalled();
+    expect(mockListRecordedSessions).toHaveBeenCalled();
+    expect(response.content[0].type).toBe('text');
+
+    const parsed = JSON.parse(response.content[0].text);
+
+    expect(parsed._meta.privacy).toBeTruthy();
+    expect(Array.isArray(parsed.data.sessions)).toBe(true);
+  });
 });
