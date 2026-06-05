@@ -5,17 +5,22 @@ import { McpServerConfig } from './config';
  * Context holds shared services so tools don't instantiate them repeatedly.
  */
 export interface McpContext {
-  codegenService: CodegenService;
   config: McpServerConfig;
+  getCodegenService(): CodegenService;
 }
 
 export function createContext(config: McpServerConfig): McpContext {
-  // Pass the configured DB path down to the CodegenService.
-  // It handles opening it natively in query_only mode.
-  const codegenService = new CodegenService({ dbPath: config.dbPath });
+  let _codegenService: CodegenService | null = null;
   
   return {
-    codegenService,
-    config
+    config,
+    getCodegenService: () => {
+      if (!_codegenService) {
+        // Pass the configured DB path down to the CodegenService.
+        // It handles opening it natively in query_only mode.
+        _codegenService = new CodegenService({ dbPath: config.dbPath });
+      }
+      return _codegenService;
+    }
   };
 }

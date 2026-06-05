@@ -7,6 +7,17 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { McpContext } from './context';
 
+export type AirMcpToolDefinition = {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+};
+
+export type AirMcpToolHandler = {
+  definition: AirMcpToolDefinition;
+  handle: (args: unknown, context: McpContext) => Promise<unknown>;
+};
+
 export function createMcpServer(context: McpContext): Server {
   const server = new Server(
     {
@@ -21,7 +32,7 @@ export function createMcpServer(context: McpContext): Server {
   );
 
   // Modular tool registry
-  const toolDefinitions: any[] = [];
+  const toolDefinitions: AirMcpToolDefinition[] = [];
   
   // Example tool definition shape (will be populated in Phase 3E-B)
   /*
