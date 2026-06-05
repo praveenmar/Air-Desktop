@@ -1,0 +1,16 @@
+import type { CodegenSession, CodegenStep, SnapshotSelectionProvenance } from './types';
+import { type CandidateValidation, type NormalizedLlmRetrySuggestion, type NormalizedLlmSuggestion, type RawCandidate, type ResolverConfig, type SelectorFallbackProvider, type SelectorResolverResult, type SnapshotCache } from './resolver/types';
+export type { CandidateValidation, LlmFallbackRequest, LlmFallbackStep, LlmCorrectiveRetryRequest, LlmCorrectiveRetryStep, NormalizedLlmRetrySuggestion, NormalizedLlmSuggestion, LlmFallbackSuggestion, RawCandidate, ResolvedResolverConfig, ResolverConfig, SelectorFallbackRequest, SelectorFallbackProvider, SelectorResolution, SelectorResolverResult, SnapshotCache, } from './resolver/types';
+export { isVisibleElement, validateCSSCandidate, validateTextCandidate } from './resolver/visibility';
+export { validateSelectorSpec, validateScopedSelectorSpec } from './resolver/selector-spec-validator';
+export declare function hasSameAirTargetNodeId(resolvedElement: Element | null, targetNodeId?: string): boolean;
+export declare function shouldKeepOriginal(step: CodegenStep, snapshot: Document, config: ResolverConfig, snapshotSelection?: SnapshotSelectionProvenance): boolean;
+export declare function matchesIntent(el: Element, intent: string | CodegenStep, defaultIntentMinScore?: number): boolean;
+export declare function generateCandidates(step: CodegenStep, snapshot: Document, snapshotSelection?: SnapshotSelectionProvenance): RawCandidate[];
+export declare function complexityPenalty(selector: string): number;
+export declare function volatilityPenalty(selector: string): number;
+export declare function scoreCandidate(candidate: RawCandidate, validation: CandidateValidation, step: CodegenStep, snapshot?: Document): number;
+export declare function normalizeLlmSelector(selector?: string | null): string | null;
+export declare function normalizeLlmSuggestions(suggestions: unknown[], maxCandidatesPerStep: number): NormalizedLlmSuggestion[];
+export declare function normalizeLlmRetrySuggestions(suggestions: unknown[]): NormalizedLlmRetrySuggestion[];
+export declare function resolveSelectorsForSession(session: CodegenSession, snapshotCache: SnapshotCache, config?: ResolverConfig, llmFallbackProvider?: SelectorFallbackProvider): Promise<SelectorResolverResult>;
