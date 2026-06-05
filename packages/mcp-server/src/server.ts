@@ -13,9 +13,16 @@ export type AirMcpToolDefinition = {
   inputSchema: Record<string, unknown>;
 };
 
+export type AirMcpToolResponse = {
+  content: Array<{
+    type: 'text';
+    text: string;
+  }>;
+};
+
 export type AirMcpToolHandler = {
   definition: AirMcpToolDefinition;
-  handle: (args: unknown, context: McpContext) => Promise<any>;
+  handle: (args: unknown, context: McpContext) => Promise<AirMcpToolResponse>;
 };
 
 import { getToolHandlers } from './tools';

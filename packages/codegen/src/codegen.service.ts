@@ -2480,8 +2480,20 @@ export class CodegenService {
         last_event_at as lastEventAt,
         event_count as eventCount,
         status,
-        json_extract(CASE WHEN metadata = '' THEN '{}' ELSE metadata END, '$.title') as title,
-        json_extract(CASE WHEN metadata = '' THEN '{}' ELSE metadata END, '$.url') as url
+        json_extract(
+          CASE
+            WHEN metadata IS NOT NULL AND json_valid(metadata) THEN metadata
+            ELSE '{}'
+          END,
+          '$.title'
+        ) as title,
+        json_extract(
+          CASE
+            WHEN metadata IS NOT NULL AND json_valid(metadata) THEN metadata
+            ELSE '{}'
+          END,
+          '$.url'
+        ) as url
       FROM sessions
       ${whereSql}
       ORDER BY started_at DESC

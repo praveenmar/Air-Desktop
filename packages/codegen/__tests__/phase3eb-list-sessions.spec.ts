@@ -36,7 +36,8 @@ describe('Phase 3E-B: listRecordedSessions in CodegenService', () => {
     const query = mockPrepare.mock.calls[0][0];
     expect(query).toContain('SELECT');
     expect(query).toContain('FROM sessions');
-    expect(query).toContain('ORDER BY COALESCE(last_event_at, started_at) DESC');
+    expect(query).toContain('ORDER BY started_at DESC');
+    expect(query).toContain('json_valid(metadata)');
     expect(query).toContain('LIMIT ? OFFSET ?');
     expect(query).not.toContain('events.payload');
     expect(query).not.toContain('snapshot_html');

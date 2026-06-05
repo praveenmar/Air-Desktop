@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { AirMcpToolHandler } from '../server';
 import { wrapWithPrivacy } from '../utils/privacy';
-import { createDatabaseUnavailableError } from '../utils/errors';
+import { createDatabaseUnavailableError, createInvalidArgumentsError } from '../utils/errors';
 
 const ListRecordedSessionsArgsSchema = z.object({
   limit: z.number().optional(),
@@ -12,7 +12,7 @@ const ListRecordedSessionsArgsSchema = z.object({
 export const listRecordedSessionsTool: AirMcpToolHandler = {
   definition: {
     name: 'list_recorded_sessions',
-    description: 'List available AIR recorded sessions in newest-first order.',
+    description: 'List available AIR recorded sessions by recording start time, newest first.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -50,7 +50,7 @@ export const listRecordedSessionsTool: AirMcpToolHandler = {
       };
     } catch (error) {
       if (error instanceof z.ZodError) {
-        throw new Error(`Invalid arguments: ${error.message}`);
+        throw createInvalidArgumentsError(error.message);
       }
       throw createDatabaseUnavailableError(
         error instanceof Error ? error.message : 'Unknown database error'

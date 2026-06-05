@@ -13,3 +13,10 @@ export function createDatabaseUnavailableError(message: string): McpError {
     `Database unavailable: ${message}`
   );
 }
+
+export function createInvalidArgumentsError(message: string): McpError {
+  return new McpError(
+    ErrorCode.InvalidParams,
+    `Invalid arguments: ${message}`
+  );
+}
