@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
 
 const args = process.argv.slice(2);
@@ -44,11 +45,30 @@ if (helpRequested) {
 
 const repoRoot = path.resolve(__dirname, '..');
 const tsxCliPath = path.join(repoRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
-const entryFile = transport === 'http'
+const builtEntryFile = transport === 'http'
+  ? path.join(repoRoot, 'packages', 'mcp-server', 'dist', 'http.js')
+  : path.join(repoRoot, 'packages', 'mcp-server', 'dist', 'index.js');
+const sourceEntryFile = transport === 'http'
   ? path.join(repoRoot, 'packages', 'mcp-server', 'src', 'http.ts')
   : path.join(repoRoot, 'packages', 'mcp-server', 'src', 'index.ts');
 
-const child = spawn(process.execPath, [tsxCliPath, entryFile, ...forwardedArgs], {
+let childArgs;
+
+if (fs.existsSync(builtEntryFile)) {
+  childArgs = [builtEntryFile, ...forwardedArgs];
+} else {
+  if (!fs.existsSync(tsxCliPath)) {
+    console.error('[AIR MCP] Could not find a built MCP entrypoint or local tsx fallback.');
+    console.error(`[AIR MCP] Expected one of:`);
+    console.error(`  ${builtEntryFile}`);
+    console.error(`  ${tsxCliPath}`);
+    process.exit(1);
+  }
+
+  childArgs = [tsxCliPath, sourceEntryFile, ...forwardedArgs];
+}
+
+const child = spawn(process.execPath, childArgs, {
   cwd: repoRoot,
   stdio: 'inherit',
   env: process.env,

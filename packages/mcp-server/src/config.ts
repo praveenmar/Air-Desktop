@@ -37,7 +37,7 @@ export function resolveDbPath(args: string[], env: NodeJS.ProcessEnv = process.e
 }
 
 export function resolveHttpPort(args: string[], env: NodeJS.ProcessEnv = process.env): number {
-  const portValue = readFlag(args, '--port') ?? env.AIR_MCP_PORT ?? env.PORT;
+  const portValue = readFlag(args, '--port') ?? env.AIR_MCP_PORT;
 
   if (!portValue) {
     return DEFAULT_HTTP_PORT;
