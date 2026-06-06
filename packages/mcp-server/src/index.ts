@@ -1,10 +1,15 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { parseArgs } from './config';
+import { formatHelp, parseArgs, shouldShowHelp } from './config';
 import { createContext } from './context';
 import { createMcpServer } from './server';
 
 async function main() {
   try {
+    if (shouldShowHelp(process.argv.slice(2))) {
+      console.error(formatHelp('stdio'));
+      process.exit(0);
+    }
+
     // 1. Parse arguments (e.g., node dist/index.js --db path/to/air.db)
     const config = parseArgs(process.argv.slice(2));
 

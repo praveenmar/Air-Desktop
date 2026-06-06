@@ -7,7 +7,9 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node dist/packages/mcp-server/src/index.js"
+    "start": "node dist/packages/mcp-server/src/index.js",
+    "start:stdio": "tsx src/index.ts",
+    "start:http": "tsx src/http.ts"
   },
   "dependencies": {
     "@air/codegen": "0.1.0",

@@ -13,6 +13,8 @@
     "postinstall": "echo skipping sqlite rebuild",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "mcp:stdio": "node scripts/air-mcp.cjs",
+    "mcp:http": "node scripts/air-mcp.cjs --transport http",
     "typecheck:core": "tsc -p core/tsconfig.json --noEmit",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",

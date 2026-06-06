@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "my-mcp-server-AIR": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["E:/Air Desktop/scripts/air-mcp.cjs"],
+      "env": {
+        "AIR_MCP_DB_PATH": "C:/Users/praveenmar/AppData/Roaming/air-desktop/air-data.db"
+      }
+    }
+  },
+  "inputs": []
+}
