@@ -58,8 +58,7 @@ import {
 import { buildSelectorSpec } from './selector-spec';
 import { normalizeUrl } from '@air/shared';
 import { openSqliteReadonlyDatabase, SqliteDatabase } from './sqlite-client';
-import { SelectorResolutionSchema } from '../../../core/types/events';
-import { GenerationContextV1 } from '../../../core/types/generation';
+import { SelectorResolutionSchema, type GenerationContextV1 } from './runtime-schemas';
 import { deriveGenerationContext } from './generation-builder';
 
 export const SELECTOR_RANK_MAP: Record<string, number> = {

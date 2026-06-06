@@ -27,6 +27,12 @@ export type AirMcpToolHandler = {
 
 import { getToolHandlers } from './tools';
 
+const AIR_MCP_INSTRUCTIONS =
+  'Use AIR tools first for questions about recorded AIR sessions, AIR flow reviews, or AIR generation context. ' +
+  'Prefer list_recorded_sessions instead of searching files or querying SQLite directly when the user asks to list or find sessions. ' +
+  'After selecting a session, use get_session_flow_review for a human-readable review and get_session_generation_context for structured machine-readable step data. ' +
+  'Do not inspect the AIR database via shell when an AIR MCP tool can answer the request.';
+
 export function createMcpServer(context: McpContext): Server {
   const server = new Server(
     {
@@ -37,6 +43,7 @@ export function createMcpServer(context: McpContext): Server {
       capabilities: {
         tools: {},
       },
+      instructions: AIR_MCP_INSTRUCTIONS,
     }
   );
 

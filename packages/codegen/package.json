@@ -2,8 +2,8 @@
   "name": "@air/codegen",
   "version": "0.1.0",
   "description": "AIR semantic timeline compressor and code generation service",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
   "bin": {
     "air": "bin/air.cjs",
     "air-trace": "bin/air-trace.cjs",

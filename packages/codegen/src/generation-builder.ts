@@ -1,9 +1,9 @@
 import {
-  GenerationContextV1,
-  GenerationStepV1,
-  GenerationAssertion,
   GenerationContextSchemaV1,
-} from '../../../core/types/generation';
+  type GenerationAssertion,
+  type GenerationContextV1,
+  type GenerationStepV1,
+} from './runtime-schemas';
 import { CodegenSession, CodegenStep, GenerationEventMetadata, CodegenAssertion } from './types';
 
 /**

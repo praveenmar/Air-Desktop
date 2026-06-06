@@ -68,7 +68,7 @@ const assertion_stub_1 = require("./assertion.stub");
 const selector_spec_1 = require("./selector-spec");
 const shared_1 = require("@air/shared");
 const sqlite_client_1 = require("./sqlite-client");
-const events_1 = require("../../../core/types/events");
+const runtime_schemas_1 = require("./runtime-schemas");
 const generation_builder_1 = require("./generation-builder");
 exports.SELECTOR_RANK_MAP = {
     'data-testid': 1,
@@ -2093,7 +2093,7 @@ class CodegenService {
             try {
                 if (row.selectorResolution) {
                     const parsed = JSON.parse(row.selectorResolution);
-                    const validation = events_1.SelectorResolutionSchema.safeParse(parsed);
+                    const validation = runtime_schemas_1.SelectorResolutionSchema.safeParse(parsed);
                     if (validation.success) {
                         selectorResolution = validation.data;
                     }

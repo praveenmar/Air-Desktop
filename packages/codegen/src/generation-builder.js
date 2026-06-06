@@ -1,7 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.deriveGenerationContext = deriveGenerationContext;
-const generation_1 = require("../../../core/types/generation");
+const runtime_schemas_1 = require("./runtime-schemas");
 /**
  * Phase 3C: Pure GenerationContext Builder
  *
@@ -96,7 +96,7 @@ function deriveGenerationContext(input) {
             source: "air-db"
         }
     };
-    return generation_1.GenerationContextSchemaV1.parse(context);
+    return runtime_schemas_1.GenerationContextSchemaV1.parse(context);
 }
 /**
  * Type-safe helper to deeply or shallowly strip undefined fields
