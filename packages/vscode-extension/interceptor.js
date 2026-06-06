@@ -5532,7 +5532,7 @@ class AIRInterceptor {
    * Called by handleClick when we confirm the click target is an option.
    * Emits a structured "custom-select" event and closes the session.
    */
-  _handleCustomDropdownSelection(optionData, clickEvent, explicitTraceId = null, explicitControlFamily = null) {
+  _handleCustomDropdownSelection(optionData, clickEvent, explicitTraceId = null, explicitControlFamily = null, cachedSelectorDecision = null) {
     const { label, value, index, el } = optionData;
     const session = this._openDropdown;
     const eventId = this.generateUUID();
@@ -5605,6 +5605,12 @@ class AIRInterceptor {
       openDropdownContext,
       optionInteractionContext,
     });
+
+    if (cachedSelectorDecision) {
+      optionFingerprint._selectorDecision = cachedSelectorDecision;
+      this.log("CUSTOM_SELECT_SELECTOR_DECISION_ATTACHED", { traceId });
+    }
+    
     const snapshotTarget = optionTarget || session?.triggerEl || this._getComposedEventTarget(clickEvent) || null;
     const subtreeSnapshot = snapshotTarget
       ? this._captureSubtreeSnapshot(snapshotTarget, 50000, { targetIdentityCapture })
@@ -5771,7 +5777,8 @@ class AIRInterceptor {
       optionData,
       { target: optionData.el || null },
       pending.traceId,
-      controlFamily
+      controlFamily,
+      pending.selectorDecision || null
     );
     return true;
   }
@@ -5866,6 +5873,24 @@ class AIRInterceptor {
       controlFamily = 'autocomplete';
     }
 
+    const optionDecision = optionFingerprint._selectorDecision || null;
+    const isReplaySafeSelectorDecision = Boolean(
+      optionDecision &&
+      optionDecision.status === 'resolved' &&
+      optionDecision.selected &&
+      typeof optionDecision.selected.selector === 'string' &&
+      optionDecision.selected.selector.trim().length > 0 &&
+      optionDecision.selected.replaySafe === true &&
+      (optionDecision.selected.engine === 'css' || optionDecision.selected.engine === 'xpath')
+    );
+
+    if (isReplaySafeSelectorDecision) {
+      this.log("CUSTOM_SELECT_SELECTOR_DECISION_CACHED", {
+        traceId,
+        selector: optionDecision.selected.selector
+      });
+    }
+
     this._clearPendingOptionSelection();
     this._pendingOptionSelection = {
       optionData,
@@ -5880,6 +5905,7 @@ class AIRInterceptor {
       traceId,
       controlFamily,
       triggerFingerprint,
+      selectorDecision: isReplaySafeSelectorDecision ? optionDecision : null,
     };
     this.log("MOUSEDOWN_OPTION_CAPTURED", {
       label: optionData.label,
@@ -5964,7 +5990,7 @@ class AIRInterceptor {
           ageMs,
           dx, dy,
         });
-        this._handleCustomDropdownSelection(pending.optionData, e, pending.traceId, pending.controlFamily);
+        this._handleCustomDropdownSelection(pending.optionData, e, pending.traceId, pending.controlFamily, pending.selectorDecision || null);
         return;
       } else {
         this.log("⚠️ Discarding stale/invalid pending option", {

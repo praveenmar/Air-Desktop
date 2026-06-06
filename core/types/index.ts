@@ -2,10 +2,10 @@
 // Prototype Origin: N/A - Architectural addition.
 // Changes: Exposes all strict types and schemas from a single entry point.
 
-export * from './fingerprint';
-export * from './context-driver';
-export * from './edge-cases';
-export * from './events';
-export * from './graph';
-export * from './codegen';
-export * from './generation';
+export * from './fingerprint.ts';
+export * from './context-driver.ts';
+export * from './edge-cases.ts';
+export * from './events.ts';
+export * from './graph.ts';
+export * from './codegen.ts';
+export * from './generation.ts';

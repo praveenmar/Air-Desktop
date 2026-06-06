@@ -1,4 +1,4 @@
-export * from "./anchor-utils";
-export * from "./selectors";
-export * from "./url-utils";
+export * from "./anchor-utils.ts";
+export * from "./selectors.ts";
+export * from "./url-utils.ts";
 
