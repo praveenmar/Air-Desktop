@@ -2,8 +2,8 @@
   "name": "@air/codegen",
   "version": "0.1.0",
   "description": "AIR semantic timeline compressor and code generation service",
-  "main": "src/index.js",
-  "types": "src/index.d.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "bin": {
     "air": "bin/air.cjs",
     "air-trace": "bin/air-trace.cjs",
@@ -11,8 +11,8 @@
     "air-smoke-summary": "bin/air-smoke-summary.cjs"
   },
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch",
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsc -p tsconfig.build.json --watch",
     "review": "node bin/run-ts-cli.cjs air-review.ts",
     "review:list": "node bin/run-ts-cli.cjs air-review.ts --list",
     "trace": "node bin/run-ts-cli.cjs air-trace.ts",

@@ -17,7 +17,7 @@
  */
 
 import { z } from 'zod';
-import { SelectorResolutionSchema } from '../../../core/types/events';
+import { SelectorResolutionSchema } from './runtime-schemas';
 
 export type SelectorResolutionV1 = z.infer<typeof SelectorResolutionSchema>;
 
