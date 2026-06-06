@@ -1,13 +1,14 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "rootDir": "../..",
+    "rootDir": "src",
     "outDir": "dist",
     "noEmit": false,
     "allowImportingTsExtensions": false,
     "module": "CommonJS",
     "moduleResolution": "node",
     "declaration": true,
+    "paths": {},
     "types": ["node"]
   },
   "include": ["src/**/*"],

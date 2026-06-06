@@ -64,6 +64,8 @@ exports.compressCustomControlOpenSelectPairs = compressCustomControlOpenSelectPa
 exports.deduplicateSharedAssertions = deduplicateSharedAssertions;
 const crypto = __importStar(require("crypto"));
 const snapshot_selector_1 = require("./snapshot-selector");
+const flow_review_service_1 = require("./flow-review.service");
+const flow_review_formatter_1 = require("./flow-review.formatter");
 const assertion_stub_1 = require("./assertion.stub");
 const selector_spec_1 = require("./selector-spec");
 const shared_1 = require("@air/shared");
@@ -2134,6 +2136,86 @@ class CodegenService {
             .filter((id) => typeof id === 'string' && id.length > 0);
         const eventsById = this.getGenerationEventMetadataByIds(eventIds);
         return (0, generation_builder_1.deriveGenerationContext)({ session, eventsById });
+    }
+    /**
+     * PHASE 3E: MCP read path
+     *
+     * Lightweight discovery of recorded sessions without building GenerationContext
+     */
+    listRecordedSessions(options = {}) {
+        const rawLimit = options.limit ?? 10;
+        const limit = Math.min(Math.max(Math.floor(rawLimit), 1), 50);
+        const rawOffset = options.offset ?? 0;
+        const offset = Math.max(Math.floor(rawOffset), 0);
+        const recentDays = typeof options.recentDays === 'number' && Number.isFinite(options.recentDays)
+            ? Math.min(Math.max(Math.floor(options.recentDays), 1), 365)
+            : undefined;
+        const whereClauses = [];
+        const params = [];
+        if (recentDays !== undefined) {
+            const cutoff = Date.now() - recentDays * 86400000;
+            whereClauses.push('started_at >= ?');
+            params.push(cutoff);
+        }
+        const whereSql = whereClauses.length > 0
+            ? `WHERE ${whereClauses.join(' AND ')}`
+            : '';
+        const query = `
+      SELECT
+        id as sessionId,
+        started_at as recordedAt,
+        last_event_at as lastEventAt,
+        event_count as eventCount,
+        status,
+        json_extract(
+          CASE
+            WHEN metadata IS NOT NULL AND json_valid(metadata) THEN metadata
+            ELSE '{}'
+          END,
+          '$.title'
+        ) as title,
+        json_extract(
+          CASE
+            WHEN metadata IS NOT NULL AND json_valid(metadata) THEN metadata
+            ELSE '{}'
+          END,
+          '$.url'
+        ) as url
+      FROM sessions
+      ${whereSql}
+      ORDER BY started_at DESC
+      LIMIT ? OFFSET ?
+    `;
+        const queryLimit = limit + 1;
+        const rows = this.db.prepare(query).all(...params, queryLimit, offset);
+        const hasMore = rows.length > limit;
+        const visibleRows = rows.slice(0, limit);
+        const sessions = visibleRows.map(row => ({
+            sessionId: String(row.sessionId),
+            recordedAt: typeof row.recordedAt === 'number' ? row.recordedAt : undefined,
+            lastEventAt: typeof row.lastEventAt === 'number' ? row.lastEventAt : undefined,
+            eventCount: typeof row.eventCount === 'number' ? row.eventCount : undefined,
+            status: typeof row.status === 'string' ? row.status : undefined,
+            title: typeof row.title === 'string' && row.title.length > 0 ? row.title : undefined,
+            url: typeof row.url === 'string' && row.url.length > 0 ? row.url : undefined,
+        }));
+        return {
+            sessions,
+            limit,
+            offset,
+            hasMore,
+        };
+    }
+    /**
+     * PHASE 3E-C: MCP read path
+     *
+     * Returns a human-readable ASCII/Markdown review of a recorded session.
+     * Driven by the FlowReview layer, avoiding raw DOM/snapshot data.
+     */
+    getFlowReviewMarkdown(sessionId) {
+        const session = this.buildSession(sessionId);
+        const review = flow_review_service_1.FlowReviewService.build(session);
+        return flow_review_formatter_1.FlowReviewFormatter.formatForConsole(review);
     }
 }
 exports.CodegenService = CodegenService;

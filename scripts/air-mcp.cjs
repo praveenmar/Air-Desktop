@@ -57,14 +57,19 @@ let childArgs;
 if (fs.existsSync(builtEntryFile)) {
   childArgs = [builtEntryFile, ...forwardedArgs];
 } else {
-  if (!fs.existsSync(tsxCliPath)) {
-    console.error('[AIR MCP] Could not find a built MCP entrypoint or local tsx fallback.');
+  const hasSourceFallback = fs.existsSync(tsxCliPath) && fs.existsSync(sourceEntryFile);
+
+  if (!hasSourceFallback) {
+    console.error('[AIR MCP] Could not find the built MCP entrypoint.');
     console.error(`[AIR MCP] Expected one of:`);
     console.error(`  ${builtEntryFile}`);
+    console.error('[AIR MCP] Local development fallback also unavailable:');
     console.error(`  ${tsxCliPath}`);
+    console.error(`  ${sourceEntryFile}`);
     process.exit(1);
   }
 
+  console.error('[AIR MCP] Built entrypoint not found; using local tsx fallback for development only.');
   childArgs = [tsxCliPath, sourceEntryFile, ...forwardedArgs];
 }
 
