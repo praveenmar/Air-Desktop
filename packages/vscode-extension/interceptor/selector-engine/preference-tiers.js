@@ -511,6 +511,94 @@ function sortByScoreDescending(left, right) {
   return String(left?.selector || left?.path || '').localeCompare(String(right?.selector || right?.path || ''));
 }
 
+const TEXT_ONLY_SELECTOR_FAMILIES = new Set([
+  'text',
+  'parent-scoped-text-css',
+  'xpath-text',
+]);
+
+const REPLAY_SAFE_TRIGGER_CONTROL_FAMILIES = new Set([
+  'test-id',
+  'id',
+  'name',
+  'aria-label',
+  'placeholder',
+  'href',
+  'title',
+  'alt',
+  'value',
+  'compound-attributes',
+  'tight-container-css',
+  'parent-scoped-css',
+  'class',
+]);
+
+const PREFERENCE_DANGEROUS_WARNINGS = new Set([
+  'target-not-in-matches',
+  'blocked-text-evaluation',
+  'multiple-matches',
+  'multiple-visible-matches',
+  'too-many-matches-for-visible-index',
+  'incomplete-trigger-binding',
+]);
+
+function isCustomControlOpenEvent(eventContext) {
+  return eventContext?.eventType === 'custom-control-open';
+}
+
+function hasPreferenceDangerousWarnings(entry) {
+  return Array.isArray(entry?.warningCodes)
+    && entry.warningCodes.some((warningCode) => PREFERENCE_DANGEROUS_WARNINGS.has(warningCode));
+}
+
+function isReplaySafeTriggerControlSelector(entry) {
+  return !!entry
+    && REPLAY_SAFE_TRIGGER_CONTROL_FAMILIES.has(entry.family)
+    && entry.matchCount === 1
+    && entry.visibleMatchCount === 1
+    && !hasPreferenceDangerousWarnings(entry);
+}
+
+function resolveTierForSelectorChoice(entry, score) {
+  if (
+    entry?.usesIndex === true
+    || entry?.requiresPositionalDisambiguation === true
+    || Array.isArray(entry?.warningCodes) && entry.warningCodes.includes('positional-fallback-only')
+  ) {
+    return 'last-resort';
+  }
+  if (score >= 80) return 'preferred';
+  if (score < 50) return 'last-resort';
+  return 'fallback';
+}
+
+function applyCustomControlOpenSelectorPolicy(selectorChoices, eventContext) {
+  if (!isCustomControlOpenEvent(eventContext)) {
+    return selectorChoices;
+  }
+
+  const hasReplaySafeTriggerControl = selectorChoices.some(isReplaySafeTriggerControlSelector);
+  if (!hasReplaySafeTriggerControl) {
+    return selectorChoices;
+  }
+
+  return selectorChoices
+    .map((entry) => {
+      if (!TEXT_ONLY_SELECTOR_FAMILIES.has(entry.family)) {
+        return entry;
+      }
+
+      const adjustedScore = entry.score - 18;
+      return {
+        ...entry,
+        score: adjustedScore,
+        tier: resolveTierForSelectorChoice(entry, adjustedScore),
+        reasons: [...(Array.isArray(entry.reasons) ? entry.reasons : []), 'demoted-display-text-for-custom-control-open'],
+      };
+    })
+    .sort(sortByScoreDescending);
+}
+
 function mergeSelectorInputs(candidates, proposalCandidates) {
   const seen = new Set();
   const merged = [];
@@ -531,6 +619,7 @@ function mergeSelectorInputs(candidates, proposalCandidates) {
 export function buildSelectorPreferenceShadow({
   candidates = [],
   proposalCandidates = [],
+  eventContext,
   boundedFieldContextEvidence,
   labelContextEvidence,
   accessibilityEvidence,
@@ -538,9 +627,9 @@ export function buildSelectorPreferenceShadow({
   optionPanelContextEvidence,
   tableRowContextEvidence,
 } = {}) {
-  const selectorChoices = mergeSelectorInputs(candidates, proposalCandidates)
+  const selectorChoices = applyCustomControlOpenSelectorPolicy(mergeSelectorInputs(candidates, proposalCandidates)
     .map(classifySelectorCandidatePreference)
-    .sort(sortByScoreDescending);
+    .sort(sortByScoreDescending), eventContext);
 
   const proofChoices = [
     classifyBoundedFieldProof(boundedFieldContextEvidence, boundedFieldShadowExposure),

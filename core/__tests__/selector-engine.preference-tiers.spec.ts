@@ -151,6 +151,74 @@ describe('selector engine preference tiers', () => {
     });
   });
 
+  it('prefers a replay-safe trigger/control selector over dynamic display text for custom-control-open', async () => {
+    const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
+    const preference = selectorEngine.buildSelectorPreferenceShadow({
+      candidates: [
+        {
+          selector: 'span:has-text("Dynamic User Name")',
+          family: 'text',
+          engine: 'css',
+          strength: 'medium',
+          matchCount: 1,
+          visibleMatchCount: 1,
+          warningCodes: [],
+        },
+        {
+          selector: 'button.user-trigger',
+          family: 'class',
+          engine: 'css',
+          strength: 'medium',
+          matchCount: 1,
+          visibleMatchCount: 1,
+          warningCodes: [],
+        },
+      ],
+      eventContext: {
+        eventType: 'custom-control-open',
+        trigger: 'trigger-click',
+      },
+    });
+
+    expect(preference.bestSelector).toEqual(expect.objectContaining({
+      selector: 'button.user-trigger',
+      family: 'class',
+    }));
+    expect(preference.selectorChoices).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        selector: 'span:has-text("Dynamic User Name")',
+        reasons: expect.arrayContaining(['demoted-display-text-for-custom-control-open']),
+      }),
+    ]));
+  });
+
+  it('keeps text as fallback for custom-control-open when no replay-safe trigger/control selector exists', async () => {
+    const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
+    const preference = selectorEngine.buildSelectorPreferenceShadow({
+      candidates: [
+        {
+          selector: 'span:has-text("Dynamic User Name")',
+          family: 'text',
+          engine: 'css',
+          strength: 'medium',
+          matchCount: 1,
+          visibleMatchCount: 1,
+          warningCodes: [],
+        },
+      ],
+      eventContext: {
+        eventType: 'custom-control-open',
+        trigger: 'trigger-click',
+      },
+    });
+
+    expect(preference.bestSelector).toEqual(expect.objectContaining({
+      selector: 'span:has-text("Dynamic User Name")',
+      family: 'text',
+    }));
+    expect(preference.bestSelector?.reasons).not.toContain('demoted-display-text-for-custom-control-open');
+  });
+
   it('keeps xpath-like indexed selectors as last-resort when stronger selectors exist', async () => {
     const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
     const preference = selectorEngine.buildSelectorPreferenceShadow({
@@ -227,6 +295,60 @@ describe('selector engine preference tiers', () => {
       expect.objectContaining({
         selector: 'div:has-text("Enabled")',
         tier: 'last-resort',
+      }),
+    ]));
+  });
+
+  it('does not apply the custom-control-open text demotion to custom-menu-select option selection', async () => {
+    const selectorEngine = await import('../../packages/vscode-extension/interceptor/selector-engine/index.js');
+    const preference = selectorEngine.buildSelectorPreferenceShadow({
+      candidates: [
+        {
+          selector: 'div:has-text("Logout")',
+          family: 'text',
+          engine: 'css',
+          strength: 'weak',
+          matchCount: 3,
+          visibleMatchCount: 2,
+          warningCodes: ['multiple-matches', 'multiple-visible-matches'],
+        },
+        {
+          selector: 'button.user-trigger',
+          family: 'class',
+          engine: 'css',
+          strength: 'medium',
+          matchCount: 1,
+          visibleMatchCount: 1,
+          warningCodes: [],
+        },
+      ],
+      proposalCandidates: [
+        {
+          selector: 'div[role="menu"] div[role="menuitem"]:has-text("Logout")',
+          family: 'text',
+          engine: 'css',
+          proposalSource: 'option-panel',
+          proposalTierHint: 'preferred',
+          strength: 'medium',
+          matchCount: 1,
+          visibleMatchCount: 1,
+          warningCodes: [],
+        },
+      ],
+      eventContext: {
+        eventType: 'custom-menu-select',
+        trigger: 'trigger-click',
+      },
+    });
+
+    expect(preference.bestSelector).toEqual(expect.objectContaining({
+      selector: 'div[role="menu"] div[role="menuitem"]:has-text("Logout")',
+      proposalSource: 'option-panel',
+    }));
+    expect(preference.selectorChoices).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        selector: 'div[role="menu"] div[role="menuitem"]:has-text("Logout")',
+        reasons: expect.not.arrayContaining(['demoted-display-text-for-custom-control-open']),
       }),
     ]));
   });

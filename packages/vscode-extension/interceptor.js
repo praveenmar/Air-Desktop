@@ -7638,6 +7638,7 @@ class AIRInterceptor {
           selectorEngine.buildSelectorPreferenceShadow({
             candidates: shadowCandidates,
             proposalCandidates,
+            eventContext,
             boundedFieldContextEvidence,
             labelContextEvidence,
             accessibilityEvidence,
