@@ -828,10 +828,13 @@ function buildIntent(eventType, fp) {
 // stays on the same page with state_refresh outcome) are never suppressed.
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const LOOKAHEAD_WINDOW = 4; // scan up to 4 steps ahead for a navigation trigger
-function suppressPreNavSetupClicks(steps) {
+function suppressPreNavSetupClicks(steps, options = {}) {
     const suppress = new Set(); // indices to remove
     for (let i = 0; i < steps.length; i++) {
         const step = steps[i];
+        if (options.preserveCompoundOpenSteps && step.action === 'custom-control-open') {
+            continue;
+        }
         // Condition 1: must be immediate_action
         if (step.outcomeType !== 'immediate_action')
             continue;
@@ -1213,7 +1216,8 @@ class CodegenService {
      * Builds the full Semantic Timeline for a session.
      * This is what gets fed to the AI â€” no raw HTML, no snapshots.
      */
-    buildSession(sessionId) {
+    buildSession(sessionId, buildOptions = {}) {
+        const preserveCompoundOpenSteps = buildOptions.preserveCompoundOpenSteps === true;
         // â”€â”€ 1. Load session metadata â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const session = this.db.prepare(`
       SELECT id, started_at, last_event_at, metadata
@@ -1464,8 +1468,12 @@ class CodegenService {
         // every SPA sidebar navigation (e.g. .oxd-icon and div > div:nth-of-type).
         const afterClickInputCollapse = collapseRedundantClickBeforeInput(rawSteps);
         const afterSubmitCompression = compressDuplicateSubmitAfterClick(afterClickInputCollapse);
-        const afterCustomControlCompression = compressCustomControlOpenSelectPairs(afterSubmitCompression);
-        const afterSetupFilter = suppressPreNavSetupClicks(afterCustomControlCompression);
+        const afterCustomControlCompression = preserveCompoundOpenSteps
+            ? afterSubmitCompression
+            : compressCustomControlOpenSelectPairs(afterSubmitCompression);
+        const afterSetupFilter = suppressPreNavSetupClicks(afterCustomControlCompression, {
+            preserveCompoundOpenSteps,
+        });
         // â”€â”€ 7. FIX C: strip assertions shared across multiple destination pages â”€â”€
         // Removes global layout elements (Add, Reset, Search buttons) that appear
         // identically in the anchor set of every page, leaving only page-specific
@@ -2130,7 +2138,7 @@ class CodegenService {
      * This is the entrypoint for future MCP codegen workflows.
      */
     buildGenerationContext(sessionId) {
-        const session = this.buildSession(sessionId);
+        const session = this.buildSession(sessionId, { preserveCompoundOpenSteps: true });
         const eventIds = session.steps
             .map(step => step.eventId)
             .filter((id) => typeof id === 'string' && id.length > 0);

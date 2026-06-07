@@ -69,7 +69,7 @@ describe('Phase 3D: buildGenerationContext', () => {
 
     const context = service.buildGenerationContext('session-1');
 
-    expect(service.buildSession).toHaveBeenCalledWith('session-1');
+    expect(service.buildSession).toHaveBeenCalledWith('session-1', { preserveCompoundOpenSteps: true });
     expect(service.getGenerationEventMetadataByIds).toHaveBeenCalledWith(['event-1']);
     
     expect(context.schemaVersion).toBe('air:generation-context:v1');
@@ -188,5 +188,83 @@ describe('Phase 3D: buildGenerationContext', () => {
 
     expect(context).toBeDefined();
     expect(sessionAfter).toEqual(sessionBefore);
+  });
+
+  it('Test 5: preserves custom-control-open and custom-select as separate GenerationContext steps', () => {
+    const mockSession: CodegenSession = {
+      sessionId: 'session-1',
+      url: 'https://test.com',
+      title: 'Test',
+      recordedAt: '2026-01-01T00:00:00Z',
+      stepCount: 2,
+      flowConfidence: 1,
+      nodeCount: 1,
+      steps: [
+        createMockStep({
+          step: 1,
+          eventId: 'event-open',
+          action: 'custom-control-open',
+          intent: 'custom-control-open_role',
+          selector: '.trigger',
+          selectorPriority: 'class',
+        }),
+        createMockStep({
+          step: 2,
+          eventId: 'event-select',
+          action: 'custom-select',
+          intent: 'custom-select_value',
+          selector: '[role="option"]',
+          selectorPriority: 'attribute',
+          value: 'Admin',
+        }),
+      ],
+    };
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-1');
+
+    expect(service.buildSession).toHaveBeenCalledWith('session-1', { preserveCompoundOpenSteps: true });
+    expect(context.steps.map(step => step.action)).toEqual(['custom-control-open', 'custom-select']);
+  });
+
+  it('Test 6: preserves custom-control-open and custom-menu-select as separate GenerationContext steps', () => {
+    const mockSession: CodegenSession = {
+      sessionId: 'session-1',
+      url: 'https://test.com',
+      title: 'Test',
+      recordedAt: '2026-01-01T00:00:00Z',
+      stepCount: 2,
+      flowConfidence: 1,
+      nodeCount: 1,
+      steps: [
+        createMockStep({
+          step: 1,
+          eventId: 'event-open',
+          action: 'custom-control-open',
+          intent: 'custom-control-open_menu',
+          selector: '.trigger',
+          selectorPriority: 'class',
+        }),
+        createMockStep({
+          step: 2,
+          eventId: 'event-menu-select',
+          action: 'custom-menu-select',
+          intent: 'custom-menu-select_value',
+          selector: '[role="menuitem"]',
+          selectorPriority: 'attribute',
+          value: 'Logout',
+        }),
+      ],
+    };
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-1');
+
+    expect(service.buildSession).toHaveBeenCalledWith('session-1', { preserveCompoundOpenSteps: true });
+    expect(context.steps.map(step => step.action)).toEqual(['custom-control-open', 'custom-menu-select']);
   });
 });

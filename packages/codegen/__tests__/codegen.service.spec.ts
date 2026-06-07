@@ -40,7 +40,7 @@ function buildSessionFromEventRows(rows: Array<{
   traceId: string;
   nodeId: string | null;
   payload: string;
-}>) {
+}>, buildOptions: { preserveCompoundOpenSteps?: boolean } = {}) {
   const fakeDb = {
     prepare(sql: string) {
       if (sql.includes('FROM sessions')) {
@@ -96,7 +96,7 @@ function buildSessionFromEventRows(rows: Array<{
     includeHoverSteps: false,
   };
 
-  return (service as CodegenService).buildSession('session-test');
+  return (service as CodegenService).buildSession('session-test', buildOptions);
 }
 
 describe('CodegenService - Priority & Rank', () => {
@@ -190,6 +190,29 @@ describe('CodegenService - Pre‑Navigation Suppression', () => {
 
     const filtered = suppressPreNavSetupClicks(steps);
     expect(filtered).toHaveLength(2); // both kept
+  });
+
+  it('keeps custom-control-open when preserveCompoundOpenSteps is true', () => {
+    const steps: CodegenStep[] = [
+      createStep({
+        step: 1,
+        action: 'custom-control-open',
+        selectorPriority: 'class',
+        outcomeType: 'immediate_action',
+        pageUrl: '/dashboard',
+      }),
+      createStep({
+        step: 2,
+        action: 'custom-menu-select',
+        selectorPriority: 'attribute',
+        outcomeType: 'navigation',
+        pageUrl: '/dashboard',
+      }),
+    ];
+
+    const filtered = suppressPreNavSetupClicks(steps, { preserveCompoundOpenSteps: true });
+    expect(filtered).toHaveLength(2);
+    expect(filtered.map(step => step.action)).toEqual(['custom-control-open', 'custom-menu-select']);
   });
 });
 
@@ -670,6 +693,193 @@ describe('CodegenService - Custom Control Open/Select Compression', () => {
     ];
 
     expect(compressCustomControlOpenSelectPairs(steps)).toHaveLength(2);
+  });
+});
+
+describe('CodegenService - Replay-Preserving Compound Open Steps', () => {
+  it('preserves real custom-control-open steps in buildSession when preserveCompoundOpenSteps is true', () => {
+    const makePayload = (payload: Record<string, unknown>) => JSON.stringify(payload);
+    const pageUrl = 'https://app.test/admin';
+    const menuUrl = 'https://app.test/profile';
+
+    const session = buildSessionFromEventRows([
+      {
+        eventId: 'ev-open-role',
+        eventType: 'custom-control-open',
+        timestamp: 1_700_000_000_100,
+        pageUrl,
+        traceId: 'trace-role',
+        nodeId: 'node-1',
+        payload: makePayload({
+          normalizedUrl: pageUrl,
+          controlFamily: 'combobox',
+          fingerprint: {
+            selector: '.role-trigger',
+            selectorPriority: 'class',
+            selectorRank: 7,
+            tagName: 'div',
+            textExcerpt: 'User Role',
+          },
+        }),
+      },
+      {
+        eventId: 'ev-select-role',
+        eventType: 'custom-select',
+        timestamp: 1_700_000_000_200,
+        pageUrl,
+        traceId: 'trace-role',
+        nodeId: 'node-1',
+        payload: makePayload({
+          normalizedUrl: pageUrl,
+          controlFamily: 'combobox',
+          fingerprint: {
+            selector: '[role="option"]',
+            selectorPriority: 'attribute',
+            selectorRank: 3,
+            tagName: 'div',
+            textExcerpt: 'Admin',
+          },
+          triggerFingerprint: {
+            selector: '.role-trigger',
+            selectorPriority: 'class',
+            selectorRank: 7,
+            tagName: 'div',
+            textExcerpt: 'User Role',
+          },
+          selection: {
+            label: 'Admin',
+            value: 'Admin',
+            index: 0,
+          },
+          meta: {
+            triggerSelector: '.role-trigger',
+          },
+        }),
+      },
+      {
+        eventId: 'ev-open-status',
+        eventType: 'custom-control-open',
+        timestamp: 1_700_000_000_300,
+        pageUrl,
+        traceId: 'trace-status',
+        nodeId: 'node-1',
+        payload: makePayload({
+          normalizedUrl: pageUrl,
+          controlFamily: 'combobox',
+          fingerprint: {
+            selector: '.status-trigger',
+            selectorPriority: 'class',
+            selectorRank: 7,
+            tagName: 'div',
+            textExcerpt: 'Status',
+          },
+        }),
+      },
+      {
+        eventId: 'ev-select-status',
+        eventType: 'custom-select',
+        timestamp: 1_700_000_000_400,
+        pageUrl,
+        traceId: 'trace-status',
+        nodeId: 'node-1',
+        payload: makePayload({
+          normalizedUrl: pageUrl,
+          controlFamily: 'combobox',
+          fingerprint: {
+            selector: '[role="option"]',
+            selectorPriority: 'attribute',
+            selectorRank: 3,
+            tagName: 'div',
+            textExcerpt: 'Enabled',
+          },
+          triggerFingerprint: {
+            selector: '.status-trigger',
+            selectorPriority: 'class',
+            selectorRank: 7,
+            tagName: 'div',
+            textExcerpt: 'Status',
+          },
+          selection: {
+            label: 'Enabled',
+            value: 'Enabled',
+            index: 1,
+          },
+          meta: {
+            triggerSelector: '.status-trigger',
+          },
+        }),
+      },
+      {
+        eventId: 'ev-open-menu',
+        eventType: 'custom-control-open',
+        timestamp: 1_700_000_000_500,
+        pageUrl: menuUrl,
+        traceId: 'trace-menu',
+        nodeId: 'node-2',
+        payload: makePayload({
+          normalizedUrl: menuUrl,
+          controlFamily: 'menu',
+          fingerprint: {
+            selector: '.menu-trigger',
+            selectorPriority: 'class',
+            selectorRank: 7,
+            tagName: 'button',
+            textExcerpt: 'Profile',
+          },
+        }),
+      },
+      {
+        eventId: 'ev-select-menu',
+        eventType: 'custom-menu-select',
+        timestamp: 1_700_000_000_600,
+        pageUrl: menuUrl,
+        traceId: 'trace-menu',
+        nodeId: 'node-2',
+        payload: makePayload({
+          normalizedUrl: menuUrl,
+          controlFamily: 'menu',
+          fingerprint: {
+            selector: '[role="menuitem"]',
+            selectorPriority: 'attribute',
+            selectorRank: 3,
+            tagName: 'a',
+            textExcerpt: 'Logout',
+          },
+          triggerFingerprint: {
+            selector: '.menu-trigger',
+            selectorPriority: 'class',
+            selectorRank: 7,
+            tagName: 'button',
+            textExcerpt: 'Profile',
+          },
+          selection: {
+            label: 'Logout',
+            value: 'Logout',
+            index: 2,
+          },
+          meta: {
+            triggerSelector: '.menu-trigger',
+          },
+        }),
+      },
+    ], { preserveCompoundOpenSteps: true });
+
+    expect(session.steps.map(step => step.action)).toEqual([
+      'custom-control-open',
+      'custom-select',
+      'custom-control-open',
+      'custom-select',
+      'custom-control-open',
+      'custom-menu-select',
+    ]);
+    expect(session.steps.map(step => step.eventId)).toEqual([
+      'ev-open-role',
+      'ev-select-role',
+      'ev-open-status',
+      'ev-select-status',
+      'ev-open-menu',
+      'ev-select-menu',
+    ]);
   });
 });
 

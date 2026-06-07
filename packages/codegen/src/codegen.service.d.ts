@@ -40,7 +40,9 @@ export declare function getSourceNodeId(event: Pick<{
     toNodeId?: string | null;
 }, 'fromNodeId' | 'toNodeId'> | null | undefined): string | null;
 export declare function normalizeSelectorPriority(raw: string | undefined): SelectorPriority;
-export declare function suppressPreNavSetupClicks(steps: CodegenStep[]): CodegenStep[];
+export declare function suppressPreNavSetupClicks(steps: CodegenStep[], options?: {
+    preserveCompoundOpenSteps?: boolean;
+}): CodegenStep[];
 /**
  * Collapses redundant focus-click steps when the next step is an input on the
  * same element in the same page context.
@@ -66,7 +68,9 @@ export declare class CodegenService {
      * Builds the full Semantic Timeline for a session.
      * This is what gets fed to the AI â€” no raw HTML, no snapshots.
      */
-    buildSession(sessionId: string): CodegenSession;
+    buildSession(sessionId: string, buildOptions?: {
+        preserveCompoundOpenSteps?: boolean;
+    }): CodegenSession;
     close(): void;
     loadSnapshots(session: CodegenSession, options?: ResolverConfig): Promise<SnapshotCache>;
     /**
