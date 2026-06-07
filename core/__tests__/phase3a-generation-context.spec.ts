@@ -120,4 +120,91 @@ describe('GenerationContextV1 Schema Tests', () => {
     };
     expect(() => GenerationContextSchemaV1.parse(context)).toThrow();
   });
+
+  it('ignoredSteps defaults to empty array when omitted', () => {
+    const context = {
+      schemaVersion: 'air:generation-context:v1',
+      sessionId: 'sess-123',
+      url: 'https://example.com',
+      recordedAt: 1620000000000,
+      steps: [],
+    };
+    const parsed = GenerationContextSchemaV1.parse(context);
+    expect(parsed.ignoredSteps).toBeDefined();
+    expect(Array.isArray(parsed.ignoredSteps)).toBe(true);
+    expect(parsed.ignoredSteps).toHaveLength(0);
+  });
+
+  it('ignoredSteps with valid ignoredReason parses correctly', () => {
+    const context = {
+      schemaVersion: 'air:generation-context:v1',
+      sessionId: 'sess-123',
+      url: 'https://example.com',
+      recordedAt: 1620000000000,
+      steps: [],
+      ignoredSteps: [{
+        stepIndex: 1,
+        action: 'click',
+        intent: 'click_container',
+        locatorStatus: 'unresolved',
+        ignoredReason: 'broad_no_change_container_click',
+        ignoredExplanation: 'Broad container click with no_change outcome.',
+      }],
+    };
+    const parsed = GenerationContextSchemaV1.parse(context);
+    expect(parsed.ignoredSteps).toHaveLength(1);
+    expect(parsed.ignoredSteps[0].ignoredReason).toBe('broad_no_change_container_click');
+    expect(parsed.ignoredSteps[0].ignoredExplanation).toBe('Broad container click with no_change outcome.');
+  });
+
+  it('ignoredSteps rejects unknown ignoredReason', () => {
+    const context = {
+      schemaVersion: 'air:generation-context:v1',
+      sessionId: 'sess-123',
+      url: 'https://example.com',
+      recordedAt: 1620000000000,
+      steps: [],
+      ignoredSteps: [{
+        stepIndex: 1,
+        action: 'click',
+        intent: 'click_container',
+        locatorStatus: 'unresolved',
+        ignoredReason: 'invented_unknown_reason',
+      }],
+    };
+    expect(() => GenerationContextSchemaV1.parse(context)).toThrow();
+  });
+
+  it('generationGuidance with correct shape parses correctly', () => {
+    const context = {
+      schemaVersion: 'air:generation-context:v1',
+      sessionId: 'sess-123',
+      url: 'https://example.com',
+      recordedAt: 1620000000000,
+      steps: [],
+      generationGuidance: {
+        replaySource: 'steps',
+        ignoredStepsPolicy: 'context_only',
+        rules: ['Generate code from steps only.'],
+      },
+    };
+    const parsed = GenerationContextSchemaV1.parse(context);
+    expect(parsed.generationGuidance).toBeDefined();
+    expect(parsed.generationGuidance?.replaySource).toBe('steps');
+    expect(parsed.generationGuidance?.ignoredStepsPolicy).toBe('context_only');
+    expect(parsed.generationGuidance?.rules).toEqual(['Generate code from steps only.']);
+  });
+
+  it('generationGuidance is optional and absent context parses correctly', () => {
+    const context = {
+      schemaVersion: 'air:generation-context:v1',
+      sessionId: 'sess-123',
+      url: 'https://example.com',
+      recordedAt: 1620000000000,
+      steps: [],
+    };
+    const parsed = GenerationContextSchemaV1.parse(context);
+    expect(parsed.generationGuidance).toBeUndefined();
+  });
 });
+

@@ -456,3 +456,383 @@ describe('Phase 3D: buildGenerationContext', () => {
     });
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GC-1A: ignoredSteps classification tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('GC-1A: ignoredSteps classification', () => {
+  let service: CodegenService;
+
+  beforeEach(() => {
+    service = Object.create(CodegenService.prototype) as CodegenService;
+    (service as any).options = { dbPath: ':memory:' };
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const createMockStep = (overrides: Partial<CodegenStep>): CodegenStep => ({
+    step: 1,
+    action: 'click',
+    selector: 'test',
+    selectorPriority: 'class',
+    confidence: 1,
+    sampleSize: 1,
+    assertions: [],
+    userAssertions: [],
+    ...overrides,
+  } as CodegenStep);
+
+  const createSession = (steps: CodegenStep[]): CodegenSession => ({
+    sessionId: 'session-gc1a',
+    url: 'https://test.com',
+    title: 'GC-1A Test',
+    recordedAt: '2026-01-01T00:00:00Z',
+    stepCount: steps.length,
+    flowConfidence: 1,
+    nodeCount: 1,
+    steps,
+  });
+
+  // ── Test GC-1A-1 ──────────────────────────────────────────────────────────
+
+  it('GC-1A-1: broad no_change container click moves to ignoredSteps', () => {
+    const mockSession = createSession([
+      createMockStep({
+        step: 1,
+        eventId: 'evt-container',
+        action: 'click',
+        intent: 'click_container',
+        selector: 'div.background-container',
+        outcomeType: 'no_change',
+        assertions: [],
+      }),
+    ]);
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-gc1a');
+
+    expect(context.steps).toHaveLength(0);
+    expect(context.ignoredSteps).toHaveLength(1);
+    expect(context.ignoredSteps[0].ignoredReason).toBe('broad_no_change_container_click');
+    expect(context.ignoredSteps[0].stepIndex).toBe(1);
+    expect(context.ignoredSteps[0].ignoredExplanation).toBeDefined();
+    expect(context.ignoredSteps[0].ignoredExplanation).toContain('background-container');
+  });
+
+  // ── Test GC-1A-2 ──────────────────────────────────────────────────────────
+
+  it('GC-1A-2: concrete no_change button click stays in steps', () => {
+    const mockSession = createSession([
+      createMockStep({
+        step: 1,
+        eventId: 'evt-btn',
+        action: 'click',
+        intent: 'click_button',
+        selector: 'button.submit-btn',
+        outcomeType: 'no_change',
+        assertions: [],
+      }),
+    ]);
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-gc1a');
+
+    expect(context.steps).toHaveLength(1);
+    expect(context.ignoredSteps).toHaveLength(0);
+    expect(context.steps[0].stepIndex).toBe(1);
+  });
+
+  // ── Test GC-1A-3 ──────────────────────────────────────────────────────────
+
+  it('GC-1A-3: custom-control-open always stays in steps regardless of selector', () => {
+    const mockSession = createSession([
+      createMockStep({
+        step: 1,
+        eventId: 'evt-cco',
+        action: 'custom-control-open',
+        intent: 'open_dropdown',
+        selector: 'div.wrapper-container',
+        outcomeType: 'no_change',
+        assertions: [],
+      }),
+    ]);
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-gc1a');
+
+    expect(context.steps).toHaveLength(1);
+    expect(context.ignoredSteps).toHaveLength(0);
+    expect(context.steps[0].action).toBe('custom-control-open');
+  });
+
+  // ── Test GC-1A-4 ──────────────────────────────────────────────────────────
+
+  it('GC-1A-4: broad click WITH assertions stays in steps (assertion safety guard)', () => {
+    const mockSession = createSession([
+      createMockStep({
+        step: 1,
+        eventId: 'evt-asserted-container',
+        action: 'click',
+        intent: 'click_background_with_assertion',
+        selector: 'div.main-background',
+        outcomeType: 'no_change',
+        assertions: [
+          {
+            type: 'element_visible',
+            selector: '.modal',
+            source: 'anchor',
+            confidence: 0.9,
+          } as any,
+        ],
+      }),
+    ]);
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-gc1a');
+
+    // Despite broad selector, must stay in steps because it has assertions
+    expect(context.steps).toHaveLength(1);
+    expect(context.ignoredSteps).toHaveLength(0);
+  });
+
+  // ── Test GC-1A-5 ──────────────────────────────────────────────────────────
+
+  it('GC-1A-5: input action never moves to ignoredSteps', () => {
+    const mockSession = createSession([
+      createMockStep({
+        step: 1,
+        eventId: 'evt-input',
+        action: 'input',
+        intent: 'type_text',
+        selector: 'div.content-wrapper input',
+        outcomeType: 'no_change',
+        assertions: [],
+      }),
+    ]);
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-gc1a');
+
+    expect(context.steps).toHaveLength(1);
+    expect(context.ignoredSteps).toHaveLength(0);
+    expect(context.steps[0].action).toBe('input');
+  });
+
+  // ── Test GC-1A-6 ──────────────────────────────────────────────────────────
+
+  it('GC-1A-6: navigation/state_refresh click stays in steps even with broad selector', () => {
+    const mockSession = createSession([
+      createMockStep({
+        step: 1,
+        eventId: 'evt-nav',
+        action: 'click',
+        intent: 'navigate_section',
+        selector: 'div.main-content',
+        outcomeType: 'navigation',
+        assertions: [],
+      }),
+    ]);
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-gc1a');
+
+    expect(context.steps).toHaveLength(1);
+    expect(context.ignoredSteps).toHaveLength(0);
+  });
+
+  // ── Test GC-1A-7 ──────────────────────────────────────────────────────────
+
+  it('GC-1A-7: ID-based selector click stays in steps even when outcomeType is no_change', () => {
+    const mockSession = createSession([
+      createMockStep({
+        step: 1,
+        eventId: 'evt-id',
+        action: 'click',
+        intent: 'click_element',
+        selector: '#main-container',
+        outcomeType: 'no_change',
+        assertions: [],
+      }),
+    ]);
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-gc1a');
+
+    // ID selectors are concrete — must not be classified as noise
+    expect(context.steps).toHaveLength(1);
+    expect(context.ignoredSteps).toHaveLength(0);
+  });
+
+  // ── Test GC-1A-8 ──────────────────────────────────────────────────────────
+
+  it('GC-1A-8: ignoredSteps survives GenerationContext schema parse', () => {
+    const mockSession = createSession([
+      createMockStep({
+        step: 1,
+        eventId: 'evt-noise',
+        action: 'click',
+        intent: 'click_background',
+        selector: 'div.page-wrapper',
+        outcomeType: 'no_change',
+        assertions: [],
+      }),
+      createMockStep({
+        step: 2,
+        eventId: 'evt-real',
+        action: 'click',
+        intent: 'click_login',
+        selector: '#login-button',
+        outcomeType: 'navigation',
+        assertions: [],
+      }),
+    ]);
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-gc1a');
+
+    // Validate the shape is schema-compliant (parse would throw if not)
+    expect(context.schemaVersion).toBe('air:generation-context:v1');
+    expect(context.steps).toHaveLength(1);
+    expect(context.steps[0].stepIndex).toBe(2);
+    expect(context.ignoredSteps).toHaveLength(1);
+    expect(context.ignoredSteps[0].stepIndex).toBe(1);
+    expect(context.ignoredSteps[0].ignoredReason).toBe('broad_no_change_container_click');
+  });
+
+  // ── Test GC-1A-9 ──────────────────────────────────────────────────────────
+
+  it('GC-1A-9: generationGuidance is present with correct shape', () => {
+    const mockSession = createSession([]);
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-gc1a');
+
+    expect(context.generationGuidance).toBeDefined();
+    expect(context.generationGuidance?.replaySource).toBe('steps');
+    expect(context.generationGuidance?.ignoredStepsPolicy).toBe('context_only');
+    expect(Array.isArray(context.generationGuidance?.rules)).toBe(true);
+    expect(context.generationGuidance?.rules.length).toBeGreaterThan(0);
+    // Key rules must be present
+    expect(context.generationGuidance?.rules.some(r => r.includes('ignoredSteps'))).toBe(true);
+    expect(context.generationGuidance?.rules.some(r => r.includes('custom-control-open'))).toBe(true);
+  });
+
+  // ── Test GC-1A-10 ─────────────────────────────────────────────────────────
+
+  it('GC-1A-10: mixed session splits correctly — concrete in steps, container in ignoredSteps', () => {
+    const mockSession = createSession([
+      createMockStep({
+        step: 1,
+        eventId: 'evt-login-fill',
+        action: 'input',
+        intent: 'type_username',
+        selector: 'input[name="username"]',
+        outcomeType: 'no_change',
+        assertions: [],
+      }),
+      createMockStep({
+        step: 2,
+        eventId: 'evt-bg-click',
+        action: 'click',
+        intent: 'dismiss_overlay',
+        selector: 'div.overlay-backdrop',
+        outcomeType: 'no_change',
+        assertions: [],
+      }),
+      createMockStep({
+        step: 3,
+        eventId: 'evt-submit',
+        action: 'click',
+        intent: 'click_submit',
+        selector: 'button[type="submit"]',
+        outcomeType: 'navigation',
+        assertions: [],
+      }),
+    ]);
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-gc1a');
+
+    expect(context.steps).toHaveLength(2);
+    expect(context.steps.map(s => s.stepIndex)).toEqual([1, 3]);
+    expect(context.ignoredSteps).toHaveLength(1);
+    expect(context.ignoredSteps[0].stepIndex).toBe(2);
+    expect(context.ignoredSteps[0].ignoredReason).toBe('broad_no_change_container_click');
+  });
+
+  // ── Test GC-1A-11 ─────────────────────────────────────────────────────────
+
+  it('GC-1A-11: scoped selector (container descendant) stays in steps', () => {
+    // A selector like "div.container button" targets a button INSIDE a container
+    // This must NOT be classified as a broad container click
+    const mockSession = createSession([
+      createMockStep({
+        step: 1,
+        eventId: 'evt-scoped',
+        action: 'click',
+        intent: 'click_button_in_container',
+        selector: 'div.container button.submit',
+        outcomeType: 'no_change',
+        assertions: [],
+      }),
+    ]);
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-gc1a');
+
+    // Scoped selector has a descendant combinator — must stay in steps
+    expect(context.steps).toHaveLength(1);
+    expect(context.ignoredSteps).toHaveLength(0);
+  });
+
+  // ── Test GC-1A-12 ─────────────────────────────────────────────────────────
+
+  it('GC-1A-12: ignoredSteps default is empty array when no noise steps exist', () => {
+    const mockSession = createSession([
+      createMockStep({
+        step: 1,
+        eventId: 'evt-clean',
+        action: 'click',
+        intent: 'click_button',
+        selector: 'button#login',
+        outcomeType: 'navigation',
+        assertions: [],
+      }),
+    ]);
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-gc1a');
+
+    expect(context.ignoredSteps).toBeDefined();
+    expect(Array.isArray(context.ignoredSteps)).toBe(true);
+    expect(context.ignoredSteps).toHaveLength(0);
+  });
+});
+

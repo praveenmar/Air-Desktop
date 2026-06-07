@@ -75,6 +75,7 @@ export const getSessionGenerationContextTool: AirMcpToolHandler = {
       const unresolvedSteps = generationContext.steps.filter(s => s.locatorStatus === 'unresolved').length;
       const notApplicableSteps = generationContext.steps.filter(s => s.locatorStatus === 'not_applicable').length;
       const assertionCount = generationContext.steps.reduce((sum, step) => sum + (step.assertions?.length || 0), 0);
+      const ignoredStepsCount = generationContext.ignoredSteps?.length ?? 0;
 
       const response = {
         schemaVersion: 'air:mcp-generation-context-response:v1' as const,
@@ -94,10 +95,25 @@ export const getSessionGenerationContextTool: AirMcpToolHandler = {
           unresolvedSteps,
           notApplicableSteps,
           assertionCount,
+          ignoredStepsCount,
         },
 
         steps,
+
+        /**
+         * Recorded steps not recommended for replay.
+         * The LLM must NOT generate code from these unless explicitly requested.
+         * Use for context, diagnostics, and fallback explanation only.
+         */
+        ignoredSteps: generationContext.ignoredSteps ?? [],
+
+        /**
+         * Typed generation rules for the IDE LLM.
+         * Follow these rules in addition to any user-provided instructions.
+         */
+        generationGuidance: generationContext.generationGuidance,
       };
+
 
       const wrapped = wrapWithPrivacy(response);
 

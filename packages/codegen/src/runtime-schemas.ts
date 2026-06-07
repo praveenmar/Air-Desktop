@@ -74,12 +74,62 @@ export const GenerationStepSchemaV1 = z.object({
 
 export type GenerationStepV1 = z.infer<typeof GenerationStepSchemaV1>;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// IGNORED STEPS — mirror of core/types/generation.ts
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Reason codes for why a recorded step was moved to ignoredSteps.
+ * Must stay in sync with core/types/generation.ts IgnoredStepReasonSchemaV1.
+ */
+export const IgnoredStepReasonSchemaV1 = z.enum([
+  'broad_no_change_container_click',
+  'duplicate_lower_quality_action',
+  'non_replay_background_click',
+  'unknown_low_value_step',
+]);
+
+export type IgnoredStepReasonV1 = z.infer<typeof IgnoredStepReasonSchemaV1>;
+
+/**
+ * IgnoredGenerationStepV1 — extends GenerationStepSchemaV1 with an ignore reason.
+ * Must stay in sync with core/types/generation.ts IgnoredGenerationStepSchemaV1.
+ */
+export const IgnoredGenerationStepSchemaV1 = GenerationStepSchemaV1.extend({
+  ignoredReason: IgnoredStepReasonSchemaV1,
+  ignoredExplanation: z.string().optional(),
+});
+
+export type IgnoredGenerationStepV1 = z.infer<typeof IgnoredGenerationStepSchemaV1>;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GENERATION GUIDANCE — mirror of core/types/generation.ts
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GenerationGuidanceV1 — typed rules for the IDE LLM code generator.
+ * Must stay in sync with core/types/generation.ts GenerationGuidanceSchemaV1.
+ */
+export const GenerationGuidanceSchemaV1 = z.object({
+  replaySource: z.literal('steps'),
+  ignoredStepsPolicy: z.literal('context_only'),
+  rules: z.array(z.string()),
+});
+
+export type GenerationGuidanceV1 = z.infer<typeof GenerationGuidanceSchemaV1>;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GENERATION CONTEXT
+// ─────────────────────────────────────────────────────────────────────────────
+
 export const GenerationContextSchemaV1 = z.object({
   schemaVersion: z.literal('air:generation-context:v1'),
   sessionId: z.string(),
   url: z.string(),
   recordedAt: z.number(),
   steps: z.array(GenerationStepSchemaV1),
+  ignoredSteps: z.array(IgnoredGenerationStepSchemaV1).default([]),
+  generationGuidance: GenerationGuidanceSchemaV1.optional(),
   metadata: z.object({
     generatedAt: z.number().optional(),
     source: z.literal('air-db').optional(),
