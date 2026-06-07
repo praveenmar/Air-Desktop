@@ -39,7 +39,7 @@ export function deriveGenerationContext(input: {
     }
   }
 
-  const rawReplaySteps: GenerationStepV1[] = [];
+  const replaySteps: GenerationStepV1[] = [];
   const ignoredSteps: IgnoredGenerationStepV1[] = [];
 
   session.steps.forEach((step, index) => {
@@ -124,56 +124,9 @@ export function deriveGenerationContext(input: {
       };
       ignoredSteps.push(ignoredStep);
     } else {
-      rawReplaySteps.push(cleanStep);
+      replaySteps.push(cleanStep);
     }
   });
-
-  // GC-2: Duplicate Action Cleanup
-  const replaySteps: GenerationStepV1[] = [];
-  for (let i = 0; i < rawReplaySteps.length; i++) {
-    const current = rawReplaySteps[i];
-    const next = rawReplaySteps[i + 1];
-
-    if (
-      next &&
-      current.action === 'click' &&
-      next.action === 'click' &&
-      current.intent &&
-      current.intent === next.intent
-    ) {
-      if (
-        current.locatorStatus === 'unresolved' &&
-        next.locatorStatus === 'resolved' &&
-        current.assertions.length === 0
-      ) {
-        ignoredSteps.push({
-          ...current,
-          ignoredReason: 'duplicate_lower_quality_action',
-          ignoredExplanation: `Duplicate unresolved action superseded by resolved step ${next.stepIndex}.`,
-        });
-        continue;
-      }
-
-      if (
-        next.locatorStatus === 'unresolved' &&
-        current.locatorStatus === 'resolved' &&
-        next.assertions.length === 0
-      ) {
-        replaySteps.push(current);
-        ignoredSteps.push({
-          ...next,
-          ignoredReason: 'duplicate_lower_quality_action',
-          ignoredExplanation: `Duplicate unresolved action superseded by resolved step ${current.stepIndex}.`,
-        });
-        i++; // skip next
-        continue;
-      }
-    }
-
-    replaySteps.push(current);
-  }
-
-
   const context: GenerationContextV1 = {
     schemaVersion: 'air:generation-context:v1',
     sessionId: session.sessionId,
