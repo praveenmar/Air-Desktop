@@ -279,9 +279,9 @@ function isBroadContainerSelector(selector: string): boolean {
 
   if (rawTokens.length === 0) return false;
 
-  // Expand hyphenated tokens into their sub-components
+  // Expand hyphenated and underscored tokens into their sub-components
   // e.g. 'background-container' → ['background', 'container']
-  const tokens = rawTokens.flatMap((t) => t.split('-'));
+  const tokens = rawTokens.flatMap((t) => t.split(/[-_]/));
 
   // Broad layout container tokens — app-agnostic
   // These are conservative: only add tokens that reliably indicate a

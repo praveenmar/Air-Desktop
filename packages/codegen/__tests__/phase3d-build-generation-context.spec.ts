@@ -834,5 +834,31 @@ describe('GC-1A: ignoredSteps classification', () => {
     expect(Array.isArray(context.ignoredSteps)).toBe(true);
     expect(context.ignoredSteps).toHaveLength(0);
   });
+
+  // ── Test GC-1A-13 ─────────────────────────────────────────────────────────
+
+  it('GC-1A-13: underscore-separated token is split correctly — broad container click ignored', () => {
+    const mockSession = createSession([
+      createMockStep({
+        step: 1,
+        eventId: 'evt-underscore',
+        action: 'click',
+        intent: 'click_header',
+        selector: 'div.header_secondary_container',
+        outcomeType: 'no_change',
+        assertions: [],
+      }),
+    ]);
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-gc1a');
+
+    expect(context.steps).toHaveLength(0);
+    expect(context.ignoredSteps).toHaveLength(1);
+    expect(context.ignoredSteps[0].stepIndex).toBe(1);
+    expect(context.ignoredSteps[0].ignoredReason).toBe('broad_no_change_container_click');
+  });
 });
 
