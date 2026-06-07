@@ -267,4 +267,192 @@ describe('Phase 3D: buildGenerationContext', () => {
     expect(service.buildSession).toHaveBeenCalledWith('session-1', { preserveCompoundOpenSteps: true });
     expect(context.steps.map(step => step.action)).toEqual(['custom-control-open', 'custom-menu-select']);
   });
+
+  it('Test 7: drops conflicting outcome URL assertion when next step location clearly disagrees', () => {
+    const mockSession: CodegenSession = {
+      sessionId: 'session-1',
+      url: 'https://test.com',
+      title: 'Test',
+      recordedAt: '2026-01-01T00:00:00Z',
+      stepCount: 2,
+      flowConfidence: 1,
+      nodeCount: 1,
+      steps: [
+        createMockStep({
+          step: 1,
+          eventId: 'event-1',
+          intent: 'step-1',
+          assertions: [
+            {
+              type: 'url',
+              value: 'https://test.com/item?id=3',
+              source: 'outcome',
+              confidence: 1,
+            } as any,
+          ],
+          pageUrl: 'https://test.com/list',
+          normalizedUrl: 'https://test.com/list',
+        }),
+        createMockStep({
+          step: 2,
+          eventId: 'event-2',
+          intent: 'step-2',
+          pageUrl: 'https://test.com/item?id=5',
+          normalizedUrl: 'https://test.com/item?id=5',
+        }),
+      ],
+    };
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-1');
+
+    expect(context.steps[0].assertions).toEqual([]);
+  });
+
+  it('Test 8: keeps matching outcome URL assertion when next step location agrees', () => {
+    const mockSession: CodegenSession = {
+      sessionId: 'session-1',
+      url: 'https://test.com',
+      title: 'Test',
+      recordedAt: '2026-01-01T00:00:00Z',
+      stepCount: 2,
+      flowConfidence: 1,
+      nodeCount: 1,
+      steps: [
+        createMockStep({
+          step: 1,
+          eventId: 'event-1',
+          intent: 'step-1',
+          assertions: [
+            {
+              type: 'url',
+              value: 'https://test.com/cart',
+              source: 'outcome',
+              confidence: 1,
+            } as any,
+          ],
+          pageUrl: 'https://test.com/list',
+          normalizedUrl: 'https://test.com/list',
+        }),
+        createMockStep({
+          step: 2,
+          eventId: 'event-2',
+          intent: 'step-2',
+          pageUrl: 'https://test.com/cart',
+          normalizedUrl: 'https://test.com/cart',
+        }),
+      ],
+    };
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-1');
+
+    expect(context.steps[0].assertions).toHaveLength(1);
+    expect(context.steps[0].assertions[0]).toMatchObject({
+      type: 'url',
+      value: 'https://test.com/cart',
+      source: 'outcome',
+    });
+  });
+
+  it('Test 9: keeps final-step URL assertion when no next step exists', () => {
+    const mockSession: CodegenSession = {
+      sessionId: 'session-1',
+      url: 'https://test.com',
+      title: 'Test',
+      recordedAt: '2026-01-01T00:00:00Z',
+      stepCount: 1,
+      flowConfidence: 1,
+      nodeCount: 1,
+      steps: [
+        createMockStep({
+          step: 1,
+          eventId: 'event-1',
+          intent: 'step-1',
+          assertions: [
+            {
+              type: 'url',
+              value: 'https://test.com/logout',
+              source: 'outcome',
+              confidence: 1,
+            } as any,
+          ],
+          pageUrl: 'https://test.com/home',
+          normalizedUrl: 'https://test.com/home',
+        }),
+      ],
+    };
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-1');
+
+    expect(context.steps[0].assertions).toHaveLength(1);
+    expect(context.steps[0].assertions[0]).toMatchObject({
+      type: 'url',
+      value: 'https://test.com/logout',
+      source: 'outcome',
+    });
+  });
+
+  it('Test 10: does not affect non-url assertions', () => {
+    const mockSession: CodegenSession = {
+      sessionId: 'session-1',
+      url: 'https://test.com',
+      title: 'Test',
+      recordedAt: '2026-01-01T00:00:00Z',
+      stepCount: 2,
+      flowConfidence: 1,
+      nodeCount: 1,
+      steps: [
+        createMockStep({
+          step: 1,
+          eventId: 'event-1',
+          intent: 'step-1',
+          assertions: [
+            {
+              type: 'element_visible',
+              value: 'Checkout',
+              selector: '#checkout',
+              source: 'anchor',
+              confidence: 0.9,
+            } as any,
+            {
+              type: 'url',
+              value: 'https://test.com/item?id=3',
+              source: 'outcome',
+              confidence: 1,
+            } as any,
+          ],
+          pageUrl: 'https://test.com/list',
+          normalizedUrl: 'https://test.com/list',
+        }),
+        createMockStep({
+          step: 2,
+          eventId: 'event-2',
+          intent: 'step-2',
+          pageUrl: 'https://test.com/item?id=5',
+          normalizedUrl: 'https://test.com/item?id=5',
+        }),
+      ],
+    };
+
+    vi.spyOn(service, 'buildSession').mockReturnValue(mockSession);
+    vi.spyOn(service, 'getGenerationEventMetadataByIds').mockReturnValue(new Map());
+
+    const context = service.buildGenerationContext('session-1');
+
+    expect(context.steps[0].assertions).toHaveLength(1);
+    expect(context.steps[0].assertions[0]).toMatchObject({
+      type: 'element_visible',
+      value: 'Checkout',
+      selector: '#checkout',
+      source: 'anchor',
+    });
+  });
 });

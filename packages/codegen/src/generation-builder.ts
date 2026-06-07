@@ -32,9 +32,10 @@ export function deriveGenerationContext(input: {
     }
   }
 
-  const steps: GenerationStepV1[] = session.steps.map((step) => {
+  const steps: GenerationStepV1[] = session.steps.map((step, index) => {
     const metadata = step.eventId ? eventsById.get(step.eventId) : undefined;
     const selectorResolution = metadata?.selectorResolution;
+    const nextStep = session.steps[index + 1];
 
     const isTargetNeeded = actionNeedsTarget(step.action, step);
 
@@ -78,7 +79,9 @@ export function deriveGenerationContext(input: {
       }
     }
 
-    const assertions: GenerationAssertion[] = (step.assertions || []).map(mapAssertion);
+    const assertions: GenerationAssertion[] = (step.assertions || [])
+      .filter((assertion) => !shouldDropConflictingOutcomeUrlAssertion(assertion, nextStep))
+      .map(mapAssertion);
 
     const mappedStep: GenerationStepV1 = {
       stepIndex: step.step,
@@ -177,4 +180,72 @@ function mapAssertion(assertion: CodegenAssertion): GenerationAssertion {
   };
 
   return stripUndefined(mapped as unknown as Record<string, unknown>) as GenerationAssertion;
+}
+
+function shouldDropConflictingOutcomeUrlAssertion(
+  assertion: CodegenAssertion,
+  nextStep?: Pick<CodegenStep, 'pageUrl' | 'normalizedUrl'>,
+): boolean {
+  if (assertion.type !== 'url') return false;
+  if (assertion.source !== 'outcome') return false;
+  if (!nextStep) return false;
+
+  const nextPageUrl = typeof nextStep.pageUrl === 'string' ? nextStep.pageUrl : '';
+  const nextNormalizedUrl = typeof nextStep.normalizedUrl === 'string' ? nextStep.normalizedUrl : '';
+  if (!nextPageUrl && !nextNormalizedUrl) return false;
+
+  return urlsClearlyConflict(assertion.value, nextPageUrl, nextNormalizedUrl);
+}
+
+function urlsClearlyConflict(
+  assertionUrl: string,
+  nextPageUrl?: string,
+  nextNormalizedUrl?: string,
+): boolean {
+  const assertionTrimmed = assertionUrl.trim();
+  const nextPageTrimmed = (nextPageUrl ?? '').trim();
+  const nextNormalizedTrimmed = (nextNormalizedUrl ?? '').trim();
+
+  if (!assertionTrimmed || (!nextPageTrimmed && !nextNormalizedTrimmed)) {
+    return false;
+  }
+
+  if (assertionTrimmed === nextPageTrimmed || assertionTrimmed === nextNormalizedTrimmed) {
+    return false;
+  }
+
+  const parsedAssertion = tryParseUrl(assertionTrimmed);
+  const parsedNextPage = tryParseUrl(nextPageTrimmed);
+  const parsedNextNormalized = tryParseUrl(nextNormalizedTrimmed);
+
+  if (parsedAssertion && parsedNextPage && urlsMatch(parsedAssertion, parsedNextPage)) {
+    return false;
+  }
+
+  if (parsedAssertion && parsedNextNormalized && urlsMatch(parsedAssertion, parsedNextNormalized)) {
+    return false;
+  }
+
+  if (parsedAssertion && (parsedNextPage || parsedNextNormalized)) {
+    const comparableNext = parsedNextPage ?? parsedNextNormalized;
+    return !urlsMatch(parsedAssertion, comparableNext);
+  }
+
+  return false;
+}
+
+function urlsMatch(left: URL, right: URL): boolean {
+  if (left.href === right.href) return true;
+  if (left.pathname === right.pathname && left.search === right.search) return true;
+  return false;
+}
+
+function tryParseUrl(value: string): URL | null {
+  if (!value) return null;
+
+  try {
+    return new URL(value);
+  } catch {
+    return null;
+  }
 }
