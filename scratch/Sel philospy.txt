@@ -8,29 +8,29 @@ For one target element, there are many possible valid solution paths:
 - `name`
 - `class`
 - `role/name`
-- `label → control`
-- `container → child`
-- `option panel → option`
-- `table row → action`
+- `label -> control`
+- `container -> child`
+- `option panel -> option`
+- `table row -> action`
 - `XPath`
 - `nth/index`
 - `scoped text`
 
-Just like math, many approaches can reach the answer. But AIR’s job is not just to find **any** answer. AIR’s job is to find the **optimal path**.
+Just like math, many approaches can reach the answer. But AIR's job is not just to find **any** answer. AIR's job is to find the **optimal path**.
 
 ## 2. AIR should not brute-force first
 
 The process should not be:
 
-> Generate 40 selectors → Count matches → Pick whatever is unique
+> Generate 40 selectors -> Count matches -> Pick whatever is unique
 
 The AIR process should be:
 
-> Understand the control → Build proof → Generate one stable proof-backed selector path → Evaluate uniqueness/stability → Then keep fallbacks if needed
+> Understand the control -> Build proof -> Generate one stable proof-backed selector path -> Evaluate uniqueness/stability -> Then keep fallbacks if needed
 
 So the order is:
 
-> Correct proof first → Optimal selector path second → Fallbacks third → Brute force never first
+> Correct proof first -> Optimal selector path second -> Fallbacks third -> Brute force never first
 
 ## 3. SelectorHub is not something to dismiss
 
@@ -84,7 +84,7 @@ That means AIR must reason about:
 Example: if two dropdowns both produce `div.oxd-select-text`:
 
 - SelectorHub may separate them with `nth(0)`, `nth(1)`, or XPath index.
-- AIR should understand that the common selector is ambiguous, the index selector works but is last‑resort, and a better path may be `label → container → trigger`.
+- AIR should understand that the common selector is ambiguous, the index selector works but is last-resort, and a better path may be `label -> container -> trigger`.
 
 ## 5. A selector is not bad by type alone
 
@@ -99,53 +99,53 @@ A selector is bad only when AIR chooses it **while stronger proof existed**.
 
 The policy is:
 
-- **Preferred:** proof‑backed, semantic, stable, unique
+- **Preferred:** proof-backed, semantic, stable, unique
 - **Fallback:** useful but weaker/partial
-- **Last‑resort:** index, positional, XPath-like, brittle but working
+- **Last-resort:** index, positional, XPath-like, brittle but working
 - **Blocked:** unsafe ambiguity
 
 ## 6. Optimal selector does not mean shortest selector
 
 Shortest is not always best.
 
-This may be short: `.oxd-select-text` – but weak.
+This may be short: `.oxd-select-text` - but weak.
 
-This may be longer: `div.field-row:has-text("User Role") div[aria-haspopup="listbox"]` – but better if it is proof‑backed and unique.
+This may be longer: `div.field-row:has-text("User Role") div[aria-haspopup="listbox"]` - but better if it is proof-backed and unique.
 
 Optimal means:
 
 - unique
 - stable
 - semantic
-- replay‑safe
+- replay-safe
 - not tied to volatile state text
 - not positional unless unavoidable
 - explainable
-- proof‑backed
+- proof-backed
 
 ## 7. The dropdown example became the core lesson
 
 For custom dropdowns:
 
-- `User Role → -- Select --`
-- `Status → -- Select --`
+- `User Role -> -- Select --`
+- `Status -> -- Select --`
 
 The visible trigger text is the same. Also, after selection, the text may change:
 
-- `-- Select -- → Admin`
-- `-- Select -- → Enabled`
+- `-- Select -- -> Admin`
+- `-- Select -- -> Enabled`
 
 So AIR should not prefer selector paths based on selected value text.
 
 The stable idea is:
 
-> field label → field container → trigger
+> field label -> field container -> trigger
 
 not:
 
-> trigger text → selector
+> trigger text -> selector
 
-## 8. AIR should move from candidate generation to proof‑backed path construction
+## 8. AIR should move from candidate generation to proof-backed path construction
 
 The important shift:
 
@@ -154,18 +154,18 @@ The important shift:
 
 For each UI type:
 
-- **bounded field:** `label → container → control`
-- **custom dropdown:** `label → trigger → option panel → option`
-- **table action:** `table → row identity → action`
-- **calendar:** `month/year/header → date grid → day cell`
-- **weak DOM:** `context → structural fallback → index only if unavoidable`
+- **bounded field:** `label -> container -> control`
+- **custom dropdown:** `label -> trigger -> option panel -> option`
+- **table action:** `table -> row identity -> action`
+- **calendar:** `month/year/header -> date grid -> day cell`
+- **weak DOM:** `context -> structural fallback -> index only if unavoidable`
 
 ## 9. SelectorHub gives breadth; AIR gives judgment
 
 This is probably the cleanest summary:
 
 > SelectorHub = selector strategy reference  
-> AIR = proof‑driven selector decision system
+> AIR = proof-driven selector decision system
 
 SelectorHub helps answer:
 
@@ -177,7 +177,7 @@ AIR must answer:
 
 - Which path should we trust?
 - Why is it stable?
-- Why is it preferred/fallback/last‑resort?
+- Why is it preferred/fallback/last-resort?
 - What stronger proof was missing?
 - Will it survive replay?
 
@@ -187,7 +187,7 @@ We should not try to solve every selector case at once.
 
 The process should be:
 
-1. Pick one real‑world failure pattern
+1. Pick one real-world failure pattern
 2. Understand the pattern
 3. Build proof
 4. Generate the optimal selector path
@@ -198,9 +198,9 @@ The process should be:
 This is the mature AIR selector philosophy:
 
 > Solve correctly first.  
-> Optimise the selector path second.  
+> Optimize the selector path second.  
 > Broaden fallback coverage third.  
-> Improve gradually from real‑world evidence.
+> Improve gradually from real-world evidence.
 
 ## Final key principle
 
@@ -213,26 +213,69 @@ This is the mature AIR selector philosophy:
 
 ### A. Optimal includes cost of proof, not just stability
 
-The best selector path is not only the most stable; it’s also the one that requires the **least complex proof** to be confident.
+The best selector path is not only the most stable; it's also the one that requires the **least complex proof** to be confident.
 
 - A `test-id` is stable and its proof is trivial (attribute present, unique).
-- A label‑context path (`label[for] → input`) is stable but requires more DOM traversal and association proof.
-- A bounded‑field path (`.field-row:has-text("Username") input`) is stable but the proof is more expensive.
+- A label-context path (`label[for] -> input`) is stable but requires more DOM traversal and association proof.
+- A bounded-field path (`.field-row:has-text("Username") input`) is stable but the proof is more expensive.
 
-If two paths are equally stable, prefer the one with the **simpler, cheaper proof**. This avoids over‑engineering the selector engine.
+If two paths are equally stable, prefer the one with the **simpler, cheaper proof**. This avoids over-engineering the selector engine.
 
-### B. “Proof‑backed” should be a spectrum, not binary
+### B. "Proof-backed" should be a spectrum, not binary
 
-The existing `preferred` / `fallback` / `last‑resort` tiers are good. But within `preferred`, there are degrees: a `test-id` is stronger proof than a `name` attribute (which could be duplicated across forms).
+The existing `preferred` / `fallback` / `last-resort` tiers are good. But within `preferred`, there are degrees: a `test-id` is stronger proof than a `name` attribute (which could be duplicated across forms).
 
-Therefore, it is useful to attach an internal **confidence score (0–1)** to each proposal, alongside the tier. This helps when comparing two candidates that both fall into the `preferred` bucket.
+Therefore, it is useful to attach an internal **confidence score (0-1)** to each proposal, alongside the tier. This helps when comparing two candidates that both fall into the `preferred` bucket.
 
 ### C. Apply the refinements in implementation
 
-- When constructing a proof‑backed path, compute a **confidence score** based on:
+- When constructing a proof-backed path, compute a **confidence score** based on:
   - Quality of proof (exact attribute match > structural association > heuristic)
   - Uniqueness (`matchCount===1`, `visibleMatchCount===1`)
   - Absence of warning codes
 - Use the confidence score internally to break ties among `preferred` proposals.
-- Keep the user‑facing tier (`preferred`/`fallback`/`last‑resort`) as the primary output, but preserve the confidence score in logs/debug metadata for later analysis.
+- Keep the user-facing tier (`preferred`/`fallback`/`last-resort`) as the primary output, but preserve the confidence score in logs/debug metadata for later analysis.
 
+### D. Multiple selectors are fine after proof
+
+AIR does not need to stop at exactly one selector candidate.
+
+What AIR should avoid is generating many raw selectors before it understands the control.
+
+The healthy order is:
+
+> proof first -> construct the best primary path -> generate a small candidate set -> rank by proof strength, stability, uniqueness, and replay safety
+
+So AIR may still produce a few unique selectors later, but only after:
+
+- the control is understood
+- the proof path is established
+- the primary selector is explainable
+
+This means "multiple selectors" is not the problem.
+The real problem is "candidate-first selection without proof."
+
+### E. Scenario-led validation should happen before broad implementation
+
+Before locking the coding plan for a selector family, AIR should be tested against many real interaction patterns to expose failure modes.
+
+Recommended process:
+
+1. Collect real recordings from different sites and control families
+2. Identify where AIR resolves correctly, falls back weakly, or blocks
+3. Group failures by pattern, not by website
+4. Define the missing proof or missing control-family abstraction
+5. Implement the smallest general fix
+6. Re-test across earlier scenarios to check for regressions
+
+This is especially important for selectors, because many problems only appear when:
+
+- multiple similar controls coexist
+- the UI is transient
+- the popup/panel is detached from the field
+- text is volatile
+- the DOM is framework-heavy but semantically weak
+
+So the right mindset is:
+
+> test broadly to discover the selector failure patterns, then fix the pattern generically
