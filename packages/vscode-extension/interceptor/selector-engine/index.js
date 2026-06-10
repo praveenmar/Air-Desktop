@@ -24,6 +24,9 @@ import { buildSelectorPreferenceShadow, classifySelectorCandidatePreference } fr
 import { dedupeCandidates } from './utils.js';
 import { collectWeakAppShadowCoverage } from './weak-app-shadow.js';
 import { buildSelectorDecision } from './decision-normalization.js';
+import { generateDirectIdentityShadow } from './generators/shadow-identity.js';
+
+export const ENABLE_SHADOW_PROOF_PIPELINE = false;
 
 export { resolveCanonicalCustomControlTarget };
 export { resolveAccessibilityEvidence };
@@ -41,6 +44,8 @@ export { classifySelectorCandidatePreference };
 export { buildSelectorPreferenceShadow };
 export { collectWeakAppShadowCoverage };
 export { buildSelectorDecision };
+export { assembleSelectorProofPacketV0 };
+export { generateDirectIdentityShadow };
 
 function isStructuralFamily(candidate) {
   return candidate?.family === 'tight-container-css' || candidate?.family === 'parent-scoped-css';
@@ -133,6 +138,45 @@ export function collectDirectFamilySelectorCandidates({
   return finalizeCandidates(element, collectDirectFamilyCandidates(element), maxCandidates);
 }
 
+/**
+ * @param {Element} element
+ * @returns {SelectorProofPacketV0|undefined}
+ */
+export function assembleSelectorProofPacketV0(element) {
+  if (!ENABLE_SHADOW_PROOF_PIPELINE || !element) return undefined;
+
+  try {
+    const candidates = [];
+    
+    // --- 1. Bridge/Extract Proof for Class 1 ---
+    const testId = element.getAttribute('data-testid');
+    const id = element.id;
+    const isLikelyDynamic = id ? (/[0-9]{3,}/.test(id) || /react-|vue-/.test(id)) : false;
+
+    // --- 2. Pass Proof to Pure Generators ---
+    if (testId) {
+      const testIdProof = { source: 'interceptor.js', identityType: 'data-testid', value: testId };
+      const candidate = generateDirectIdentityShadow(testIdProof);
+      if (candidate) candidates.push(candidate);
+    }
+
+    if (id) {
+      const idProof = { source: 'interceptor.js', identityType: 'id', value: id, isLikelyDynamic };
+      const candidate = generateDirectIdentityShadow(idProof);
+      if (candidate) candidates.push(candidate);
+    }
+
+    // --- 3. Assemble Packet ---
+    return {
+      candidates
+    };
+  } catch (err) {
+    // Error Boundary: Swallow all shadow errors to protect production interception
+    console.warn("[AIR Shadow Pipeline] Failed to assemble packet", err);
+    return undefined;
+  }
+}
+
 const api = {
   version: SELECTOR_ENGINE_VERSION,
   collectShadowSelectorCandidates,
@@ -154,6 +198,8 @@ const api = {
   buildSelectorPreferenceShadow,
   collectWeakAppShadowCoverage,
   buildSelectorDecision,
+  assembleSelectorProofPacketV0,
+  ENABLE_SHADOW_PROOF_PIPELINE
 };
 
 if (typeof globalThis !== 'undefined') {
