@@ -26,7 +26,7 @@ import { collectWeakAppShadowCoverage } from './weak-app-shadow.js';
 import { buildSelectorDecision } from './decision-normalization.js';
 import { generateDirectIdentityShadow } from './generators/shadow-identity.js';
 
-export const ENABLE_SHADOW_PROOF_PIPELINE = false;
+export const ENABLE_SHADOW_PROOF_PIPELINE = true;
 
 export { resolveCanonicalCustomControlTarget };
 export { resolveAccessibilityEvidence };
@@ -44,8 +44,6 @@ export { classifySelectorCandidatePreference };
 export { buildSelectorPreferenceShadow };
 export { collectWeakAppShadowCoverage };
 export { buildSelectorDecision };
-export { assembleSelectorProofPacketV0 };
-export { generateDirectIdentityShadow };
 
 function isStructuralFamily(candidate) {
   return candidate?.family === 'tight-container-css' || candidate?.family === 'parent-scoped-css';
@@ -139,37 +137,33 @@ export function collectDirectFamilySelectorCandidates({
 }
 
 /**
- * @param {Element} element
+ * @param {CandidateProof[]} proofs
  * @returns {SelectorProofPacketV0|undefined}
  */
-export function assembleSelectorProofPacketV0(element) {
-  if (!ENABLE_SHADOW_PROOF_PIPELINE || !element) return undefined;
+export function assembleSelectorProofPacketV0(proofs = []) {
+  if (!ENABLE_SHADOW_PROOF_PIPELINE) return undefined;
 
   try {
     const candidates = [];
     
-    // --- 1. Bridge/Extract Proof for Class 1 ---
-    const testId = element.getAttribute('data-testid');
-    const id = element.id;
-    const isLikelyDynamic = id ? (/[0-9]{3,}/.test(id) || /react-|vue-/.test(id)) : false;
-
-    // --- 2. Pass Proof to Pure Generators ---
-    if (testId) {
-      const testIdProof = { source: 'interceptor.js', identityType: 'data-testid', value: testId };
-      const candidate = generateDirectIdentityShadow(testIdProof);
-      if (candidate) candidates.push(candidate);
+    // --- Route Proofs to Pure Generators ---
+    for (const proof of proofs) {
+      if (proof.identityType === 'data-testid' || proof.identityType === 'id') {
+        const candidate = generateDirectIdentityShadow(proof);
+        if (candidate) candidates.push(candidate);
+      }
     }
 
-    if (id) {
-      const idProof = { source: 'interceptor.js', identityType: 'id', value: id, isLikelyDynamic };
-      const candidate = generateDirectIdentityShadow(idProof);
-      if (candidate) candidates.push(candidate);
-    }
-
-    // --- 3. Assemble Packet ---
-    return {
+    // --- Assemble Packet with Versioning ---
+    const packet = {
+      version: 0,
       candidates
     };
+
+    // User requested console print that doesn't hide nested objects
+    console.log('[AIR] [selectorpacket]\n' + JSON.stringify(packet, null, 2));
+
+    return packet;
   } catch (err) {
     // Error Boundary: Swallow all shadow errors to protect production interception
     console.warn("[AIR Shadow Pipeline] Failed to assemble packet", err);

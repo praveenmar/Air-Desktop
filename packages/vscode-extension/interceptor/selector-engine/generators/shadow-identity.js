@@ -20,6 +20,8 @@
  * @property {Candidate[]} candidates - Array of fully synthesized/transformed candidates
  */
 
+import { safeCssEscape } from '../utils.js';
+
 /**
  * Class 1: Direct Identity Generator
  * Synthesizes a base Candidate object exclusively from a pure JSON proof.
@@ -36,8 +38,8 @@ export function generateDirectIdentityShadow(proof) {
   return {
     classId: "direct-identity",
     selector: proof.identityType === 'data-testid' 
-      ? `[data-testid="${CSS.escape(proof.value)}"]` 
-      : `[id="${CSS.escape(proof.value)}"]`,
+      ? `[data-testid="${safeCssEscape(proof.value)}"]` 
+      : `[id="${safeCssEscape(proof.value)}"]`,
     engine: "playwright-css",
     appliedModifiers: [],
     proof: proof // Preserve exact lineage

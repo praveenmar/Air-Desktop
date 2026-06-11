@@ -6739,6 +6739,40 @@ class AIRInterceptor {
         selectorCandidates,
         boundedFieldContext,
       );
+
+      // --- SHADOW PROOF PIPELINE INJECTION ---
+      let selectorProofPacketV0 = undefined;
+      try {
+        if (globalThis.__AIR_SELECTOR_ENGINE__?.assembleSelectorProofPacketV0) {
+          const proofs = [];
+          
+          const testId = element.getAttribute ? element.getAttribute('data-testid') : null;
+          if (testId) {
+            proofs.push({
+              source: "interceptor.js",
+              identityType: "data-testid",
+              value: testId,
+              isLikelyDynamic: false
+            });
+          }
+
+          const id = element.id || null;
+          if (id) {
+            proofs.push({
+              source: "interceptor.js",
+              identityType: "id",
+              value: id,
+              isLikelyDynamic: this._isLikelyDynamicId(id)
+            });
+          }
+
+          selectorProofPacketV0 = globalThis.__AIR_SELECTOR_ENGINE__.assembleSelectorProofPacketV0(proofs);
+        }
+      } catch (e) {
+        // Swallow error to protect primary interception
+      }
+      // ---------------------------------------
+
     } catch (error) {
       this.log("SELECTOR_ENGINE_SHADOW_FAILED", {
         eventType: typeof eventContext?.eventType === "string" ? eventContext.eventType : null,
@@ -6816,6 +6850,7 @@ class AIRInterceptor {
       accessibilityEvidence,
       attributesHash,
       _selectorDecision,
+      ...(selectorProofPacketV0 ? { selectorEngine: { selectorProofPacketV0 } } : {})
     };
   }
 
