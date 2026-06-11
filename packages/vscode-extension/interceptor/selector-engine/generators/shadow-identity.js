@@ -21,6 +21,7 @@
  */
 
 import { safeCssEscape } from '../utils.js';
+import { createCandidate, SelectorClassIds, SelectorEngines } from '../contracts/selector-class-contract.js';
 
 /**
  * Class 1: Direct Identity Generator
@@ -35,13 +36,19 @@ export function generateDirectIdentityShadow(proof) {
   // We do not emit ID candidates if the orchestrator marked them as dynamic
   if (proof.identityType === 'id' && proof.isLikelyDynamic) return null;
 
-  return {
-    classId: "direct-identity",
-    selector: proof.identityType === 'data-testid' 
-      ? `[data-testid="${safeCssEscape(proof.value)}"]` 
-      : `[id="${safeCssEscape(proof.value)}"]`,
-    engine: "playwright-css",
-    appliedModifiers: [],
-    proof: proof // Preserve exact lineage
-  };
+  const isTestId = proof.identityType === 'data-testid';
+  const selector = isTestId
+    ? `[data-testid="${safeCssEscape(proof.value)}"]`
+    : `[id="${safeCssEscape(proof.value)}"]`;
+
+  return createCandidate({
+    classId: SelectorClassIds.DIRECT_IDENTITY,
+    selector,
+    engine: SelectorEngines.PLAYWRIGHT_CSS,
+    intent: isTestId ? {
+      method: 'getByTestId',
+      args: [proof.value]
+    } : null,
+    proof: proof
+  });
 }

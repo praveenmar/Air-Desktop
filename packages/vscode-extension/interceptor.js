@@ -32,6 +32,8 @@ const EventType = {
 // ─────────────────────────────────────────────────────────────────────────────
 const _AIR_INTERNAL = Symbol('air.internal');
 
+const ENABLE_SHADOW_PROOF_PIPELINE = true;
+
 class QuiescenceEngine {
   constructor(config = {}) {
     this.config = {
@@ -6731,6 +6733,7 @@ class AIRInterceptor {
     }
 
     let _selectorDecision = null;
+    let selectorProofPacketV0 = undefined;
     try {
       _selectorDecision = this._runSelectorEngineShadowComparison(
         element,
@@ -6741,9 +6744,8 @@ class AIRInterceptor {
       );
 
       // --- SHADOW PROOF PIPELINE INJECTION ---
-      let selectorProofPacketV0 = undefined;
       try {
-        if (globalThis.__AIR_SELECTOR_ENGINE__?.assembleSelectorProofPacketV0) {
+        if (ENABLE_SHADOW_PROOF_PIPELINE && globalThis.__AIR_SELECTOR_ENGINE__?.assembleSelectorProofPacketV0) {
           const proofs = [];
           
           const testId = element.getAttribute ? element.getAttribute('data-testid') : null;
@@ -6763,6 +6765,21 @@ class AIRInterceptor {
               identityType: "id",
               value: id,
               isLikelyDynamic: this._isLikelyDynamicId(id)
+            });
+          }
+
+          const accessibility = _selectorDecision?.accessibility;
+          if (accessibility && accessibility.role && accessibility.accessibleName) {
+            proofs.push({
+              source: "interceptor.js",
+              proofType: "accessibility",
+              role: accessibility.role,
+              roleSource: accessibility.roleSource,
+              accessibleName: accessibility.accessibleName,
+              accessibleNameSource: accessibility.accessibleNameSource,
+              labelledByIds: accessibility.labelledByIds,
+              isNativeLabelAssociation: accessibility.isNativeLabelAssociation,
+              blockedReason: accessibility.blockedReason
             });
           }
 
@@ -7291,19 +7308,13 @@ class AIRInterceptor {
 
     return {
       role: typeof accessibilityEvidence.role === "string" ? accessibilityEvidence.role : null,
-      accessibleName:
-        typeof accessibilityEvidence.accessibleName === "string"
-          ? accessibilityEvidence.accessibleName
-          : null,
-      nameSource:
-        typeof accessibilityEvidence.nameSource === "string"
-          ? accessibilityEvidence.nameSource
-          : null,
+      roleSource: typeof accessibilityEvidence.roleSource === "string" ? accessibilityEvidence.roleSource : null,
+      accessibleName: typeof accessibilityEvidence.accessibleName === "string" ? accessibilityEvidence.accessibleName : null,
+      accessibleNameSource: typeof accessibilityEvidence.accessibleNameSource === "string" ? accessibilityEvidence.accessibleNameSource : null,
+      labelledByIds: Array.isArray(accessibilityEvidence.labelledByIds) ? accessibilityEvidence.labelledByIds : undefined,
+      isNativeLabelAssociation: typeof accessibilityEvidence.isNativeLabelAssociation === "boolean" ? accessibilityEvidence.isNativeLabelAssociation : undefined,
       usedCanonicalTarget: accessibilityEvidence.usedCanonicalTarget === true,
-      blockedReason:
-        typeof accessibilityEvidence.blockedReason === "string"
-          ? accessibilityEvidence.blockedReason
-          : null,
+      blockedReason: typeof accessibilityEvidence.blockedReason === "string" ? accessibilityEvidence.blockedReason : null,
     };
   }
 

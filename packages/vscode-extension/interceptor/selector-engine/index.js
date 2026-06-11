@@ -23,6 +23,7 @@ import { collectSecondaryCandidates } from './generators/secondary.js';
 import { buildSelectorPreferenceShadow, classifySelectorCandidatePreference } from './preference-tiers.js';
 import { dedupeCandidates } from './utils.js';
 import { collectWeakAppShadowCoverage } from './weak-app-shadow.js';
+import { chooseSemanticRowIdentity, isUniqueRowAnchor } from './context/semantic-row-anchor.js';
 import { buildSelectorDecision } from './decision-normalization.js';
 import { generateDirectIdentityShadow } from './generators/shadow-identity.js';
 
@@ -151,6 +152,8 @@ export function assembleSelectorProofPacketV0(proofs = []) {
       if (proof.identityType === 'data-testid' || proof.identityType === 'id') {
         const candidate = generateDirectIdentityShadow(proof);
         if (candidate) candidates.push(candidate);
+      } else if (proof.proofType === 'accessibility') {
+        // Slice 2 (Semantic Identity) will consume accessibility proof here.
       }
     }
 

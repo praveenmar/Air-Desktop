@@ -7,6 +7,11 @@ import { resolveCanonicalCustomControlTargetInternal } from '../canonical-target
 import { getRole } from '../shared/dom-attributes.js';
 import { summarizeTarget as _summarizeTarget } from '../shared/target-summary.js';
 
+
+function isAccessibleNameDynamic(name) {
+  if (!name) return false;
+  return /[\d$€£¥]|selected|\d{1,2}\/\d{1,2}/i.test(name);
+}
 function summarizeTarget(element) {
   return _summarizeTarget(element, { includeAriaLabels: true, includeTextExcerpt: true });
 }
@@ -89,6 +94,7 @@ function buildEvidenceForTarget(target) {
     roleSource,
     accessibleName: null,
     accessibleNameSource: 'none',
+    accessibleNameIsDynamic: false,
     labelledByIds: undefined,
     isNativeLabelAssociation: undefined,
   };
@@ -306,6 +312,7 @@ export function resolveAccessibilityEvidence({
     role: winner.evidence.role,
     roleSource: winner.evidence.roleSource,
     accessibleName: winner.evidence.accessibleName,
+    accessibleNameIsDynamic: isAccessibleNameDynamic(winner.evidence.accessibleName),
     accessibleNameSource: winner.evidence.accessibleNameSource || 'none',
     labelledByIds: winner.evidence.labelledByIds,
     isNativeLabelAssociation: winner.evidence.isNativeLabelAssociation,
