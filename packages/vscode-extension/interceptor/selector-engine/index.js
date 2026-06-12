@@ -23,9 +23,10 @@ import { collectSecondaryCandidates } from './generators/secondary.js';
 import { buildSelectorPreferenceShadow, classifySelectorCandidatePreference } from './preference-tiers.js';
 import { dedupeCandidates } from './utils.js';
 import { collectWeakAppShadowCoverage } from './weak-app-shadow.js';
-import { chooseSemanticRowIdentity, isUniqueRowAnchor } from './context/semantic-row-anchor.js';
+import { chooseSemanticRowIdentity } from './context/semantic-row-anchor.js';
 import { buildSelectorDecision } from './decision-normalization.js';
 import { generateDirectIdentityShadow } from './generators/shadow-identity.js';
+import { generateSemanticIdentityShadow } from './generators/semantic-identity.js';
 
 export const ENABLE_SHADOW_PROOF_PIPELINE = true;
 
@@ -146,6 +147,7 @@ export function assembleSelectorProofPacketV0(proofs = []) {
 
   try {
     const candidates = [];
+    console.log('[AIR Trace 2] Orchestrator received proofs array:', JSON.stringify(proofs, null, 2));
     
     // --- Route Proofs to Pure Generators ---
     for (const proof of proofs) {
@@ -153,7 +155,8 @@ export function assembleSelectorProofPacketV0(proofs = []) {
         const candidate = generateDirectIdentityShadow(proof);
         if (candidate) candidates.push(candidate);
       } else if (proof.proofType === 'accessibility') {
-        // Slice 2 (Semantic Identity) will consume accessibility proof here.
+        const candidate = generateSemanticIdentityShadow(proof);
+        if (candidate) candidates.push(candidate);
       }
     }
 

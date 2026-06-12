@@ -6735,13 +6735,14 @@ class AIRInterceptor {
     let _selectorDecision = null;
     let selectorProofPacketV0 = undefined;
     try {
-      _selectorDecision = this._runSelectorEngineShadowComparison(
+      const shadowWrapper = this._runSelectorEngineShadowComparison(
         element,
         selectorResult,
         eventContext,
         selectorCandidates,
         boundedFieldContext,
       );
+      _selectorDecision = shadowWrapper ? shadowWrapper.selectorDecision : null;
 
       // --- SHADOW PROOF PIPELINE INJECTION ---
       try {
@@ -6768,18 +6769,13 @@ class AIRInterceptor {
             });
           }
 
-          const accessibility = _selectorDecision?.accessibility;
-          if (accessibility && accessibility.role && accessibility.accessibleName) {
+          const rawAccessibilityProof = shadowWrapper?.rawAccessibilityProof;
+          console.log('[AIR Trace 1] Escrow Proof:', rawAccessibilityProof);
+          if (rawAccessibilityProof && rawAccessibilityProof.role && rawAccessibilityProof.accessibleName) {
             proofs.push({
-              source: "interceptor.js",
+              source: "role-name.js",
               proofType: "accessibility",
-              role: accessibility.role,
-              roleSource: accessibility.roleSource,
-              accessibleName: accessibility.accessibleName,
-              accessibleNameSource: accessibility.accessibleNameSource,
-              labelledByIds: accessibility.labelledByIds,
-              isNativeLabelAssociation: accessibility.isNativeLabelAssociation,
-              blockedReason: accessibility.blockedReason
+              ...rawAccessibilityProof
             });
           }
 
@@ -7766,7 +7762,10 @@ class AIRInterceptor {
       });
     }
 
-    return selectorDecision;
+    return {
+      selectorDecision,
+      rawAccessibilityProof: accessibilityEvidence
+    };
   }
 
   _printFullSelectorUniverseToConsole({

@@ -45,10 +45,6 @@ export function generateDirectIdentityShadow(proof) {
     classId: SelectorClassIds.DIRECT_IDENTITY,
     selector,
     engine: SelectorEngines.PLAYWRIGHT_CSS,
-    intent: isTestId ? {
-      method: 'getByTestId',
-      args: [proof.value]
-    } : null,
     proof: proof
   });
 }
