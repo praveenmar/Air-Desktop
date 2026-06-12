@@ -8,13 +8,31 @@ export function generateSemanticIdentityShadow(proof) {
   if (proof?.proofType !== 'accessibility') return null;
   if (!proof.role) return null; // Semantic Identity fundamentally requires a role
 
+  // --- OWNERSHIP BOUNDARY ENFORCEMENT ---
+  // Class 2 (Semantic Identity) owns Intrinsic Semantics.
+  // Class 3 (Label Bound Identity) owns Relational Semantics.
+  if (
+    proof.accessibleNameSource === 'label-for' ||
+    proof.accessibleNameSource === 'wrapped-label' ||
+    proof.accessibleNameSource === 'aria-labelledby'
+  ) {
+    return null; // Delegate to Class 3
+  }
+
   // Construct literal Playwright executable string
   let selector = `getByRole('${proof.role}')`;
   
   if (proof.accessibleName) {
     // Safely escape single quotes and backslashes
     const escapedName = proof.accessibleName.replace(/(['\\])/g, '\\$1');
-    selector = `getByRole('${proof.role}', { name: '${escapedName}', exact: true })`;
+    
+    if (proof.accessibleNameSource === 'placeholder') {
+      selector = `getByPlaceholder('${escapedName}')`;
+    } else if (proof.accessibleNameSource === 'title') {
+      selector = `getByTitle('${escapedName}')`;
+    } else {
+      selector = `getByRole('${proof.role}', { name: '${escapedName}', exact: true })`;
+    }
   }
 
   // Pure Generation: 
