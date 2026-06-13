@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import { spawn, ChildProcess } from 'child_process';
 import { randomUUID } from 'crypto';
 import { resolveInterceptorAssetPaths } from './utils/interceptor-loader';
+import { ensureAirHome, getDatabasePath } from '../../../core/utils/air-home';
 
 let activeBrowser: Browser | null = null;
 let activeContext: BrowserContext | null = null;
@@ -727,11 +728,23 @@ export async function activate(context: vscode.ExtensionContext) {
   outputChannel = vscode.window.createOutputChannel('AIR');
   context.subscriptions.push(outputChannel);
 
-  const envDbPath = process.env.AIR_DB_PATH?.trim();
-  const dbPath = envDbPath && envDbPath.length > 0
-    ? path.resolve(envDbPath)
-    : path.join(context.globalStorageUri.fsPath, 'air-data.db');
-  const dbPathSource = envDbPath && envDbPath.length > 0 ? 'AIR_DB_PATH' : 'globalStorage';
+  const legacyDbPath = path.join(context.globalStorageUri.fsPath, 'air-data.db');
+  const universalDbPath = getDatabasePath();
+
+  if (fs.existsSync(legacyDbPath) && !fs.existsSync(universalDbPath)) {
+    ensureAirHome();
+    try {
+      fs.copyFileSync(legacyDbPath, universalDbPath);
+      console.log(`[${SCOPE}] Migrated legacy database to unified home: ${universalDbPath}`);
+      logToOutput(`[${SCOPE}] Migrated legacy database to unified home: ${universalDbPath}`);
+    } catch (err) {
+      console.error(`[${SCOPE}] Failed to migrate database`, err);
+      logToOutput(`[${SCOPE}] Failed to migrate database`, { error: String(err) });
+    }
+  }
+
+  const dbPath = universalDbPath;
+  const dbPathSource = process.env.AIR_DB_PATH?.trim() ? 'AIR_DB_PATH' : 'universalHome';
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
   console.log(`[${SCOPE}] Extension activated`, { dbPath, dbPathSource });

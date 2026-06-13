@@ -22,6 +22,7 @@ import * as os from 'os';
 import { CodegenService } from '../src/index';
 import { FlowReviewService } from '../src/flow-review.service';
 import { FlowReviewFormatter } from '../src/flow-review.formatter';
+import { getDatabasePath } from '../../../core/utils/air-home';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ARG PARSING  (no external dependency — keeps the CLI zero-dep)
@@ -56,31 +57,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 // DB PATH RESOLUTION
 // ─────────────────────────────────────────────────────────────────────────────
 
-function resolveDbPath(): string {
-  // Environment variable takes highest priority — useful in CI and Docker
-  if (process.env['AIR_DB_PATH']) {
-    return process.env['AIR_DB_PATH'];
-  }
-
-  switch (process.platform) {
-    case 'win32':
-      return path.join(
-        process.env['APPDATA'] || os.homedir(),
-        'air-desktop',
-        'air-data.db',
-      );
-    case 'darwin':
-      return path.join(
-        os.homedir(),
-        'Library',
-        'Application Support',
-        'air-desktop',
-        'air-data.db',
-      );
-    default: // linux + anything else
-      return path.join(os.homedir(), '.config', 'air-desktop', 'air-data.db');
-  }
-}
+// DB PATH RESOLUTION is now handled by core/utils/air-home
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LIST MODE
@@ -112,7 +89,7 @@ function printSessionList(
 
 function main(): void {
   const args   = parseArgs(process.argv.slice(2));
-  const dbPath = args.dbPath ?? resolveDbPath();
+  const dbPath = args.dbPath ?? getDatabasePath();
 
   // Verify the DB file is reachable before doing any work
   const fs = require('fs') as typeof import('fs');

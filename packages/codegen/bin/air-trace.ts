@@ -24,6 +24,7 @@ import { resolveSelectorsForSession } from '../src/selector-resolver.ts';
 import type { ResolverConfig, SelectorResolution } from '../src/selector-resolver.ts';
 import type { CodegenStep } from '../src/types.ts';
 import { openSqliteReadonlyDatabase, type SqliteDatabase } from '../src/sqlite-client.ts';
+import { getDatabasePath } from '../../../core/utils/air-home';
 
 type OutputFormat = 'csv' | 'json';
 type IcLookupMode =
@@ -138,17 +139,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   return args;
 }
 
-function resolveDbPath(): string {
-  if (process.env['AIR_DB_PATH']) return process.env['AIR_DB_PATH'];
-  switch (process.platform) {
-    case 'win32':
-      return path.join(process.env['APPDATA'] || os.homedir(), 'air-desktop', 'air-data.db');
-    case 'darwin':
-      return path.join(os.homedir(), 'Library', 'Application Support', 'air-desktop', 'air-data.db');
-    default:
-      return path.join(os.homedir(), '.config', 'air-desktop', 'air-data.db');
-  }
-}
+// Deleted local resolveDbPath in favor of unified getDatabasePath
 
 function parseNumberEnv(name: string): number | undefined {
   const raw = process.env[name];
@@ -566,7 +557,7 @@ function summarize(rows: AuditRow[]): string {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const dbPath = args.dbPath ?? resolveDbPath();
+  const dbPath = args.dbPath ?? getDatabasePath();
 
   if (!fs.existsSync(dbPath)) {
     console.error(`[ERR] Database not found: ${dbPath}`);

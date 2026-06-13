@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import * as path from 'path';
+import { getDatabasePath } from '../../../core/utils/air-home';
 
 export const ConfigSchema = z.object({
   dbPath: z.string().min(1, 'DB path must be provided via --db or AIR_MCP_DB_PATH'),
@@ -29,11 +30,11 @@ export function resolveDbPath(args: string[], env: NodeJS.ProcessEnv = process.e
   const dbArg = readFlag(args, '--db');
   const dbPath = dbArg ?? env.AIR_MCP_DB_PATH ?? env.AIR_DB_PATH;
 
-  if (!dbPath) {
-    throw new Error('Database path must be provided via --db or AIR_MCP_DB_PATH');
+  if (dbPath) {
+    return path.resolve(dbPath);
   }
 
-  return path.resolve(dbPath);
+  return getDatabasePath();
 }
 
 export function resolveHttpPort(args: string[], env: NodeJS.ProcessEnv = process.env): number {
@@ -62,6 +63,8 @@ export function formatHelp(transport: 'stdio' | 'http'): string {
     'Configuration:',
     '  --db <path>           Path to AIR SQLite database',
     '  AIR_MCP_DB_PATH       Database path environment variable',
+    '  AIR_DB_PATH           Database path environment variable',
+    '  Fallback              ~/.air/air-data.db',
   ];
 
   if (transport === 'http') {

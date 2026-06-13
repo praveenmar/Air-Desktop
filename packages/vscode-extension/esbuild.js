@@ -21,7 +21,7 @@ async function build() {
     console.log('[AIR-DEBUG] Extension built.');
 
     await esbuild.build({
-      entryPoints: ['server-entry.ts'],
+      entryPoints: ['launcher-server.ts'],
       bundle: true,
       outfile: 'dist/server/index.js',
       external: externalDeps,

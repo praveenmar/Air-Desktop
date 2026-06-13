@@ -18,7 +18,7 @@
   },
   "include": [
     "src", 
-    "server-entry.ts",
+    "launcher-server.ts",
     "../../core/src"                 // Explicitly include the brain's source
   ],
   "exclude": ["node_modules", "dist"]
