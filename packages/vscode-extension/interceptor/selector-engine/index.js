@@ -27,6 +27,7 @@ import { chooseSemanticRowIdentity } from './context/semantic-row-anchor.js';
 import { buildSelectorDecision } from './decision-normalization.js';
 import { generateDirectIdentityShadow } from './generators/shadow-identity.js';
 import { generateSemanticIdentityShadow } from './generators/semantic-identity.js';
+import { generateLabelBoundIdentityShadow } from './generators/label-bound-identity.js';
 
 export const ENABLE_SHADOW_PROOF_PIPELINE = true;
 
@@ -157,6 +158,9 @@ export function assembleSelectorProofPacketV0(proofs = []) {
       } else if (proof.proofType === 'accessibility') {
         const candidate = generateSemanticIdentityShadow(proof);
         if (candidate) candidates.push(candidate);
+      } else if (proof.proofType === 'label') {
+        const candidate = generateLabelBoundIdentityShadow(proof);
+        if (candidate) candidates.push(candidate);
       }
     }
 
@@ -167,7 +171,7 @@ export function assembleSelectorProofPacketV0(proofs = []) {
     };
 
     // User requested console print that doesn't hide nested objects
-    console.log('[AIR] [selectorpacket]\n' + JSON.stringify(packet, null, 2));
+    console.log('[AIR Trace 4] Selector Packet Generation:\n' + JSON.stringify(packet, null, 2));
 
     return packet;
   } catch (err) {

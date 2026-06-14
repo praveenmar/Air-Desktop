@@ -6779,6 +6779,21 @@ class AIRInterceptor {
             });
           }
 
+          const rawLabelProof = shadowWrapper?.rawLabelProof;
+          console.log('[AIR Trace 3] Shadow injection:', JSON.stringify(rawLabelProof, null, 2));
+          if (
+            rawLabelProof &&
+            rawLabelProof.isValid === true &&
+            rawLabelProof.fieldLabelText &&
+            ['label-for', 'wrapped-label', 'aria-labelledby'].includes(rawLabelProof.fieldRelation)
+          ) {
+            proofs.push({
+              source: 'labels.js',
+              proofType: 'label',
+              ...rawLabelProof
+            });
+          }
+
           selectorProofPacketV0 = globalThis.__AIR_SELECTOR_ENGINE__.assembleSelectorProofPacketV0(proofs);
         }
       } catch (e) {
@@ -7568,6 +7583,7 @@ class AIRInterceptor {
             canonicalTargetInfo,
           }))
         : null;
+    console.log('[AIR Trace 1] labelContextEvidence created:', JSON.stringify(labelContextEvidence, null, 2));
     const accessibilityEvidence =
       typeof selectorEngine.resolveAccessibilityEvidence === "function"
         ? this._measureSelectorEngineShadowCall(timingsMs, "accessibility", () =>
@@ -7762,10 +7778,13 @@ class AIRInterceptor {
       });
     }
 
-    return {
+    const returnObj = {
       selectorDecision,
-      rawAccessibilityProof: accessibilityEvidence
+      rawAccessibilityProof: accessibilityEvidence,
+      rawLabelProof: labelContextEvidence
     };
+    console.log('[AIR Trace 2] Wrapper returning:', JSON.stringify(returnObj.rawLabelProof, null, 2));
+    return returnObj;
   }
 
   _printFullSelectorUniverseToConsole({
