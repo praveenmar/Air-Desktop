@@ -149,11 +149,10 @@ export function assembleSelectorProofPacketV0(proofs = []) {
 
   try {
     const shadowCandidates = [];
-    console.log('[AIR Trace 2] Orchestrator received proofs array:', JSON.stringify(shadowProofs, null, 2));
     
     // --- Route Proofs to Pure Generators ---
-    if (Array.isArray(shadowProofs)) {
-    for (const proof of shadowProofs) {
+    if (Array.isArray(proofs)) {
+    for (const proof of proofs) {
       if (!proof) continue;
       
       const identityCandidate = generateDirectIdentityShadow(proof);
@@ -167,7 +166,7 @@ export function assembleSelectorProofPacketV0(proofs = []) {
     }
     
     // Process Class 4 Semantic Context candidates in bulk
-    const class4Candidates = generateSemanticContextShadow(shadowProofs);
+    const class4Candidates = generateSemanticContextShadow(proofs);
     shadowCandidates.push(...class4Candidates);
   }
 
@@ -178,7 +177,8 @@ export function assembleSelectorProofPacketV0(proofs = []) {
     };
 
     // User requested console print that doesn't hide nested objects
-    console.log('[AIR Trace 4] Selector Packet Generation:\n' + JSON.stringify(packet, null, 2));
+    globalThis.__SHADOW_PACKET__ = packet;
+    console.error('[[[SHADOW_PACKET_DUMP]]]\n' + JSON.stringify(packet, null, 2));
 
     return packet;
   } catch (err) {

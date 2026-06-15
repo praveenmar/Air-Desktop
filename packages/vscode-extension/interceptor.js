@@ -7822,7 +7822,10 @@ class AIRInterceptor {
     const returnObj = {
       selectorDecision,
       rawAccessibilityProof: accessibilityEvidence,
-      rawLabelProof: labelContextEvidence
+      rawLabelProof: labelContextEvidence,
+      rawBoundedFieldProof: boundedFieldContextEvidence,
+      rawTableRowProof: tableRowContextEvidence,
+      rawGenericContainerProof: genericContainerContextEvidence
     };
     console.log('[AIR Trace 2] Wrapper returning:', JSON.stringify(returnObj.rawLabelProof, null, 2));
     return returnObj;

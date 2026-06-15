@@ -1,7 +1,7 @@
 import { createCandidate, SelectorClassIds, SelectorEngines } from '../contracts/selector-class-contract.js';
 
 export function generateLabelBoundIdentityShadow(proof) {
-  if (proof?.proofType !== 'label') return null;
+  if (proof?.proofType !== 'label' || proof.isValid !== true) return null;
 
   if (
     proof.fieldRelation !== 'label-for' &&

@@ -1,5 +1,7 @@
 import { createCandidate, SelectorClassIds, SelectorEngines } from '../contracts/selector-class-contract.js';
 
+const escapeText = (str) => str ? str.replace(/(['\\])/g, '\\$1') : '';
+const safeCssEscape = (str) => typeof str === 'string' ? str.replace(/(['\\])/g, '\\$1') : str;
 export function canGenerateClass4(proof) {
   if (!proof || proof.isValid !== true) return false;
 
@@ -44,14 +46,14 @@ export function generateSemanticContextShadow(proofs) {
     let selector = null;
 
     if (proof.proofType === 'bounded-field') {
-      selector = `locator('${proof.cleanParentSelector}').filter({ hasText: '${proof.fieldLabelText}' }).locator('${proof.cleanChildSelector}')`;
+      selector = `locator('${safeCssEscape(proof.cleanParentSelector)}').filter({ hasText: '${escapeText(proof.fieldLabelText)}' }).locator('${safeCssEscape(proof.cleanChildSelector)}')`;
     } else if (proof.proofType === 'table-row') {
-      selector = `locator('${proof.tableSelector}').locator('tr, [role="row"]').filter({ hasText: '${proof.rowIdentityTexts[0]}' }).locator('${proof.actionSelector}')`;
+      selector = `locator('${safeCssEscape(proof.tableSelector)}').locator('tr, [role="row"]').filter({ hasText: '${escapeText(proof.rowIdentityTexts[0])}' }).locator('${safeCssEscape(proof.actionSelector)}')`;
     } else if (proof.proofType === 'generic-container') {
       if (proof.actionRole) {
-        selector = `locator('${proof.containerSelectorKind}').filter({ hasText: '${proof.containerAnchorText}' }).getByRole('${proof.actionRole}', { name: '${proof.actionName}' })`;
+        selector = `locator('${safeCssEscape(proof.containerSelectorKind)}').filter({ hasText: '${escapeText(proof.containerAnchorText)}' }).getByRole('${safeCssEscape(proof.actionRole)}', { name: '${escapeText(proof.actionName)}' })`;
       } else {
-        selector = `locator('${proof.containerSelectorKind}').filter({ hasText: '${proof.containerAnchorText}' }).locator('${proof.actionTag}').filter({ hasText: '${proof.actionName}' })`;
+        selector = `locator('${safeCssEscape(proof.containerSelectorKind)}').filter({ hasText: '${escapeText(proof.containerAnchorText)}' }).locator('${safeCssEscape(proof.actionTag)}').filter({ hasText: '${escapeText(proof.actionName)}' })`;
       }
     }
 
