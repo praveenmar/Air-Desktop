@@ -10,7 +10,8 @@ export const SelectorClassIds = {
 
 export const SelectorEngines = {
   PLAYWRIGHT_CSS: 'playwright-css',
-  PLAYWRIGHT_ARIA: 'playwright-aria'
+  PLAYWRIGHT_ARIA: 'playwright-aria',
+  PLAYWRIGHT_NATIVE: 'playwright-native'
 };
 
 /**

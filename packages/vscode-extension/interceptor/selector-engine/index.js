@@ -27,6 +27,8 @@ import { chooseSemanticRowIdentity } from './context/semantic-row-anchor.js';
 import { buildSelectorDecision } from './decision-normalization.js';
 import { generateDirectIdentityShadow } from './generators/shadow-identity.js';
 import { generateSemanticIdentityShadow } from './generators/semantic-identity.js';
+import { generateLabelBoundIdentityShadow } from './generators/label-bound-identity.js';
+import { generateSemanticContextShadow } from './generators/semantic-context-filtering.js';
 
 export const ENABLE_SHADOW_PROOF_PIPELINE = true;
 
@@ -146,28 +148,37 @@ export function assembleSelectorProofPacketV0(proofs = []) {
   if (!ENABLE_SHADOW_PROOF_PIPELINE) return undefined;
 
   try {
-    const candidates = [];
-    console.log('[AIR Trace 2] Orchestrator received proofs array:', JSON.stringify(proofs, null, 2));
+    const shadowCandidates = [];
+    console.log('[AIR Trace 2] Orchestrator received proofs array:', JSON.stringify(shadowProofs, null, 2));
     
     // --- Route Proofs to Pure Generators ---
-    for (const proof of proofs) {
-      if (proof.identityType === 'data-testid' || proof.identityType === 'id') {
-        const candidate = generateDirectIdentityShadow(proof);
-        if (candidate) candidates.push(candidate);
-      } else if (proof.proofType === 'accessibility') {
-        const candidate = generateSemanticIdentityShadow(proof);
-        if (candidate) candidates.push(candidate);
-      }
+    if (Array.isArray(shadowProofs)) {
+    for (const proof of shadowProofs) {
+      if (!proof) continue;
+      
+      const identityCandidate = generateDirectIdentityShadow(proof);
+      if (identityCandidate) shadowCandidates.push(identityCandidate);
+
+      const semanticCandidate = generateSemanticIdentityShadow(proof);
+      if (semanticCandidate) shadowCandidates.push(semanticCandidate);
+
+      const labelCandidate = generateLabelBoundIdentityShadow(proof);
+      if (labelCandidate) shadowCandidates.push(labelCandidate);
     }
+    
+    // Process Class 4 Semantic Context candidates in bulk
+    const class4Candidates = generateSemanticContextShadow(shadowProofs);
+    shadowCandidates.push(...class4Candidates);
+  }
 
     // --- Assemble Packet with Versioning ---
     const packet = {
       version: 0,
-      candidates
+      candidates: shadowCandidates
     };
 
     // User requested console print that doesn't hide nested objects
-    console.log('[AIR] [selectorpacket]\n' + JSON.stringify(packet, null, 2));
+    console.log('[AIR Trace 4] Selector Packet Generation:\n' + JSON.stringify(packet, null, 2));
 
     return packet;
   } catch (err) {

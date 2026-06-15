@@ -6769,6 +6769,19 @@ class AIRInterceptor {
             });
           }
 
+          // Legacy Identity Parity (name, href, value, title, alt)
+          ['name', 'href', 'value', 'title', 'alt'].forEach(attr => {
+            const attrValue = element.getAttribute ? element.getAttribute(attr) : null;
+            if (attrValue) {
+              proofs.push({
+                source: "interceptor.js",
+                identityType: attr,
+                value: attrValue,
+                isLikelyDynamic: false
+              });
+            }
+          });
+
           const rawAccessibilityProof = shadowWrapper?.rawAccessibilityProof;
           console.log('[AIR Trace 1] Escrow Proof:', rawAccessibilityProof);
           if (rawAccessibilityProof && rawAccessibilityProof.role && rawAccessibilityProof.accessibleName) {
@@ -6776,6 +6789,49 @@ class AIRInterceptor {
               source: "role-name.js",
               proofType: "accessibility",
               ...rawAccessibilityProof
+            });
+          }
+
+          const rawLabelProof = shadowWrapper?.rawLabelProof;
+          console.log('[AIR Trace 3] Shadow injection:', JSON.stringify(rawLabelProof, null, 2));
+          if (
+            rawLabelProof &&
+            rawLabelProof.isValid === true &&
+            rawLabelProof.fieldLabelText &&
+            ['label-for', 'wrapped-label', 'aria-labelledby'].includes(rawLabelProof.fieldRelation)
+          ) {
+            proofs.push({
+              source: 'labels.js',
+              proofType: 'label',
+              ...rawLabelProof
+            });
+          }
+
+          // Class 4 Semantic Context Escrow
+          const rawBoundedFieldProof = shadowWrapper?.rawBoundedFieldProof;
+          if (rawBoundedFieldProof && rawBoundedFieldProof.isValid === true) {
+            proofs.push({
+              source: 'context/bounded-field.js',
+              proofType: 'bounded-field',
+              ...rawBoundedFieldProof
+            });
+          }
+
+          const rawTableRowProof = shadowWrapper?.rawTableRowProof;
+          if (rawTableRowProof && rawTableRowProof.isValid === true) {
+            proofs.push({
+              source: 'context/table-row.js',
+              proofType: 'table-row',
+              ...rawTableRowProof
+            });
+          }
+
+          const rawGenericContainerProof = shadowWrapper?.rawGenericContainerProof;
+          if (rawGenericContainerProof && rawGenericContainerProof.isValid === true) {
+            proofs.push({
+              source: 'context/generic-container.js',
+              proofType: 'generic-container',
+              ...rawGenericContainerProof
             });
           }
 
@@ -7568,6 +7624,7 @@ class AIRInterceptor {
             canonicalTargetInfo,
           }))
         : null;
+    console.log('[AIR Trace 1] labelContextEvidence created:', JSON.stringify(labelContextEvidence, null, 2));
     const accessibilityEvidence =
       typeof selectorEngine.resolveAccessibilityEvidence === "function"
         ? this._measureSelectorEngineShadowCall(timingsMs, "accessibility", () =>
@@ -7762,10 +7819,13 @@ class AIRInterceptor {
       });
     }
 
-    return {
+    const returnObj = {
       selectorDecision,
-      rawAccessibilityProof: accessibilityEvidence
+      rawAccessibilityProof: accessibilityEvidence,
+      rawLabelProof: labelContextEvidence
     };
+    console.log('[AIR Trace 2] Wrapper returning:', JSON.stringify(returnObj.rawLabelProof, null, 2));
+    return returnObj;
   }
 
   _printFullSelectorUniverseToConsole({

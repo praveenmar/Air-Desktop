@@ -37,9 +37,17 @@ export function generateDirectIdentityShadow(proof) {
   if (proof.identityType === 'id' && proof.isLikelyDynamic) return null;
 
   const isTestId = proof.identityType === 'data-testid';
-  const selector = isTestId
-    ? `[data-testid="${safeCssEscape(proof.value)}"]`
-    : `[id="${safeCssEscape(proof.value)}"]`;
+  let selector;
+  
+  if (isTestId) {
+    selector = `[data-testid="${safeCssEscape(proof.value)}"]`;
+  } else if (proof.identityType === 'id') {
+    selector = `[id="${safeCssEscape(proof.value)}"]`;
+  } else if (['name', 'href', 'value', 'alt', 'title'].includes(proof.identityType)) {
+    selector = `[${proof.identityType}="${safeCssEscape(proof.value)}"]`;
+  } else {
+    return null;
+  }
 
   return createCandidate({
     classId: SelectorClassIds.DIRECT_IDENTITY,
