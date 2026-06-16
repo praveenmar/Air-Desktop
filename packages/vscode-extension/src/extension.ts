@@ -33,6 +33,42 @@ interface BackgroundServerRuntime {
   requiresElectronNodeMode: boolean;
 }
 
+type ChromiumLaunchOptions = NonNullable<Parameters<typeof chromium.launch>[0]>;
+
+async function launchRecordingBrowser(): Promise<Browser> {
+  const launchCandidates: Array<{
+    label: string;
+    options: ChromiumLaunchOptions;
+  }> = [
+    { label: 'Microsoft Edge', options: { headless: false, channel: 'msedge' } },
+    { label: 'Google Chrome', options: { headless: false, channel: 'chrome' } },
+    { label: 'Playwright Chromium', options: { headless: false } },
+  ];
+
+  const errors: string[] = [];
+
+  for (const candidate of launchCandidates) {
+    try {
+      logToOutput(`[${SCOPE}] Launching browser`, { browser: candidate.label });
+      return await chromium.launch(candidate.options);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`${candidate.label}: ${message}`);
+      logToOutput(`[${SCOPE}] Browser launch candidate failed`, {
+        browser: candidate.label,
+        error: message,
+      });
+    }
+  }
+
+  throw new Error(
+    [
+      'Unable to launch a browser. Install Microsoft Edge or Google Chrome, or run "npx playwright install chromium".',
+      ...errors,
+    ].join('\n'),
+  );
+}
+
 function toLogString(value: unknown): string {
   if (typeof value === 'string') {
     return value;
@@ -405,7 +441,7 @@ async function startRecording() {
       serverUrl: baseUrl,
     });
 
-    activeBrowser = await chromium.launch({ headless: false });
+    activeBrowser = await launchRecordingBrowser();
     activeContext = await activeBrowser.newContext({
     bypassCSP: true
     });
@@ -728,36 +764,10 @@ export async function activate(context: vscode.ExtensionContext) {
   outputChannel = vscode.window.createOutputChannel('AIR');
   context.subscriptions.push(outputChannel);
 
-  const legacyDbPath = path.join(context.globalStorageUri.fsPath, 'air-data.db');
-  const universalDbPath = getDatabasePath();
+  console.log(`[${SCOPE}] Extension activation started`);
+  logToOutput(`[${SCOPE}] Extension activation started`);
 
-  if (fs.existsSync(legacyDbPath) && !fs.existsSync(universalDbPath)) {
-    ensureAirHome();
-    try {
-      fs.copyFileSync(legacyDbPath, universalDbPath);
-      console.log(`[${SCOPE}] Migrated legacy database to unified home: ${universalDbPath}`);
-      logToOutput(`[${SCOPE}] Migrated legacy database to unified home: ${universalDbPath}`);
-    } catch (err) {
-      console.error(`[${SCOPE}] Failed to migrate database`, err);
-      logToOutput(`[${SCOPE}] Failed to migrate database`, { error: String(err) });
-    }
-  }
-
-  const dbPath = universalDbPath;
-  const dbPathSource = process.env.AIR_DB_PATH?.trim() ? 'AIR_DB_PATH' : 'universalHome';
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-
-  console.log(`[${SCOPE}] Extension activated`, { dbPath, dbPathSource });
-  logToOutput(`[${SCOPE}] Extension activated`, { dbPath, dbPathSource });
-
-  try {
-    await startBackgroundServer(context, dbPath);
-  } catch (error) {
-    console.error(`[${SCOPE}] Failed to start background server`, error);
-    logToOutput(`[${SCOPE}] Failed to start background server`, { error: String(error) });
-    void vscode.window.showErrorMessage('AIR: Failed to start local event server');
-  }
-
+  // Register commands FIRST, before any async/heavy operations
   context.subscriptions.push(
     vscode.commands.registerCommand('air.startRecording', startRecording),
     vscode.commands.registerCommand('air.stopRecording', stopRecording),
@@ -773,6 +783,53 @@ export async function activate(context: vscode.ExtensionContext) {
       outputChannel.show(true);
     }),
   );
+
+  console.log(`[${SCOPE}] Commands registered`);
+  logToOutput(`[${SCOPE}] Commands registered`);
+
+  // Initialize server in background (non-blocking)
+  try {
+    const legacyDbPath = path.join(context.globalStorageUri.fsPath, 'air-data.db');
+    const universalDbPath = getDatabasePath();
+
+    if (fs.existsSync(legacyDbPath) && !fs.existsSync(universalDbPath)) {
+      ensureAirHome();
+      try {
+        fs.copyFileSync(legacyDbPath, universalDbPath);
+        console.log(`[${SCOPE}] Migrated legacy database to unified home: ${universalDbPath}`);
+        logToOutput(`[${SCOPE}] Migrated legacy database to unified home: ${universalDbPath}`);
+      } catch (err) {
+        console.error(`[${SCOPE}] Failed to migrate database`, err);
+        logToOutput(`[${SCOPE}] Failed to migrate database`, { error: String(err) });
+      }
+    }
+
+    let dbPath = universalDbPath;
+    let dbPathSource = process.env.AIR_DB_PATH?.trim() ? 'AIR_DB_PATH' : 'universalHome';
+
+    try {
+      fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    } catch (err) {
+      console.warn(`[${SCOPE}] Failed to create database directory at ${dbPath}, falling back to temp`, { error: String(err) });
+      logToOutput(`[${SCOPE}] Failed to create database directory, using temp folder`);
+      dbPath = path.join(require('os').tmpdir(), 'air-desktop', 'air-data.db');
+      dbPathSource = 'tempFallback';
+      try {
+        fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+      } catch (fallbackErr) {
+        console.error(`[${SCOPE}] Failed to create fallback temp directory`, fallbackErr);
+        logToOutput(`[${SCOPE}] Failed to create database directory`, { error: String(fallbackErr) });
+      }
+    }
+
+    console.log(`[${SCOPE}] Extension activated`, { dbPath, dbPathSource });
+    logToOutput(`[${SCOPE}] Extension activated`, { dbPath, dbPathSource });
+
+    await startBackgroundServer(context, dbPath);
+  } catch (error) {
+    console.error(`[${SCOPE}] Failed during initialization`, error);
+    logToOutput(`[${SCOPE}] Failed during initialization`, { error: String(error) });
+  }
 }
 
 export async function deactivate() {
