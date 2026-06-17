@@ -3,7 +3,13 @@ import * as path from 'path';
 import * as fs from 'fs';
 
 export function getAirHome(): string {
-  return path.join(os.homedir(), '.air');
+  if (process.env.AIR_HOME) {
+    return process.env.AIR_HOME;
+  }
+  if (process.env.AIR_DB_PATH) {
+    return path.dirname(process.env.AIR_DB_PATH);
+  }
+  return path.join(os.tmpdir(), 'air-desktop');
 }
 
 export function ensureAirHome(): void {

@@ -1,26 +1,34 @@
 {
-  "name": "@air/mcp-server",
+  "name": "air-mcp-server",
   "version": "0.1.0",
-  "description": "AIR MCP Server (Phase 3E-A Skeleton)",
-  "main": "dist/packages/mcp-server/src/index.js",
-  "types": "dist/packages/mcp-server/src/index.d.ts",
+  "description": "AIR MCP Server",
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "bin": {
+    "air-mcp": "./bin/air-mcp.js",
+    "air-mcp-http": "./bin/air-mcp-http.js"
+  },
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch",
-    "start": "node dist/packages/mcp-server/src/index.js",
-    "start:http": "node dist/packages/mcp-server/src/http.js",
+    "build": "node build.mjs",
+    "dev": "node build.mjs --watch",
+    "start": "node dist/index.js",
+    "start:http": "node dist/http.js",
     "start:dev:stdio": "tsx src/index.ts",
     "start:dev:http": "tsx src/http.ts"
   },
   "dependencies": {
-    "@air/codegen": "0.1.0",
-    "@air/core": "*",
-    "@air/shared": "0.1.0",
     "@modelcontextprotocol/sdk": "^1.0.1",
     "zod": "^3.23.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "typescript": "5.6.3"
+    "esbuild": "^0.24.0",
+    "typescript": "5.6.3",
+    "@air/codegen": "0.1.0",
+    "@air/core": "*",
+    "@air/shared": "0.1.0"
   }
 }

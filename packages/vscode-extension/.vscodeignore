@@ -1,0 +1,8 @@
+**
+!dist/**
+!dist
+!package.json
+!LICENSE
+!LICENSE.txt
+!interceptor.js
+!readme.md
