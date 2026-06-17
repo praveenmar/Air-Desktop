@@ -20,7 +20,8 @@
     "onCommand:air.deleteSession",
     "onCommand:air.debugEvents",
     "onCommand:air.inspectSession",
-    "onCommand:air.showLogs"
+    "onCommand:air.showLogs",
+    "onCommand:air.copyMcpConfig"
   ],
   "contributes": {
     "commands": [
@@ -62,6 +63,11 @@
       {
         "command": "air.showLogs",
         "title": "AIR: Show Logs",
+        "category": "AIR"
+      },
+      {
+        "command": "air.copyMcpConfig",
+        "title": "AIR: Copy MCP Configuration",
         "category": "AIR"
       }
     ]

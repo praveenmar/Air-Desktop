@@ -759,6 +759,43 @@ async function inspectSession() {
   }
 }
 
+async function copyMcpConfig() {
+  const isDev = extensionContext?.extensionMode === vscode.ExtensionMode.Development;
+  const options = [
+    { label: 'Production (NPX)', description: 'Recommended for end users (Requires NPM publish)' }
+  ];
+  
+  if (isDev) {
+    options.push({ label: 'Local Development', description: 'Absolute path to local workspace (For testing)' });
+  }
+
+  const choice = await vscode.window.showQuickPick(options);
+  if (!choice) return;
+
+  let command: string;
+  let args: string[];
+
+  if (choice.label === 'Production (NPX)') {
+    command = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+    args = ['-y', 'air-mcp-server@latest'];
+  } else {
+    const mcpPath = vscode.Uri.joinPath(extensionContext!.extensionUri, '..', 'mcp-server', 'bin', 'air-mcp.js').fsPath;
+    command = 'node';
+    args = [mcpPath];
+  }
+
+  const mcpConfig = {
+    "air-desktop": {
+      command,
+      args
+    }
+  };
+
+  await vscode.env.clipboard.writeText(JSON.stringify(mcpConfig, null, 2));
+  void vscode.window.showInformationMessage(`AIR MCP Config (${choice.label}) copied to clipboard! Paste it into your MCP settings.`);
+}
+
+
 export async function activate(context: vscode.ExtensionContext) {
   extensionContext = context;
   outputChannel = vscode.window.createOutputChannel('AIR');
@@ -782,6 +819,7 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       outputChannel.show(true);
     }),
+    vscode.commands.registerCommand('air.copyMcpConfig', copyMcpConfig),
   );
 
   console.log(`[${SCOPE}] Commands registered`);

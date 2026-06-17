@@ -9,7 +9,7 @@ export function getAirHome(): string {
   if (process.env.AIR_DB_PATH) {
     return path.dirname(process.env.AIR_DB_PATH);
   }
-  return path.join(os.tmpdir(), 'air-desktop');
+  return path.join(os.homedir(), '.air');
 }
 
 export function ensureAirHome(): void {
