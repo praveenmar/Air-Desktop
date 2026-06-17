@@ -1,1 +1,1 @@
-export * from './AirBasePage.ts';
+export * from './AirBasePage';

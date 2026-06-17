@@ -1,14 +1,14 @@
-﻿// Purpose: A lightweight HTTP server for the interceptor to POST events to.
+// Purpose: A lightweight HTTP server for the interceptor to POST events to.
 
 import * as http from 'http';
 import { ZodError } from 'zod';
-import { GraphBuilder } from '../../core/graph/graph-builder';
-import { AIREventSchema } from '../../core/types';
+import { GraphBuilder } from './graph/graph-builder';
+import { AIREventSchema } from './types';
 import {
   isSelectorDiagnosticsEnabled,
   SelectorCaptureDiagnosticsWriter,
   type SelectorCaptureDiagnosticsWriterLike,
-} from '../../core/diagnostics/selector-capture-diagnostics';
+} from './diagnostics/selector-capture-diagnostics';
 
 export interface EventServerExtraHandler {
   (req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> | boolean;

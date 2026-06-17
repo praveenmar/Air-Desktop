@@ -12,7 +12,7 @@ import { InteractionContextRepository } from './db/repositories/interaction-cont
 import { DebugLogger } from './logger/debug-logger';
 import { StateEngine } from './graph/state-engine';
 import { GraphBuilder } from './graph/graph-builder';
-import { EventServer } from '../electron/main/event-server';
+import { EventServer } from './event-server';
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json' });

@@ -9,7 +9,7 @@ import {
   generateOptimalSelector,
   generateXPath,
   rankForPriority,
-} from "../src/selectors.ts";
+} from '../src/selectors';
 
 type SelectorResult = {
   selector: string;

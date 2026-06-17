@@ -1,7 +1,7 @@
 import {
   extractText,
   generateOptimalSelector,
-} from "../../../shared/src/selectors.ts";
+} from '../../../shared/src/selectors';
 
 export interface CandidateElement {
   tag: string;

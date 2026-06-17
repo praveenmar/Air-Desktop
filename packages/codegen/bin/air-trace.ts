@@ -19,11 +19,11 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { CodegenService } from '../src/codegen.service.ts';
-import { resolveSelectorsForSession } from '../src/selector-resolver.ts';
-import type { ResolverConfig, SelectorResolution } from '../src/selector-resolver.ts';
-import type { CodegenStep } from '../src/types.ts';
-import { openSqliteReadonlyDatabase, type SqliteDatabase } from '../src/sqlite-client.ts';
+import { CodegenService } from '../src/codegen.service';
+import { resolveSelectorsForSession } from '../src/selector-resolver';
+import type { ResolverConfig, SelectorResolution } from '../src/selector-resolver';
+import type { CodegenStep } from '../src/types';
+import { openSqliteReadonlyDatabase, type SqliteDatabase } from '../src/sqlite-client';
 import { getDatabasePath } from '../../../core/utils/air-home';
 
 type OutputFormat = 'csv' | 'json';

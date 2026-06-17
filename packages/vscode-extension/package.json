@@ -68,7 +68,8 @@
   },
   "scripts": {
     "build": "node esbuild.js",
-    "watch": "node esbuild.js --watch"
+    "watch": "node esbuild.js --watch",
+    "package": "vsce package"
   },
   "dependencies": {
     "archiver": "^8.0.0",
@@ -78,6 +79,7 @@
   "devDependencies": {
     "@air/core": "*",
     "@types/node": "^20.0.0",
-    "@types/vscode": "^1.90.0"
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.0.0"
   }
 }
