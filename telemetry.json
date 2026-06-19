@@ -1,0 +1,8 @@
+{
+  "packetCount": 35,
+  "candidateCount": 31,
+  "classCounts": {
+    "direct-identity": 11,
+    "semantic-identity": 20
+  }
+}

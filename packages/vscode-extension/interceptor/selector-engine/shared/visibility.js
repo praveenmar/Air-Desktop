@@ -45,3 +45,41 @@ export function countVisibleMatches(root, selector) {
     return 0;
   }
 }
+
+function queryAllShadowPiercing(root, selector) {
+  const elements = [];
+  
+  function traverse(node) {
+    if (node.nodeType === 1 /* ELEMENT_NODE */ && node.matches && node.matches(selector)) {
+      elements.push(node);
+    }
+    
+    if (node.shadowRoot) {
+      traverse(node.shadowRoot);
+    }
+    
+    let child = node.firstChild;
+    while (child) {
+      traverse(child);
+      child = child.nextSibling;
+    }
+  }
+  
+  // If root is Document, start from its children (e.g. HTML)
+  let child = root.firstChild;
+  while (child) {
+    traverse(child);
+    child = child.nextSibling;
+  }
+  
+  return elements;
+}
+
+export function queryVisibleElementsPiercingShadow(root, selector) {
+  if (!root || !selector) return [];
+  try {
+    return queryAllShadowPiercing(root, selector).filter(isFastVisible);
+  } catch {
+    return [];
+  }
+}

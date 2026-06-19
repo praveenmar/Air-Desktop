@@ -28,7 +28,9 @@ import { buildSelectorDecision } from './decision-normalization.js';
 import { generateDirectIdentityShadow } from './generators/shadow-identity.js';
 import { generateSemanticIdentityShadow } from './generators/semantic-identity.js';
 import { generateLabelBoundIdentityShadow } from './generators/label-bound-identity.js';
+import { trackSelectorPacket } from './telemetry.js';
 import { generateSemanticContextShadow } from './generators/semantic-context-filtering.js';
+import { generateStructuralDisambiguationShadow } from './generators/structural-disambiguation.js';
 
 export const ENABLE_SHADOW_PROOF_PIPELINE = true;
 
@@ -163,6 +165,9 @@ export function assembleSelectorProofPacketV0(proofs = []) {
 
       const labelCandidate = generateLabelBoundIdentityShadow(proof);
       if (labelCandidate) shadowCandidates.push(labelCandidate);
+
+      const disambiguationCandidate = generateStructuralDisambiguationShadow(proof);
+      if (disambiguationCandidate) shadowCandidates.push(disambiguationCandidate);
     }
     
     // Process Class 4 Semantic Context candidates in bulk
@@ -179,6 +184,8 @@ export function assembleSelectorProofPacketV0(proofs = []) {
     // User requested console print that doesn't hide nested objects
     globalThis.__SHADOW_PACKET__ = packet;
     console.error('[[[SHADOW_PACKET_DUMP]]]\n' + JSON.stringify(packet, null, 2));
+
+    trackSelectorPacket(packet);
 
     return packet;
   } catch (err) {

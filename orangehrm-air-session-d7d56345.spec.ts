@@ -24,6 +24,31 @@ test(`AIR session replay: ${SESSION_ID}`, async ({ page }) => {
   test.setTimeout(90_000);
   page.setDefaultNavigationTimeout(60_000);
 
+  page.on('console', msg => console.log(`[PAGE LOG] ${msg.type()}: ${msg.text()}`));
+
+  const engineScript = require('fs').readFileSync('packages/vscode-extension/dist/interceptor-selector-engine.js', 'utf-8');
+  await page.addInitScript({ content: engineScript });
+
+  const interceptorScript = require('fs').readFileSync('packages/vscode-extension/interceptor.js', 'utf-8');
+  await page.addInitScript({ content: interceptorScript });
+
+  let aggregatedTelemetry = { packetCount: 0, candidateCount: 0, classCounts: {} };
+  await page.exposeFunction('__syncAirTelemetry', (t) => {
+    aggregatedTelemetry.packetCount += 1;
+    aggregatedTelemetry.candidateCount += (t.candidateCount - (aggregatedTelemetry._lastPageCandidateCount || 0));
+    for (const [classId, count] of Object.entries(t.classCounts)) {
+      if (!aggregatedTelemetry.classCounts[classId]) aggregatedTelemetry.classCounts[classId] = 0;
+      aggregatedTelemetry.classCounts[classId] += (count - (aggregatedTelemetry._lastPageClassCounts?.[classId] || 0));
+    }
+    aggregatedTelemetry._lastPageCandidateCount = t.candidateCount;
+    aggregatedTelemetry._lastPageClassCounts = { ...t.classCounts };
+  });
+
+  page.on('framenavigated', () => {
+    aggregatedTelemetry._lastPageCandidateCount = 0;
+    aggregatedTelemetry._lastPageClassCounts = {};
+  });
+
   await page.goto(START_URL, { waitUntil: 'domcontentloaded' });
 
   // AIR step 1
@@ -130,4 +155,8 @@ test(`AIR session replay: ${SESSION_ID}`, async ({ page }) => {
   await expect(page.locator('button:has-text("Login")')).toBeVisible();
   await expect(page.locator('[name="password"]')).toBeVisible();
   await expect(page.locator('[name="username"]')).toBeVisible();
+
+  delete aggregatedTelemetry._lastPageCandidateCount;
+  delete aggregatedTelemetry._lastPageClassCounts;
+  require('fs').writeFileSync('telemetry.json', JSON.stringify(aggregatedTelemetry, null, 2));
 });
