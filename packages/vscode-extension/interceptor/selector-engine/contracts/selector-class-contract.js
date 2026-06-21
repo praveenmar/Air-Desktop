@@ -5,7 +5,10 @@ export const SelectorClassIds = {
   SEMANTIC_CONTEXT_FILTERING: 'semantic-context-filtering',
   STRUCTURAL_ADJACENCY: 'structural-adjacency',
   NATIVE_DOM_NORMALIZATION: 'native-dom-normalization',
-  STRUCTURAL_DISAMBIGUATION: 'structural-disambiguation'
+  STRUCTURAL_DISAMBIGUATION: 'structural-disambiguation',
+  STATEFUL_LIFECYCLE_LINKAGE: 'stateful-lifecycle-linkage',
+  COLLECTION_MEMBERSHIP: 'collection-membership',
+  HIERARCHICAL_NAVIGATION: 'hierarchical-navigation'
 };
 
 export const SelectorEngines = {

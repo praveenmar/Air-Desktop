@@ -22,9 +22,18 @@ export const SelectorResolutionSchema = z.object({
 
 export type SelectorResolutionV1 = z.infer<typeof SelectorResolutionSchema>;
 
+export const RealizationStepSchema = z.object({
+  action: z.enum(['click', 'scroll', 'hover', 'fill']),
+  kind: z.string(),
+  value: z.string()
+});
+
+export type RealizationStep = z.infer<typeof RealizationStepSchema>;
+
 export const ResolvedTargetSchema = z.object({
   kind: z.enum(['css', 'xpath', 'role', 'text', 'label', 'placeholder', 'testid']),
   value: z.string(),
+  realizationSteps: z.array(RealizationStepSchema).optional(),
   options: z.object({
     name: z.string().optional(),
     exact: z.boolean().optional(),

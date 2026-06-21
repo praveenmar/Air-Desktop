@@ -100,7 +100,7 @@ Explicit rules baked into the ordering:
 | 4 | Semantic Context Filtering | `playwright-native` | READY | **PARTIAL** | Only `bounded-field` live; `table-row`/`generic-container` dead (known issue) |
 | 5 | Structural Adjacency | `playwright-css` | READY | **MISSING** | No V0 generator/escrow/route; legacy `structural.js` is wrong shape |
 | 6 | Structural Disambiguation | `playwright-css` | READY | **MISSING** | Not started; fallback-only |
-| 7 | Stateful Lifecycle Linkage | (tbd) | PARTIAL/MISSING | CRITICAL | **PARTIAL** | Producer exists (`option-panel.js`); no V0 generator |
+| 7 | Stateful Lifecycle Linkage | (tbd) | PARTIAL (Runtime Blocked) | **PARTIAL** | Complete V0 generation exists, but downstream runner contract (ResolvedTarget) drops sequence metadata. |
 | 8 | Collection Membership | (tbd) | PARTIAL - MEDIUM | **MISSING** | Not started |
 | 9 | Hierarchical Navigation | (tbd) | MISSING - MEDIUM | **MISSING** | Not started |
 | 10 | Boundary Traversal | (tbd) | PARTIAL - HIGH | **MISSING** | Not started |
@@ -286,10 +286,10 @@ Each entry uses a fixed shape:
   Ownership" and "Transient Temporal Linkage" ideas.
 - **Failure modes:** Race conditions; capturing the wrong (volatile) panel text; losing
   the link when the panel is portaled elsewhere.
-- **Status & gap:** **PARTIAL.** A producer exists (`context/option-panel.js`,
-  `resolveOptionPanelContextEvidence`, plus bridging) and is used in the **legacy**
-  path. There is **no V0 shadow generator/escrow/route** consuming it yet. Requires
-  interceptor work (record-time linkage capture).
+- **Status & gap:** **PARTIAL (Runtime Blocked).** 
+  - **Existing capability:** Proof producer (`option-panel.js`), escrow routing (`preference-tiers.js`), packet assembly (`index.js`), and V0 generator (`stateful-lifecycle.js`) are fully implemented and tested.
+  - **Runtime Constraint:** "Current AIR runtime only supports atomic string targets. True Class 7 lifecycle ownership cannot influence replay behavior without runtime evolution." The `ResolvedTargetSchema` rigidly accepts a single `value: string`, forcibly dropping the temporal `triggerSelector` metadata.
+  - **Estimated blast radius to unblock:** HIGH. Requires evolving `GenerationContextV1`, `ResolvedTargetSchema`, the DB serialization schema, LLM guidance definitions, and `locatorFromResolvedTarget` to natively execute sequence arrays or composite syntaxes.
 
 ---
 

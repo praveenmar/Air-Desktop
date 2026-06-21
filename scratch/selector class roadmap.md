@@ -321,7 +321,7 @@ Proof:
 
 Status:
 
-PARTIAL / MISSING
+Architecture complete, runtime blocked.
 
 Interceptor work required:
 
@@ -355,7 +355,7 @@ Proof:
 
 Status:
 
-PARTIAL
+Architecture complete, runtime blocked.
 
 Interceptor work required:
 
@@ -387,7 +387,7 @@ Proof:
 
 Status:
 
-MISSING
+Likely runtime blocked.
 
 Interceptor work required:
 

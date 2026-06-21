@@ -6777,7 +6777,7 @@ class AIRInterceptor {
                 source: "interceptor.js",
                 identityType: attr,
                 value: attrValue,
-                isLikelyDynamic: false
+                isLikelyDynamic: attr === 'name' ? this._isLikelyDynamicId(attrValue) : false
               });
             }
           });
@@ -6826,6 +6826,24 @@ class AIRInterceptor {
             });
           }
 
+          const rawOptionPanelProof = shadowWrapper?.rawOptionPanelProof;
+          if (rawOptionPanelProof && rawOptionPanelProof.isValid === true) {
+            proofs.push({
+              source: 'context/option-panel.js',
+              proofType: 'option-panel',
+              ...rawOptionPanelProof
+            });
+          }
+
+          const rawTreeNodeProof = shadowWrapper?.rawTreeNodeProof;
+          if (rawTreeNodeProof && rawTreeNodeProof.isValid === true) {
+            proofs.push({
+              source: 'context/tree-node.js',
+              proofType: 'tree-node',
+              ...rawTreeNodeProof
+            });
+          }
+
           const rawGenericContainerProof = shadowWrapper?.rawGenericContainerProof;
           if (rawGenericContainerProof && rawGenericContainerProof.isValid === true) {
             proofs.push({
@@ -6834,6 +6852,7 @@ class AIRInterceptor {
               ...rawGenericContainerProof
             });
           }
+
 
           selectorProofPacketV0 = globalThis.__AIR_SELECTOR_ENGINE__.assembleSelectorProofPacketV0(proofs);
         }
@@ -7696,6 +7715,16 @@ class AIRInterceptor {
             accessibilityEvidence,
           }))
         : null;
+    const treeNodeContextEvidence =
+      typeof selectorEngine.resolveTreeNodeContextEvidence === "function"
+        ? this._measureSelectorEngineShadowCall(timingsMs, "treeNode", () =>
+          selectorEngine.resolveTreeNodeContextEvidence({
+            element,
+            eventContext,
+            canonicalTargetInfo,
+            accessibilityEvidence,
+          }))
+        : null;
     const genericContainerContextEvidence =
       typeof selectorEngine.resolveGenericContainerProof === "function"
         ? this._measureSelectorEngineShadowCall(timingsMs, "genericContainer", () =>
@@ -7825,7 +7854,9 @@ class AIRInterceptor {
       rawLabelProof: labelContextEvidence,
       rawBoundedFieldProof: boundedFieldContextEvidence,
       rawTableRowProof: tableRowContextEvidence,
-      rawGenericContainerProof: genericContainerContextEvidence
+      rawGenericContainerProof: genericContainerContextEvidence,
+      rawOptionPanelProof: optionPanelContextEvidence,
+      rawTreeNodeProof: treeNodeContextEvidence
     };
     console.log('[AIR Trace 2] Wrapper returning:', JSON.stringify(returnObj.rawLabelProof, null, 2));
     return returnObj;
@@ -9327,7 +9358,8 @@ class AIRInterceptor {
       /[0-9a-f]{8}-[0-9a-f]{4}/i.test(id) ||
       /^:[a-z0-9]+:$/i.test(id) ||
       /\d{5,}/.test(id) ||
-      /^(?:css|sc)-[a-zA-Z0-9]+$/.test(id)
+      /^(?:css|sc)-[a-zA-Z0-9]+$/.test(id) ||
+      /\d+_\d+/.test(id)
     );
   }
 

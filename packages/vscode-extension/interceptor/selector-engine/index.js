@@ -31,6 +31,10 @@ import { generateLabelBoundIdentityShadow } from './generators/label-bound-ident
 import { trackSelectorPacket } from './telemetry.js';
 import { generateSemanticContextShadow } from './generators/semantic-context-filtering.js';
 import { generateStructuralDisambiguationShadow } from './generators/structural-disambiguation.js';
+import { generateStatefulLifecycleShadow } from './generators/stateful-lifecycle.js';
+import { generateCollectionMembershipShadow } from './generators/collection-membership.js';
+import { generateHierarchicalNavigationShadow } from './generators/hierarchical-navigation.js';
+import { resolveTreeNodeContextEvidence } from './context/tree-node.js';
 
 export const ENABLE_SHADOW_PROOF_PIPELINE = true;
 
@@ -166,8 +170,17 @@ export function assembleSelectorProofPacketV0(proofs = []) {
       const labelCandidate = generateLabelBoundIdentityShadow(proof);
       if (labelCandidate) shadowCandidates.push(labelCandidate);
 
+      const statefulCandidate = generateStatefulLifecycleShadow(proof);
+      if (statefulCandidate) shadowCandidates.push(statefulCandidate);
+
       const disambiguationCandidate = generateStructuralDisambiguationShadow(proof);
       if (disambiguationCandidate) shadowCandidates.push(disambiguationCandidate);
+
+      const collectionCandidate = generateCollectionMembershipShadow(proof);
+      if (collectionCandidate) shadowCandidates.push(collectionCandidate);
+
+      const hierarchyCandidate = generateHierarchicalNavigationShadow(proof);
+      if (hierarchyCandidate) shadowCandidates.push(hierarchyCandidate);
     }
     
     // Process Class 4 Semantic Context candidates in bulk
@@ -210,6 +223,7 @@ const api = {
   collectOptionPanelSelectorProposals,
   resolveTableRowContextEvidence,
   collectTableRowSelectorProposals,
+  resolveTreeNodeContextEvidence,
   resolveGenericContainerProof,
   collectGenericContainerProposals,
   classifySelectorCandidatePreference,

@@ -15,7 +15,8 @@ export default defineConfig({
     resolve: {
       alias: {
         '@core': resolve(__dirname, 'core'),
-        '@electron': resolve(__dirname, 'electron')
+        '@electron': resolve(__dirname, 'electron'),
+        '@air/shared': resolve(__dirname, 'packages/shared/src/index.ts')
       }
     }
   },
@@ -48,7 +49,8 @@ export default defineConfig({
     resolve: {
       alias: {
         '@src': resolve(__dirname, 'src'),
-        '@core': resolve(__dirname, 'core')
+        '@core': resolve(__dirname, 'core'),
+        '@air/shared': resolve(__dirname, 'packages/shared/src/index.ts')
       }
     }
   }
