@@ -6793,12 +6793,27 @@ class AIRInterceptor {
           }
 
           const rawLabelProof = shadowWrapper?.rawLabelProof;
-          console.log('[AIR Trace 3] Shadow injection:', JSON.stringify(rawLabelProof, null, 2));
           if (
             rawLabelProof &&
             rawLabelProof.isValid === true &&
             rawLabelProof.fieldLabelText &&
             ['label-for', 'wrapped-label', 'aria-labelledby'].includes(rawLabelProof.fieldRelation)
+          ) {
+            proofs.push({
+              source: 'labels.js',
+              proofType: 'label',
+              ...rawLabelProof
+            });
+          }
+
+          // Class 6 - disambiguation: label exists but is ambiguous (duplicateLabelCount > 1)
+          if (
+            rawLabelProof &&
+            rawLabelProof.isValid === false &&
+            rawLabelProof.blockedReason === 'bounded-field-duplicate-label' &&
+            rawLabelProof.fieldLabelText &&
+            rawLabelProof.containerSelector &&
+            typeof rawLabelProof.targetIndexWithinAmbiguity === 'number'
           ) {
             proofs.push({
               source: 'labels.js',
@@ -9359,7 +9374,7 @@ class AIRInterceptor {
       /^:[a-z0-9]+:$/i.test(id) ||
       /\d{5,}/.test(id) ||
       /^(?:css|sc)-[a-zA-Z0-9]+$/.test(id) ||
-      /\d+_\d+/.test(id)
+      /^\d+_\d+$/.test(id)
     );
   }
 

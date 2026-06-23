@@ -85,7 +85,7 @@ export function resolveTreeNodeContextEvidence({ element } = {}) {
   }
 
   const ariaExpanded = treeNode.getAttribute('aria-expanded');
-  const isExpanded = ariaExpanded === 'true' ? true : (ariaExpanded === 'false' ? false : null);
+  const isExpanded = ariaExpanded === 'true';
 
   const isValid = !!treeSelector && !!nodeSelector && !!nodeName;
 

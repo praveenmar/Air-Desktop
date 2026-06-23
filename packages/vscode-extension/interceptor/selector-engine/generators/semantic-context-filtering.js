@@ -6,7 +6,7 @@ export function canGenerateClass4(proof) {
   if (!proof || proof.isValid !== true) return false;
 
   if (proof.proofType === 'bounded-field') {
-    return proof.fieldRelation === 'bounded-container' &&
+    return (proof.fieldRelation === 'bounded-container' || proof.fieldRelation === 'sibling-label') &&
            !!proof.cleanParentSelector &&
            !!proof.cleanChildSelector &&
            !!proof.fieldLabelText &&
