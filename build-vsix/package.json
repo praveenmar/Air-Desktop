@@ -1,0 +1,85 @@
+{
+  "name": "air-vscode-extension",
+  "displayName": "AIR Recording",
+  "description": "Autonomous Interaction Recorder",
+  "version": "0.0.3",
+  "publisher": "air-desktop",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/air-desktop/air-desktop"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onCommand:air.startRecording",
+    "onCommand:air.stopRecording",
+    "onCommand:air.listSessions",
+    "onCommand:air.exportSession",
+    "onCommand:air.deleteSession",
+    "onCommand:air.debugEvents",
+    "onCommand:air.inspectSession",
+    "onCommand:air.showLogs",
+    "onCommand:air.copyMcpConfig"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "air.startRecording",
+        "title": "AIR: Start Recording",
+        "category": "AIR"
+      },
+      {
+        "command": "air.stopRecording",
+        "title": "AIR: Stop Recording",
+        "category": "AIR"
+      },
+      {
+        "command": "air.listSessions",
+        "title": "AIR: List Sessions",
+        "category": "AIR"
+      },
+      {
+        "command": "air.exportSession",
+        "title": "AIR: Export Session",
+        "category": "AIR"
+      },
+      {
+        "command": "air.deleteSession",
+        "title": "AIR: Delete Session",
+        "category": "AIR"
+      },
+      {
+        "command": "air.debugEvents",
+        "title": "AIR: Debug Recent Events",
+        "category": "AIR"
+      },
+      {
+        "command": "air.inspectSession",
+        "title": "AIR: Inspect Session",
+        "category": "AIR"
+      },
+      {
+        "command": "air.showLogs",
+        "title": "AIR: Show Logs",
+        "category": "AIR"
+      },
+      {
+        "command": "air.copyMcpConfig",
+        "title": "AIR: Copy MCP Configuration",
+        "category": "AIR"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "archiver": "^8.0.0",
+    "playwright": "^1.58.2",
+    "playwright-core": "^1.58.2"
+  }
+}
