@@ -1,3 +1,4 @@
+import { text } from 'stream/consumers';
 import { createCandidate, SelectorClassIds, SelectorEngines } from '../contracts/selector-class-contract.js';
 
 // Escape single-quotes and backslashes for interpolation into '...' JS string literals.
@@ -10,8 +11,8 @@ const ALLOWED_CONTAINER_ROLES = new Set(['listbox', 'menu', 'tree', 'tablist']);
 
 
 
-// itemNameSource values that represent a real accessible name (not raw DOM text).
-const TRUSTED_NAME_SOURCES = new Set(['accessibility', 'event-context']);
+// itemNameSource values that do NOT represent a real accessible name.
+const UNTRUSTED_NAME_SOURCES = new Set(['none', 'text-content', 'text']);
 
 /**
  * Class 7 - Stateful Lifecycle Linkage
@@ -57,7 +58,7 @@ export function generateStatefulLifecycleShadow(proof) {
 
   // --- Shared gate: item must have a role AND a trusted name for ARIA shapes -------
   const hasItem       = !!itemRole;
-  const hasTrustedName = !!itemName && TRUSTED_NAME_SOURCES.has(itemNameSource);
+  const hasTrustedName = !!itemName && !UNTRUSTED_NAME_SOURCES.has(itemNameSource);
   const hasContainerRole = !!containerRole && ALLOWED_CONTAINER_ROLES.has(containerRole);
 
   // --- Shape C - ARIA label scoped --------------------------------------------------

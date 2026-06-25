@@ -7670,7 +7670,7 @@ class AIRInterceptor {
             canonicalTargetInfo,
           }))
         : null;
-    console.log('[AIR Trace 1] labelContextEvidence created:', JSON.stringify(labelContextEvidence, null, 2));
+
     const accessibilityEvidence =
       typeof selectorEngine.resolveAccessibilityEvidence === "function"
         ? this._measureSelectorEngineShadowCall(timingsMs, "accessibility", () =>
