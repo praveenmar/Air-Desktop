@@ -7,6 +7,7 @@ function safeCssEscape(str) {
 
 export function generateStructuralDisambiguationShadow(proof) {
   if (!proof) return null;
+  if (proof.proofType === 'option-panel') return null;
 
   const clusterAnchorSelector = proof.containerSelector;
   const ambiguousBaseSelector = proof.fieldLabelText;

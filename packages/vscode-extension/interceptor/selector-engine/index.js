@@ -170,8 +170,12 @@ export function assembleSelectorProofPacketV0(proofs = []) {
       const labelCandidate = generateLabelBoundIdentityShadow(proof);
       if (labelCandidate) shadowCandidates.push(labelCandidate);
 
-      const statefulCandidate = generateStatefulLifecycleShadow(proof);
-      if (statefulCandidate) shadowCandidates.push(statefulCandidate);
+      const class7Result = generateStatefulLifecycleShadow(proof);
+      if (Array.isArray(class7Result)) {
+        if (class7Result.length) shadowCandidates.push(...class7Result);
+      } else if (class7Result) {
+        shadowCandidates.push(class7Result); // legacy fallback
+      }
 
       const disambiguationCandidate = generateStructuralDisambiguationShadow(proof);
       if (disambiguationCandidate) shadowCandidates.push(disambiguationCandidate);

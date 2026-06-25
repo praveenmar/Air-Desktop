@@ -6783,7 +6783,6 @@ class AIRInterceptor {
           });
 
           const rawAccessibilityProof = shadowWrapper?.rawAccessibilityProof;
-          console.log('[AIR Trace 1] Escrow Proof:', rawAccessibilityProof);
           if (rawAccessibilityProof && rawAccessibilityProof.role && rawAccessibilityProof.accessibleName) {
             proofs.push({
               source: "role-name.js",
@@ -6832,6 +6831,19 @@ class AIRInterceptor {
             });
           }
 
+          // [NEW] Class 6 disambiguation: bounded-field proof blocked due to duplicate labels
+          if (
+            rawBoundedFieldProof &&
+            rawBoundedFieldProof.isValid === false &&
+            rawBoundedFieldProof.blockedReason === 'bounded-field-duplicate-label'
+          ) {
+            proofs.push({
+              source: 'context/bounded-field.js',
+              proofType: 'bounded-field',
+              ...rawBoundedFieldProof
+            });
+          }
+
           const rawTableRowProof = shadowWrapper?.rawTableRowProof;
           if (rawTableRowProof && rawTableRowProof.isValid === true) {
             proofs.push({
@@ -6842,7 +6854,7 @@ class AIRInterceptor {
           }
 
           const rawOptionPanelProof = shadowWrapper?.rawOptionPanelProof;
-          if (rawOptionPanelProof && rawOptionPanelProof.isValid === true) {
+          if (rawOptionPanelProof) {
             proofs.push({
               source: 'context/option-panel.js',
               proofType: 'option-panel',
@@ -7873,7 +7885,6 @@ class AIRInterceptor {
       rawOptionPanelProof: optionPanelContextEvidence,
       rawTreeNodeProof: treeNodeContextEvidence
     };
-    console.log('[AIR Trace 2] Wrapper returning:', JSON.stringify(returnObj.rawLabelProof, null, 2));
     return returnObj;
   }
 

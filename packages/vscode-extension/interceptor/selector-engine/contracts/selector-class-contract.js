@@ -3,7 +3,7 @@ export const SelectorClassIds = {
   SEMANTIC_IDENTITY: 'semantic-identity',
   LABEL_BOUND_IDENTITY: 'label-bound-identity',
   SEMANTIC_CONTEXT_FILTERING: 'semantic-context-filtering',
-  STRUCTURAL_ADJACENCY: 'structural-adjacency',
+  STRUCTURAL_ADJACENCY: 'structural-adjacency',        // TOMBSTONE - Class 5 retired, merged into Class 4
   NATIVE_DOM_NORMALIZATION: 'native-dom-normalization',
   STRUCTURAL_DISAMBIGUATION: 'structural-disambiguation',
   STATEFUL_LIFECYCLE_LINKAGE: 'stateful-lifecycle-linkage',
