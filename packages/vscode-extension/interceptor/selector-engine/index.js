@@ -180,8 +180,12 @@ export function assembleSelectorProofPacketV0(proofs = []) {
       const disambiguationCandidate = generateStructuralDisambiguationShadow(proof);
       if (disambiguationCandidate) shadowCandidates.push(disambiguationCandidate);
 
-      const collectionCandidate = generateCollectionMembershipShadow(proof);
-      if (collectionCandidate) shadowCandidates.push(collectionCandidate);
+      const class8Result = generateCollectionMembershipShadow(proof);
+      if (Array.isArray(class8Result)) {
+        if (class8Result.length) shadowCandidates.push(...class8Result);
+      } else if (class8Result) {
+        shadowCandidates.push(class8Result); // legacy fallback
+      }
 
       const class9Result = generateHierarchicalNavigationShadow(proof);
       if (Array.isArray(class9Result)) {
