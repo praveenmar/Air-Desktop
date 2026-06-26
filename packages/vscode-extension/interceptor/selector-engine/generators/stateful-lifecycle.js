@@ -1,4 +1,4 @@
-import { text } from 'stream/consumers';
+
 import { createCandidate, SelectorClassIds, SelectorEngines } from '../contracts/selector-class-contract.js';
 
 // Escape single-quotes and backslashes for interpolation into '...' JS string literals.

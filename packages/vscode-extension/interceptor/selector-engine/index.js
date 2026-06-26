@@ -183,8 +183,12 @@ export function assembleSelectorProofPacketV0(proofs = []) {
       const collectionCandidate = generateCollectionMembershipShadow(proof);
       if (collectionCandidate) shadowCandidates.push(collectionCandidate);
 
-      const hierarchyCandidate = generateHierarchicalNavigationShadow(proof);
-      if (hierarchyCandidate) shadowCandidates.push(hierarchyCandidate);
+      const class9Result = generateHierarchicalNavigationShadow(proof);
+      if (Array.isArray(class9Result)) {
+        if (class9Result.length) shadowCandidates.push(...class9Result);
+      } else if (class9Result) {
+        shadowCandidates.push(class9Result); // legacy fallback
+      }
     }
     
     // Process Class 4 Semantic Context candidates in bulk
