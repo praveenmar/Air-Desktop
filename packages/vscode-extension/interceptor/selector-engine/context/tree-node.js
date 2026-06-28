@@ -47,8 +47,17 @@ function findTreeContainer(target) {
   let found = null;
   while (current && current.nodeType === Node.ELEMENT_NODE) {
     const role = getRole(current);
+    const tagName = current.tagName?.toLowerCase();
+    
     if (role && TREE_CONTAINER_ROLES.has(role)) {
       found = current; // keep walking - want outermost
+    } else if (tagName === 'ul' || tagName === 'ol') {
+      // Strict Gate: Must have aria-label/labelledby OR be inside a nav/aside
+      const hasAriaLabel = !!safeTrim(current.getAttribute('aria-label') || current.getAttribute('aria-labelledby') || '');
+      const hasNavParent = !!current.closest('nav, aside, [role="navigation"], [role="menu"]');
+      if (hasAriaLabel || hasNavParent) {
+        found = current;
+      }
     }
     current = current.parentElement;
   }
@@ -80,6 +89,26 @@ export function resolveTreeNodeContextEvidence({ element, accessibilityEvidence 
       isValid: false,
       blockedReason: 'tree-node-not-in-tree',
     };
+  }
+
+  let nodeRole = null;
+  let containerRole = null;
+  
+  const treeNodeRole = getRole(treeNode);
+  const treeNodeTagName = treeNode.tagName?.toLowerCase();
+  
+  if (treeNodeRole && TREE_NODE_ROLES.has(treeNodeRole)) {
+    nodeRole = treeNodeRole;
+  } else if (treeNodeTagName === 'li') {
+    nodeRole = 'listitem';
+  }
+  
+  const containerTagRole = getRole(treeContainer);
+  const containerTagName = treeContainer.tagName?.toLowerCase();
+  if (containerTagRole && TREE_CONTAINER_ROLES.has(containerTagRole)) {
+    containerRole = containerTagRole;
+  } else if (containerTagName === 'ul' || containerTagName === 'ol') {
+    containerRole = 'list';
   }
 
   const treeSelector = buildSelectorForElement(treeContainer, { allowRole: true });
@@ -145,6 +174,8 @@ export function resolveTreeNodeContextEvidence({ element, accessibilityEvidence 
     treeSelector,
     nodeSelector,
     nodeName,
+    nodeRole,
+    containerRole,
     ancestorPath,
     depth,
     isExpanded,

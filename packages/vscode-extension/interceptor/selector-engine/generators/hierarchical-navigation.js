@@ -42,10 +42,12 @@ export function generateHierarchicalNavigationShadow(proof) {
   if (!proof || proof.proofType !== 'tree-node') return [];
   if (proof.isValid !== true) return [];
 
-  const { treeSelector, nodeName, ancestorPath } = proof;
+  const { treeSelector, nodeName, ancestorPath, nodeRole } = proof;
 
   // Minimum requirement: must have a tree anchor AND a leaf name
   if (!treeSelector || !nodeName) return [];
+
+  const resolvedNodeRole = nodeRole || 'treeitem';
 
   const candidates = [];
 
@@ -54,7 +56,12 @@ export function generateHierarchicalNavigationShadow(proof) {
   // will determine at replay time whether this is unique or not. If non-unique,
   // Shape P-aria or Shape P-chain (also in the packet) will be used as fallback.
   {
-    const selector = `locator('${esc(treeSelector)}').getByRole('treeitem', { name: '${esc(nodeName)}', exact: true })`;
+    let selector;
+    if (resolvedNodeRole === 'listitem') {
+      selector = `locator('${esc(treeSelector)}').locator('li', { hasText: '${esc(nodeName)}' })`;
+    } else {
+      selector = `locator('${esc(treeSelector)}').getByRole('${esc(resolvedNodeRole)}', { name: '${esc(nodeName)}', exact: true })`;
+    }
     candidates.push(createCandidate({
       classId: SelectorClassIds.HIERARCHICAL_NAVIGATION,
       selector,
@@ -73,13 +80,14 @@ export function generateHierarchicalNavigationShadow(proof) {
 
   if (hasAncestors && allAncestorsHaveAriaLabel) {
     // Build: [aria-label="A"] [role="treeitem"][aria-label="B"] ... [role="treeitem"][aria-label="leaf"]
+    const roleSelector = resolvedNodeRole === 'listitem' ? 'li' : `[role="${esc(resolvedNodeRole)}"]`;
     const ancestorCss = ancestorPath
       .map((a, i) => i === 0
         ? `[aria-label="${escCssAttr(a.ariaLabel)}"]`
-        : `[role="treeitem"][aria-label="${escCssAttr(a.ariaLabel)}"]`
+        : `${roleSelector}[aria-label="${escCssAttr(a.ariaLabel)}"]`
       )
       .join(' ');
-    const leafCss = `[role="treeitem"][aria-label="${escCssAttr(nodeName)}"]`;
+    const leafCss = `${roleSelector}[aria-label="${escCssAttr(nodeName)}"]`;
     const fullCss = `${ancestorCss} ${leafCss}`;
     const selector = `locator('${esc(treeSelector)}').locator('${esc(fullCss)}')`;
     candidates.push(createCandidate({
@@ -102,9 +110,17 @@ export function generateHierarchicalNavigationShadow(proof) {
   if (hasAncestors && !allAncestorsHaveAriaLabel) {
     let chain = `locator('${esc(treeSelector)}')`;
     for (const ancestor of ancestorPath) {
-      chain += `.getByRole('treeitem', { name: '${esc(ancestor.name)}', exact: true })`;
+      if (resolvedNodeRole === 'listitem') {
+        chain += `.locator('li', { hasText: '${esc(ancestor.name)}' })`;
+      } else {
+        chain += `.getByRole('${esc(resolvedNodeRole)}', { name: '${esc(ancestor.name)}', exact: true })`;
+      }
     }
-    chain += `.getByRole('treeitem', { name: '${esc(nodeName)}', exact: true })`;
+    if (resolvedNodeRole === 'listitem') {
+      chain += `.locator('li', { hasText: '${esc(nodeName)}' })`;
+    } else {
+      chain += `.getByRole('${esc(resolvedNodeRole)}', { name: '${esc(nodeName)}', exact: true })`;
+    }
     candidates.push(createCandidate({
       classId: SelectorClassIds.HIERARCHICAL_NAVIGATION,
       selector: chain,

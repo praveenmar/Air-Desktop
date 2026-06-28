@@ -4333,12 +4333,24 @@ class AIRInterceptor {
       replayableQueueEvents.push(ev);
     }
 
-    const slimEvents = replayableQueueEvents.map(ev => ({
-      ...ev,
-      pageSnapshot: null,
-      pageState:    null,
-      interactionContext: null,
-    }));
+    const slimEvents = replayableQueueEvents.map(ev => {
+      const eventCopy = {
+        ...ev,
+        pageSnapshot: null,
+        pageState:    null,
+        interactionContext: null,
+      };
+
+      if (eventCopy.fingerprint && eventCopy.fingerprint._selectorDecision) {
+        const decision = eventCopy.fingerprint._selectorDecision;
+        eventCopy.fingerprint = { ...eventCopy.fingerprint };
+        delete eventCopy.fingerprint._selectorDecision;
+        
+        eventCopy.selectorResolution = this._buildSelectorResolutionForWire(decision);
+      }
+
+      return eventCopy;
+    });
 
     // ── STEP 2: Stash full events to localStorage (The Gold Standard) ─────────
     // Merges with any existing stash for this session (e.g. multiple rapid

@@ -171,4 +171,38 @@ check('Mixed ancestors (some have ariaLabel, some do not) -> P-chain only, not P
   `locator('[role="tree"]').getByRole('treeitem', { name: 'src', exact: true }).getByRole('treeitem', { name: 'utils', exact: true }).getByRole('treeitem', { name: 'file.ts', exact: true })`,
 ]);
 
+check('Semantic List - Shape N and Shape P-chain with nodeRole=listitem', {
+  proofType: 'tree-node',
+  isValid: true,
+  treeSelector: 'nav ul',
+  nodeName: 'User Management',
+  nodeRole: 'listitem',
+  containerRole: 'list',
+  ancestorPath: [
+    { name: 'Admin', ariaLabel: null }
+  ],
+  depth: 2,
+  isExpanded: false,
+}, [
+  `locator('nav ul').locator('li', { hasText: 'User Management' })`,
+  `locator('nav ul').locator('li', { hasText: 'Admin' }).locator('li', { hasText: 'User Management' })`
+]);
+
+check('Semantic List - Shape P-aria with nodeRole=listitem (edge case)', {
+  proofType: 'tree-node',
+  isValid: true,
+  treeSelector: 'aside ol',
+  nodeName: 'Privacy',
+  nodeRole: 'listitem',
+  containerRole: 'list',
+  ancestorPath: [
+    { name: 'Settings', ariaLabel: 'Settings' }
+  ],
+  depth: 2,
+  isExpanded: false,
+}, [
+  `locator('aside ol').locator('li', { hasText: 'Privacy' })`,
+  `locator('aside ol').locator('[aria-label="Settings"] li[aria-label="Privacy"]')`
+]);
+
 console.log('\nAll Class 9 tests passed!');
