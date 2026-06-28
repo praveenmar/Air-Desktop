@@ -9,6 +9,9 @@ import {
 } from './runtime-schemas';
 import { CodegenSession, CodegenStep, GenerationEventMetadata, CodegenAssertion } from './types';
 
+// SINGLE FLIP TO PROMOTE SHADOW SELECTORS TO MCP
+const ENABLE_SHADOW_SELECTOR_PROMOTION = true; // <- change to true for Phase C
+
 /**
  * Phase 3C + GC-1A: Pure GenerationContext Builder
  *
@@ -54,6 +57,8 @@ export function deriveGenerationContext(input: {
     let fallbackHints: GenerationStepV1['fallbackHints'] = undefined;
 
     if (isTargetNeeded) {
+      const isShadow = selectorResolution?.selected?.source === 'shadow-preference';
+
       if (
         selectorResolution &&
         selectorResolution.status === 'resolved' &&
@@ -61,7 +66,8 @@ export function deriveGenerationContext(input: {
         selectorResolution.selected.replaySafe === true &&
         typeof selectorResolution.selected.selector === 'string' &&
         selectorResolution.selected.selector.trim().length > 0 &&
-        (selectorResolution.selected.engine === 'css' || selectorResolution.selected.engine === 'xpath')
+        (selectorResolution.selected.engine === 'css' || selectorResolution.selected.engine === 'xpath') &&
+        (!isShadow || ENABLE_SHADOW_SELECTOR_PROMOTION)
       ) {
         locatorStatus = 'resolved';
         resolvedTarget = {
@@ -69,6 +75,14 @@ export function deriveGenerationContext(input: {
           value: selectorResolution.selected.selector,
           source: 'selectorResolution',
           replaySafe: true,
+        };
+      } else if (isShadow && !ENABLE_SHADOW_SELECTOR_PROMOTION && metadata?.fallbackHints?.legacySelector) {
+        locatorStatus = 'resolved';
+        resolvedTarget = {
+          kind: 'css',
+          value: metadata.fallbackHints.legacySelector,
+          source: 'legacy_fallback',
+          replaySafe: false,
         };
       } else {
         locatorStatus = 'unresolved';
