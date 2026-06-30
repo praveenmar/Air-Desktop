@@ -52,9 +52,11 @@ export function generateStatefulLifecycleShadow(proof) {
     targetIndexWithinContainer,
     containerSelector,
     itemSelector,
+    triggerSelector,
   } = proof;
 
   const candidates = [];
+  const realizationSteps = triggerSelector ? [{ action: 'click', kind: 'css', value: triggerSelector }] : undefined;
 
   // --- Shared gate: item must have a role AND a trusted name for ARIA shapes -------
   const hasItem       = !!itemRole;
@@ -82,6 +84,7 @@ export function generateStatefulLifecycleShadow(proof) {
       selector,
       engine: SelectorEngines.PLAYWRIGHT_ARIA,
       proof,
+      realizationSteps,
       metadata: { shape: 'C', reason: 'aria-label-scoped' }
     }));
   }
@@ -105,8 +108,9 @@ export function generateStatefulLifecycleShadow(proof) {
     candidates.push(createCandidate({
       classId: SelectorClassIds.STATEFUL_LIFECYCLE_LINKAGE,
       selector,
-      engine: SelectorEngines.PLAYWRIGHT_NATIVE,
+      engine: SelectorEngines.PLAYWRIGHT_CSS,
       proof,
+      realizationSteps,
       metadata: { shape: 'B', reason: 'container-id-anchor' }
     }));
   }
@@ -130,7 +134,8 @@ export function generateStatefulLifecycleShadow(proof) {
       selector,
       engine: SelectorEngines.PLAYWRIGHT_ARIA,
       proof,
-      metadata: { shape: 'D', reason: 'detached-context' }
+      realizationSteps,
+      metadata: { shape: 'D', reason: 'detached-portaled' }
     }));
   }
 
@@ -153,6 +158,7 @@ export function generateStatefulLifecycleShadow(proof) {
       selector,
       engine: SelectorEngines.PLAYWRIGHT_NATIVE,
       proof,
+      realizationSteps,
       metadata: { shape: 'P', reason: 'positional-fallback' }
     }));
   }

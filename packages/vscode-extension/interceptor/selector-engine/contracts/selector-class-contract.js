@@ -21,11 +21,12 @@ export const SelectorEngines = {
  * Creates an immutable Selector Candidate.
  * Modifiers must return new candidate objects rather than mutating existing ones.
  */
-export function createCandidate({ classId, selector, engine, proof, metadata = {} }) {
+export function createCandidate({ classId, selector, engine, proof, realizationSteps, metadata = {} }) {
   const candidate = {
     classId,
     selector,
     engine,
+    realizationSteps: realizationSteps ? Object.freeze([...realizationSteps]) : undefined,
     appliedModifiers: Object.freeze([]),
     proof: Object.freeze({ ...proof }),
     metadata: Object.freeze({ ...metadata })

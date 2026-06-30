@@ -71,8 +71,9 @@ export function deriveGenerationContext(input: {
       ) {
         locatorStatus = 'resolved';
         resolvedTarget = {
-          kind: selectorResolution.selected.engine,
+          kind: inferKindFromSelector(selectorResolution.selected.selector, selectorResolution.selected.engine as 'css' | 'xpath'),
           value: selectorResolution.selected.selector,
+          ...(selectorResolution.selected.realizationSteps ? { realizationSteps: selectorResolution.selected.realizationSteps } : {}),
           source: 'selectorResolution',
           replaySafe: true,
         };
@@ -100,6 +101,32 @@ export function deriveGenerationContext(input: {
         if (Object.keys(hints).length > 0) {
           fallbackHints = hints;
         }
+      }
+
+      // Class 10 - Boundary Traversal: wrap resolvedTarget with frameLocator if event is from an iframe
+      const frameContext = metadata?.frameContext;
+      if (
+        resolvedTarget &&
+        locatorStatus === 'resolved' &&
+        frameContext?.frameSelector &&
+        frameContext.isSameOrigin === true
+      ) {
+        let innerLocator: string;
+        if (resolvedTarget.kind === 'css') {
+          innerLocator = `locator('${resolvedTarget.value.replace(/'/g, "\\'")}')`;
+        } else if (resolvedTarget.kind === 'xpath') {
+          innerLocator = `locator('xpath=${resolvedTarget.value.replace(/'/g, "\\'")}')`;
+        } else {
+          // 'role', 'text', 'label', 'placeholder', 'testid' - already a method chain
+          innerLocator = resolvedTarget.value;
+        }
+        resolvedTarget = {
+          kind: 'frame',
+          value: `frameLocator('${frameContext.frameSelector.replace(/'/g, "\\'")}').${innerLocator}`,
+          ...(resolvedTarget.realizationSteps ? { realizationSteps: resolvedTarget.realizationSteps } : {}),
+          source: 'selectorResolution',
+          replaySafe: resolvedTarget.replaySafe,
+        };
       }
     }
 
@@ -363,6 +390,11 @@ function buildGenerationGuidance(): GenerationGuidanceV1 {
       'Do not skip or reorder steps unless the user explicitly instructs it.',
       'Preserve custom-control-open steps; they are required for dropdown and menu visibility before selection.',
       'Use resolvedTarget.value as the locator when locatorStatus is "resolved".',
+      'When resolvedTarget.kind is "css", wrap value in page.locator(value) or use it directly as a CSS selector string.',
+      'When resolvedTarget.kind is "xpath", use page.locator("xpath=" + value).',
+      'When resolvedTarget.kind is "native", the value is a Playwright native locator chain (e.g. locator(...).nth(...)). Use it as page.{value}.{action}() - do NOT wrap in page.locator().',
+      'When resolvedTarget.kind is "role", "text", "label", "placeholder", or "testid", the value is a Playwright ARIA locator chain (e.g. getByRole(...).getByRole(...)). Use it as page.{value}.{action}() - do NOT wrap in page.locator().',
+      'When resolvedTarget.kind is "frame", the value is a Playwright frameLocator chain (e.g. frameLocator(\'iframe#id\').locator(...)). Use it as page.{value}.{action}() - do NOT wrap in page.locator().',
       'Use fallbackHints.legacySelector only when locatorStatus is "unresolved".',
       'Do not invent or guess selectors.',
       'Replace <LLM_GENERATE_MOCK_DATA> with safe mock data or environment-backed test data.',
@@ -370,6 +402,41 @@ function buildGenerationGuidance(): GenerationGuidanceV1 {
     ],
   };
 }
+
+//
+// GC-1A: KIND INFERENCE
+//
+
+/**
+ * Maps a selector string + wire engine to the richer resolvedTarget.kind value.
+ *
+ * The wire schema only stores 'css' | 'xpath' (schema constraint), but
+ * shadow-class generators produce ARIA/native Playwright locator chains
+ * (e.g. getByRole(...).getByRole(...), locator(...).nth(N)).
+ * Detect these from the selector string so the LLM guidance is unambiguous.
+ */
+function inferKindFromSelector(
+  selector: string,
+  wireEngine: 'css' | 'xpath'
+): GenerationStepV1['resolvedTarget'] extends { kind: infer K } ? K : 'css' {
+  if (wireEngine === 'xpath') return 'xpath' as any;
+  const s = selector.trimStart();
+  if (s.startsWith('getByRole(')) return 'role' as any;
+  if (s.startsWith('getByText(')) return 'text' as any;
+  if (s.startsWith('getByLabel(')) return 'label' as any;
+  if (s.startsWith('getByPlaceholder(')) return 'placeholder' as any;
+  if (s.startsWith('getByTestId(')) return 'testid' as any;
+  if (s.startsWith('locator(')) return 'native' as any;
+  return 'css' as any;
+}
+
+// Class 10 - Boundary Traversal scope:
+// SUPPORTED: Same-origin iframes (window.frameElement accessible, isSameOrigin: true).
+// OUT OF SCOPE: Cross-origin iframes (Stripe, PayPal, Google login, etc.).
+//   These are blocked at transport layer — Mixed Content (HTTPS iframe -> HTTP localhost)
+//   or external CSP headers prevent event delivery. Not an AIR limitation to solve.
+// OUT OF SCOPE: Nested iframes (iframe inside iframe). window.frameElement only gives
+//   the immediate parent frame. Multi-level nesting is Phase D territory.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SHARED UTILITIES

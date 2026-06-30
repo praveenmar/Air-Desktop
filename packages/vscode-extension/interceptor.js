@@ -653,6 +653,65 @@ class AIRInterceptor {
     // ------------------------------------------------------------
     // 3. INTERNAL STATE & QUEUES (Restored)
     // ------------------------------------------------------------
+    
+    // --- Frame Self-Identification ---
+    // Detect if this interceptor instance is running inside a same-origin iframe.
+    // window !== window.top -> we are in a frame.
+    // window.frameElement accessible -> same-origin (cross-origin throws SecurityError).
+    this._frameContext = null;
+    try {
+      if (typeof window !== 'undefined' && window !== window.top) {
+        const fe = window.frameElement; // throws SecurityError if cross-origin
+        if (fe && fe.nodeType === Node.ELEMENT_NODE) {
+          const frameId = fe.id || null;
+          const frameName = fe.getAttribute('name') || null;
+          const frameSrc = fe.getAttribute('src') || null;
+
+          // Build the most stable frameSelector, in priority order
+          let frameSelector = null;
+          if (frameId) {
+            frameSelector = `iframe#${frameId}`;
+          } else if (frameName) {
+            frameSelector = `iframe[name="${frameName.replace(/"/g, '\\"')}"]`;
+          } else if (frameSrc) {
+            // Use a partial src match to be resilient to query string changes
+            try {
+              const srcPath = new URL(frameSrc, window.location.href).pathname;
+              frameSelector = `iframe[src*="${srcPath.replace(/"/g, '\\"')}"]`;
+            } catch (_) {
+              frameSelector = `iframe[src="${frameSrc.replace(/"/g, '\\"')}"]`;
+            }
+          } else {
+            // Last resort: nth-of-type position in parent
+            // Support legacy <frame> inside <frameset> as well
+            const siblings = window.parent.document.querySelectorAll('iframe, frame');
+            const idx = Array.prototype.indexOf.call(siblings, fe);
+            if (idx >= 0) {
+              const tag = fe.tagName.toLowerCase();
+              frameSelector = `${tag}:nth-of-type(${idx + 1})`;
+            }
+          }
+
+          if (frameSelector) {
+            this._frameContext = {
+              frameSelector,
+              frameId,
+              frameName,
+              frameSrc,
+              isSameOrigin: true,
+            };
+            this.log('FRAME_CONTEXT_DETECTED', {
+              frameSelector,
+              frameId,
+              frameName,
+              sessionId: this.config?.sessionId || null,
+            });
+          }
+        }
+      }
+    } catch (_) {
+      // SecurityError = cross-origin. _frameContext stays null. Silent.
+    }
     this.activeRequests = 0;
     this.eventQueue = []; // Your queue variable
     this.queue = this.eventQueue; // Alias just in case I used 'this.queue' in other methods
@@ -10892,7 +10951,18 @@ class AIRInterceptor {
 
   queueEvent(event) {
     if (this.disabled) return;
-    const queuedEvent = this._isPlainObject(event) ? { ...event } : event;
+    const queuedEvent = this._isPlainObject(event) ? { 
+      ...event,
+      ...(this._frameContext ? { frameContext: this._frameContext } : {}) 
+    } : event;
+    
+    // Inject directly on object if not plain to handle edge cases
+    if (!this._isPlainObject(event) && this._frameContext && typeof queuedEvent === 'object' && queuedEvent !== null) {
+      try {
+        queuedEvent.frameContext = this._frameContext;
+      } catch (e) {}
+    }
+
     if (
       this._isPlainObject(queuedEvent) &&
       (queuedEvent.tabId === undefined || queuedEvent.tabId === null) &&

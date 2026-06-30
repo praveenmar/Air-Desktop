@@ -40,6 +40,7 @@ function normalizeSelectorCandidate(candidate, sourceOverride = null, extraProps
     matchCount: typeof candidate.matchCount === 'number' ? candidate.matchCount : null,
     visibleMatchCount: typeof candidate.visibleMatchCount === 'number' ? candidate.visibleMatchCount : null,
     warningCodes: Array.isArray(candidate.warningCodes) ? candidate.warningCodes : [],
+    ...(candidate.realizationSteps ? { realizationSteps: candidate.realizationSteps } : {}),
     ...extraProps
   };
 }

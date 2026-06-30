@@ -26,6 +26,7 @@ import { collectWeakAppShadowCoverage } from './weak-app-shadow.js';
 import { chooseSemanticRowIdentity } from './context/semantic-row-anchor.js';
 import { buildSelectorDecision } from './decision-normalization.js';
 import { generateDirectIdentityShadow } from './generators/shadow-identity.js';
+import { applyNativeDomNormalization } from './generators/native-dom-normalization.js';
 import { generateSemanticIdentityShadow } from './generators/semantic-identity.js';
 import { generateLabelBoundIdentityShadow } from './generators/label-bound-identity.js';
 import { trackSelectorPacket } from './telemetry.js';
@@ -158,8 +159,15 @@ export function assembleSelectorProofPacketV0(proofs = []) {
     
     // --- Route Proofs to Pure Generators ---
     if (Array.isArray(proofs)) {
-    for (const proof of proofs) {
-      if (!proof) continue;
+    for (const rawProof of proofs) {
+      if (!rawProof) continue;
+
+      // Class 11 - Native DOM Normalization:
+      // Normalize invisible/variant Unicode in human-readable text fields before
+      // any generator runs. Identity attribute fields (id, data-testid, name, href)
+      // are intentionally NOT normalized - they are developer-set values, not
+      // rendered text. All generator classes receive the normalized proof.
+      const proof = applyNativeDomNormalization(rawProof);
       
       const identityCandidate = generateDirectIdentityShadow(proof);
       if (identityCandidate) shadowCandidates.push(identityCandidate);
