@@ -8,6 +8,15 @@
     "vscode": "^1.90.0"
   },
   "main": "./dist/extension.js",
+  "files": [
+    "dist",
+    "interceptor",
+    "interceptor.js",
+    "patch.js",
+    "patch-interceptor.js",
+    "run-hardening.js",
+    "validation_lab.html"
+  ],
   "activationEvents": [
     "onCommand:air.startRecording",
     "onCommand:air.stopRecording",
