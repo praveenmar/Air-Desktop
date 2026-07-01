@@ -1,13 +1,9 @@
 {
-  "name": "air-vscode-extension",
-  "displayName": "AIR Recording",
-  "description": "Autonomous Interaction Recorder",
+  "name": "air",
+  "displayName": "AIR (AI Interaction Recorder)",
+  "description": "An intelligent DOM interceptor and semantic data layer providing LLMs with deterministic web automation context.",
   "version": "0.0.3",
   "publisher": "air-desktop",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/air-desktop/air-desktop"
-  },
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -78,11 +74,11 @@
     "package": "vsce package"
   },
   "dependencies": {
-    "archiver": "^8.0.0",
     "playwright": "^1.58.2",
     "playwright-core": "^1.58.2"
   },
   "devDependencies": {
+    "archiver": "^8.0.0",
     "@air/core": "*",
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.90.0",
