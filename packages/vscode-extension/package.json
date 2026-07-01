@@ -2,11 +2,21 @@
   "name": "air",
   "displayName": "AIR (AI Interaction Recorder)",
   "description": "An intelligent DOM interceptor and semantic data layer providing LLMs with deterministic web automation context.",
-  "version": "0.0.3",
-  "publisher": "air-desktop",
+  "version": "0.1.0",
+  "publisher": "AIRAIInteractionRecorder",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/air-desktop/air-desktop"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
+   "categories": [
+    "Testing",
+    "AI",
+    "Other",
+    "Programming Languages"
+  ],
   "main": "./dist/extension.js",
   "activationEvents": [
     "onCommand:air.startRecording",
