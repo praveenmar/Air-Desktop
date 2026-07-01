@@ -6816,147 +6816,7 @@ class AIRInterceptor {
       _selectorDecision = shadowWrapper ? shadowWrapper.selectorDecision : null;
 
       // --- SHADOW PROOF PIPELINE INJECTION ---
-      try {
-        if (ENABLE_SHADOW_PROOF_PIPELINE && globalThis.__AIR_SELECTOR_ENGINE__?.assembleSelectorProofPacketV0) {
-          const proofs = [];
-          
-          const testId = element.getAttribute ? element.getAttribute('data-testid') : null;
-          if (testId) {
-            proofs.push({
-              source: "interceptor.js",
-              identityType: "data-testid",
-              value: testId,
-              isLikelyDynamic: false
-            });
-          }
-
-          const id = element.id || null;
-          if (id) {
-            proofs.push({
-              source: "interceptor.js",
-              identityType: "id",
-              value: id,
-              isLikelyDynamic: this._isLikelyDynamicId(id)
-            });
-          }
-
-          // Legacy Identity Parity (name, href, value, title, alt)
-          ['name', 'href', 'value', 'title', 'alt'].forEach(attr => {
-            const attrValue = element.getAttribute ? element.getAttribute(attr) : null;
-            if (attrValue) {
-              proofs.push({
-                source: "interceptor.js",
-                identityType: attr,
-                value: attrValue,
-                isLikelyDynamic: attr === 'name' ? this._isLikelyDynamicId(attrValue) : false
-              });
-            }
-          });
-
-          const rawAccessibilityProof = shadowWrapper?.rawAccessibilityProof;
-          if (rawAccessibilityProof && rawAccessibilityProof.role && rawAccessibilityProof.accessibleName) {
-            proofs.push({
-              source: "role-name.js",
-              proofType: "accessibility",
-              ...rawAccessibilityProof
-            });
-          }
-
-          const rawLabelProof = shadowWrapper?.rawLabelProof;
-          if (
-            rawLabelProof &&
-            rawLabelProof.isValid === true &&
-            rawLabelProof.fieldLabelText &&
-            ['label-for', 'wrapped-label', 'aria-labelledby'].includes(rawLabelProof.fieldRelation)
-          ) {
-            proofs.push({
-              source: 'labels.js',
-              proofType: 'label',
-              ...rawLabelProof
-            });
-          }
-
-          // Class 6 - disambiguation: label exists but is ambiguous (duplicateLabelCount > 1)
-          if (
-            rawLabelProof &&
-            rawLabelProof.isValid === false &&
-            rawLabelProof.blockedReason === 'bounded-field-duplicate-label' &&
-            rawLabelProof.fieldLabelText &&
-            rawLabelProof.containerSelector &&
-            typeof rawLabelProof.targetIndexWithinAmbiguity === 'number'
-          ) {
-            proofs.push({
-              source: 'labels.js',
-              proofType: 'label',
-              ...rawLabelProof
-            });
-          }
-
-          // Class 4 Semantic Context Escrow
-          const rawBoundedFieldProof = shadowWrapper?.rawBoundedFieldProof;
-          if (rawBoundedFieldProof && rawBoundedFieldProof.isValid === true) {
-            proofs.push({
-              source: 'context/bounded-field.js',
-              proofType: 'bounded-field',
-              ...rawBoundedFieldProof
-            });
-          }
-
-          // [NEW] Class 6 disambiguation: bounded-field proof blocked due to duplicate labels
-          if (
-            rawBoundedFieldProof &&
-            rawBoundedFieldProof.isValid === false &&
-            rawBoundedFieldProof.blockedReason === 'bounded-field-duplicate-label'
-          ) {
-            proofs.push({
-              source: 'context/bounded-field.js',
-              proofType: 'bounded-field',
-              ...rawBoundedFieldProof
-            });
-          }
-
-          const rawTableRowProof = shadowWrapper?.rawTableRowProof;
-          if (rawTableRowProof && rawTableRowProof.isValid === true) {
-            proofs.push({
-              source: 'context/table-row.js',
-              proofType: 'table-row',
-              ...rawTableRowProof
-            });
-          }
-
-          const rawOptionPanelProof = shadowWrapper?.rawOptionPanelProof;
-          if (rawOptionPanelProof) {
-            proofs.push({
-              source: 'context/option-panel.js',
-              proofType: 'option-panel',
-              ...rawOptionPanelProof
-            });
-          }
-
-          const rawTreeNodeProof = shadowWrapper?.rawTreeNodeProof;
-          if (rawTreeNodeProof && rawTreeNodeProof.isValid === true) {
-            proofs.push({
-              source: 'context/tree-node.js',
-              proofType: 'tree-node',
-              ...rawTreeNodeProof
-            });
-          }
-
-          const rawGenericContainerProof = shadowWrapper?.rawGenericContainerProof;
-          if (rawGenericContainerProof && rawGenericContainerProof.isValid === true) {
-            proofs.push({
-              source: 'context/generic-container.js',
-              proofType: 'generic-container',
-              ...rawGenericContainerProof
-            });
-          }
-
-
-          selectorProofPacketV0 = globalThis.__AIR_SELECTOR_ENGINE__.assembleSelectorProofPacketV0(proofs);
-        }
-      } catch (e) {
-        // Swallow error to protect primary interception
-      }
+      selectorProofPacketV0 = shadowWrapper?.selectorProofPacketV0;
       // ---------------------------------------
 
     } catch (error) {
@@ -7727,7 +7587,7 @@ class AIRInterceptor {
     canonicalTargetSummary,
     legacyBoundedFieldContext,
   }) {
-    if (!this.config?.debugMode || !this.config?.selectorEngineShadowLogDiffs) return;
+    if (!this.config?.selectorEngineShadowLogDiffs) return;
     if (!selectorEngine || typeof selectorEngine !== "object") return;
 
     const timingsMs = {};
@@ -7887,6 +7747,75 @@ class AIRInterceptor {
           }))
         : null;
 
+      // ----------------------------------------------------------------------
+      // Assemble proof-packet candidates for Rule 0
+      // ----------------------------------------------------------------------
+      let _assembledProofPacket = undefined;
+      let proofPacketCandidates = [];
+      try {
+        if (typeof selectorEngine.assembleSelectorProofPacketV0 === 'function') {
+          const proofs = [];
+
+          const testId = element?.getAttribute?.('data-testid');
+          if (testId) proofs.push({ source: 'interceptor.js', identityType: 'data-testid', value: testId, isLikelyDynamic: false });
+
+          const id = element?.id;
+          if (id) proofs.push({ source: 'interceptor.js', identityType: 'id', value: id, isLikelyDynamic: this._isLikelyDynamicId(id) });
+
+          ['name', 'href', 'value', 'title', 'alt'].forEach(attr => {
+            const attrValue = element?.getAttribute?.(attr);
+            if (attrValue) proofs.push({ source: 'interceptor.js', identityType: attr, value: attrValue, isLikelyDynamic: attr === 'name' ? this._isLikelyDynamicId(attrValue) : false });
+          });
+
+          if (accessibilityEvidence?.role && accessibilityEvidence?.accessibleName) {
+            proofs.push({ source: 'role-name.js', proofType: 'accessibility', ...accessibilityEvidence });
+          }
+
+          if (labelContextEvidence?.isValid === true &&
+              labelContextEvidence?.fieldLabelText &&
+              ['label-for', 'wrapped-label', 'aria-labelledby'].includes(labelContextEvidence?.fieldRelation)) {
+            proofs.push({ source: 'labels.js', proofType: 'label', ...labelContextEvidence });
+          }
+
+          if (labelContextEvidence?.isValid === false &&
+              labelContextEvidence?.blockedReason === 'bounded-field-duplicate-label' &&
+              labelContextEvidence?.fieldLabelText &&
+              typeof labelContextEvidence?.targetIndexWithinAmbiguity === 'number') {
+            proofs.push({ source: 'labels.js', proofType: 'label', ...labelContextEvidence });
+          }
+
+          if (boundedFieldContextEvidence?.isValid === true) {
+            proofs.push({ source: 'context/bounded-field.js', proofType: 'bounded-field', ...boundedFieldContextEvidence });
+          }
+          if (boundedFieldContextEvidence?.isValid === false &&
+              boundedFieldContextEvidence?.blockedReason === 'bounded-field-duplicate-label') {
+            proofs.push({ source: 'context/bounded-field.js', proofType: 'bounded-field', ...boundedFieldContextEvidence });
+          }
+
+          if (tableRowContextEvidence?.isValid === true) {
+            proofs.push({ source: 'context/table-row.js', proofType: 'table-row', ...tableRowContextEvidence });
+          }
+
+          if (optionPanelContextEvidence) {
+            proofs.push({ source: 'context/option-panel.js', proofType: 'option-panel', ...optionPanelContextEvidence });
+          }
+
+          if (treeNodeContextEvidence?.isValid === true) {
+            proofs.push({ source: 'context/tree-node.js', proofType: 'tree-node', ...treeNodeContextEvidence });
+          }
+
+          if (genericContainerContextEvidence?.isValid === true) {
+            proofs.push({ source: 'context/generic-container.js', proofType: 'generic-container', ...genericContainerContextEvidence });
+          }
+
+          _assembledProofPacket = selectorEngine.assembleSelectorProofPacketV0(proofs);
+          proofPacketCandidates = Array.isArray(_assembledProofPacket?.candidates) ? _assembledProofPacket.candidates : [];
+        }
+      } catch (_proofErr) {
+        // Swallow - proof packet failure must never block the decision
+        proofPacketCandidates = [];
+      }
+
     const selectorDecision = typeof selectorEngine.buildSelectorDecision === "function"
       ? selectorEngine.buildSelectorDecision({
           primarySelector: typeof selectorResult?.selector === "string" ? selectorResult.selector : null,
@@ -7899,7 +7828,8 @@ class AIRInterceptor {
           tableRowSelectorProposals: Array.isArray(tableRowSelectorProposals?.proposals) ? tableRowSelectorProposals.proposals : [],
           optionPanelContextEvidence,
           optionPanelSelectorProposals: Array.isArray(optionPanelSelectorProposals?.proposals) ? optionPanelSelectorProposals.proposals : [],
-          genericContainerProposals
+          genericContainerProposals,
+          proofPacketCandidates
         })
       : null;
 
@@ -7948,6 +7878,7 @@ class AIRInterceptor {
 
     const returnObj = {
       selectorDecision,
+      selectorProofPacketV0: _assembledProofPacket,
       rawAccessibilityProof: accessibilityEvidence,
       rawLabelProof: labelContextEvidence,
       rawBoundedFieldProof: boundedFieldContextEvidence,

@@ -66,14 +66,18 @@ export function deriveGenerationContext(input: {
         selectorResolution.selected.replaySafe === true &&
         typeof selectorResolution.selected.selector === 'string' &&
         selectorResolution.selected.selector.trim().length > 0 &&
-        (selectorResolution.selected.engine === 'css' || selectorResolution.selected.engine === 'xpath') &&
+        (selectorResolution.selected.engine === 'css' || 
+         selectorResolution.selected.engine === 'xpath' ||
+         selectorResolution.selected.engine === 'playwright-aria' ||
+         selectorResolution.selected.engine === 'playwright-native') &&
         (!isShadow || ENABLE_SHADOW_SELECTOR_PROMOTION)
       ) {
         locatorStatus = 'resolved';
         resolvedTarget = {
-          kind: inferKindFromSelector(selectorResolution.selected.selector, selectorResolution.selected.engine as 'css' | 'xpath'),
+          kind: inferKindFromSelector(selectorResolution.selected.selector, selectorResolution.selected.engine as 'css' | 'xpath' | 'playwright-aria' | 'playwright-native'),
           value: selectorResolution.selected.selector,
           ...(selectorResolution.selected.realizationSteps ? { realizationSteps: selectorResolution.selected.realizationSteps } : {}),
+          ...(selectorResolution.selected.proofSource ? { classId: selectorResolution.selected.proofSource } : {}),
           source: 'selectorResolution',
           replaySafe: true,
         };
@@ -123,7 +127,22 @@ export function deriveGenerationContext(input: {
         resolvedTarget = {
           kind: 'frame',
           value: `frameLocator('${frameContext.frameSelector.replace(/'/g, "\\'")}').${innerLocator}`,
-          ...(resolvedTarget.realizationSteps ? { realizationSteps: resolvedTarget.realizationSteps } : {}),
+          ...(resolvedTarget.realizationSteps 
+            ? { 
+                realizationSteps: resolvedTarget.realizationSteps.map(rs => {
+                  let rsInner = rs.value;
+                  if (rs.kind === 'css') rsInner = `locator('${rs.value.replace(/'/g, "\\'")}')`;
+                  else if (rs.kind === 'xpath') rsInner = `locator('xpath=${rs.value.replace(/'/g, "\\'")}')`;
+                  
+                  return {
+                    ...rs,
+                    kind: 'frame',
+                    value: `frameLocator('${frameContext.frameSelector.replace(/'/g, "\\'")}').${rsInner}`
+                  };
+                })
+              } 
+            : {}),
+          ...(resolvedTarget.classId ? { classId: resolvedTarget.classId } : {}),
           source: 'selectorResolution',
           replaySafe: resolvedTarget.replaySafe,
         };
@@ -389,6 +408,8 @@ function buildGenerationGuidance(): GenerationGuidanceV1 {
       'Use ignoredSteps only for context, diagnostics, or fallback explanation.',
       'Do not skip or reorder steps unless the user explicitly instructs it.',
       'Preserve custom-control-open steps; they are required for dropdown and menu visibility before selection.',
+      'If realizationSteps are provided on a resolvedTarget, you MUST write the Playwright code to execute those steps first (in order) before interacting with the primary target.',
+      'Use resolvedTarget.classId to understand the semantic intent and origin of the generated locator.',
       'Use resolvedTarget.value as the locator when locatorStatus is "resolved".',
       'When resolvedTarget.kind is "css", wrap value in page.locator(value) or use it directly as a CSS selector string.',
       'When resolvedTarget.kind is "xpath", use page.locator("xpath=" + value).',
@@ -417,9 +438,10 @@ function buildGenerationGuidance(): GenerationGuidanceV1 {
  */
 function inferKindFromSelector(
   selector: string,
-  wireEngine: 'css' | 'xpath'
+  wireEngine: 'css' | 'xpath' | 'playwright-aria' | 'playwright-native'
 ): GenerationStepV1['resolvedTarget'] extends { kind: infer K } ? K : 'css' {
   if (wireEngine === 'xpath') return 'xpath' as any;
+  if (wireEngine === 'playwright-aria' || wireEngine === 'playwright-native') return 'native' as any;
   const s = selector.trimStart();
   if (s.startsWith('getByRole(')) return 'role' as any;
   if (s.startsWith('getByText(')) return 'text' as any;

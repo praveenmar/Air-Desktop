@@ -23,10 +23,13 @@ export const ResolvedTargetSchema = z.object({
     "text",
     "label",
     "placeholder",
-    "testid"
+    "testid",
+    "native",
+    "frame"
   ]),
   value: z.string(),
   realizationSteps: z.array(RealizationStepSchema).optional(),
+  classId: z.string().optional(),
   options: z.object({
     name: z.string().optional(),
     exact: z.boolean().optional()

@@ -13,7 +13,7 @@ export const SelectorResolutionSchema = z.object({
   status: z.enum(['resolved', 'unresolved']),
   selected: z.object({
     selector: z.string(),
-    engine: z.enum(['css', 'xpath']),
+    engine: z.enum(['css', 'xpath', 'playwright-aria', 'playwright-native']),
     family: z.string().optional(),
     source: z.enum(['shadow-preference', 'legacy-primary']),
     proposalSource: z.string().nullable().optional(),
@@ -35,6 +35,7 @@ export const ResolvedTargetSchema = z.object({
   kind: z.enum(['css', 'xpath', 'role', 'text', 'label', 'placeholder', 'testid', 'frame', 'native']),
   value: z.string(),
   realizationSteps: z.array(RealizationStepSchema).optional(),
+  classId: z.string().optional(),
   options: z.object({
     name: z.string().optional(),
     exact: z.boolean().optional(),
