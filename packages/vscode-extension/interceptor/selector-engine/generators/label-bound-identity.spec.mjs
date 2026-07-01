@@ -15,12 +15,14 @@ function check(name, proof, expectedSelector) {
 try {
   check('Positive Test A', {
     proofType: 'label',
+    isValid: true,
     fieldRelation: 'label-for',
     fieldLabelText: 'Email'
   }, `getByLabel('Email')`);
 
   check('Positive Test B', {
     proofType: 'label',
+    isValid: true,
     fieldRelation: 'label-for',
     fieldLabelText: "Owner's Name"
   }, `getByLabel('Owner\\'s Name')`);

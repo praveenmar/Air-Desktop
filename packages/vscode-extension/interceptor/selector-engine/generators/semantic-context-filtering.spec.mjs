@@ -1,4 +1,4 @@
-import { expect } from 'chai';
+import { describe, it, expect } from 'vitest';
 import { canGenerateClass4, generateSemanticContextShadow } from './semantic-context-filtering.js';
 import { SelectorClassIds, SelectorEngines } from '../contracts/selector-class-contract.js';
 
