@@ -207,7 +207,7 @@ export function assembleSelectorProofPacketV0(proofs = []) {
     // Process Class 4 Semantic Context candidates in bulk
     const class4Candidates = generateSemanticContextShadow(proofs);
     shadowCandidates.push(...class4Candidates);
-  }
+  
 
     // --- Assemble Packet with Versioning ---
     const packet = {
