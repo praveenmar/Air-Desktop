@@ -1,11 +1,19 @@
 import { z } from 'zod';
 
+export const RealizationStepSchema = z.object({
+  action: z.enum(['click', 'scroll', 'hover', 'fill']),
+  kind: z.string(),
+  value: z.string()
+});
+
+export type RealizationStep = z.infer<typeof RealizationStepSchema>;
+
 export const SelectorResolutionSchema = z.object({
   schemaVersion: z.literal('air:selector-resolution:v1'),
   status: z.enum(['resolved', 'unresolved']),
   selected: z.object({
     selector: z.string(),
-    engine: z.enum(['css', 'xpath']),
+    engine: z.enum(['css', 'xpath', 'playwright-aria', 'playwright-native']),
     family: z.string().optional(),
     source: z.enum(['shadow-preference', 'legacy-primary']),
     proposalSource: z.string().nullable().optional(),
@@ -16,6 +24,7 @@ export const SelectorResolutionSchema = z.object({
     warningCodes: z.array(z.string()).optional(),
     proofSource: z.string().nullable().optional(),
     selectedReason: z.string().optional(),
+    realizationSteps: z.array(RealizationStepSchema).optional(),
   }).optional(),
   blockedReason: z.string().nullable().optional(),
 });
@@ -23,8 +32,10 @@ export const SelectorResolutionSchema = z.object({
 export type SelectorResolutionV1 = z.infer<typeof SelectorResolutionSchema>;
 
 export const ResolvedTargetSchema = z.object({
-  kind: z.enum(['css', 'xpath', 'role', 'text', 'label', 'placeholder', 'testid']),
+  kind: z.enum(['css', 'xpath', 'role', 'text', 'label', 'placeholder', 'testid', 'frame', 'native']),
   value: z.string(),
+  realizationSteps: z.array(RealizationStepSchema).optional(),
+  classId: z.string().optional(),
   options: z.object({
     name: z.string().optional(),
     exact: z.boolean().optional(),

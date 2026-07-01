@@ -27,5 +27,6 @@ export const BLOCKED_ID_PATTERNS = Object.freeze([
   /^:[a-z0-9]+:$/i,
   /\d{5,}/,
   /^(?:css|sc)-[a-zA-Z0-9]+$/,
+  /^\d+_\d+$/
 ]);
 

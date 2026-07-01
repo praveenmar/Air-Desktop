@@ -653,6 +653,65 @@ class AIRInterceptor {
     // ------------------------------------------------------------
     // 3. INTERNAL STATE & QUEUES (Restored)
     // ------------------------------------------------------------
+    
+    // --- Frame Self-Identification ---
+    // Detect if this interceptor instance is running inside a same-origin iframe.
+    // window !== window.top -> we are in a frame.
+    // window.frameElement accessible -> same-origin (cross-origin throws SecurityError).
+    this._frameContext = null;
+    try {
+      if (typeof window !== 'undefined' && window !== window.top) {
+        const fe = window.frameElement; // throws SecurityError if cross-origin
+        if (fe && fe.nodeType === Node.ELEMENT_NODE) {
+          const frameId = fe.id || null;
+          const frameName = fe.getAttribute('name') || null;
+          const frameSrc = fe.getAttribute('src') || null;
+
+          // Build the most stable frameSelector, in priority order
+          let frameSelector = null;
+          if (frameId) {
+            frameSelector = `iframe#${frameId}`;
+          } else if (frameName) {
+            frameSelector = `iframe[name="${frameName.replace(/"/g, '\\"')}"]`;
+          } else if (frameSrc) {
+            // Use a partial src match to be resilient to query string changes
+            try {
+              const srcPath = new URL(frameSrc, window.location.href).pathname;
+              frameSelector = `iframe[src*="${srcPath.replace(/"/g, '\\"')}"]`;
+            } catch (_) {
+              frameSelector = `iframe[src="${frameSrc.replace(/"/g, '\\"')}"]`;
+            }
+          } else {
+            // Last resort: nth-of-type position in parent
+            // Support legacy <frame> inside <frameset> as well
+            const siblings = window.parent.document.querySelectorAll('iframe, frame');
+            const idx = Array.prototype.indexOf.call(siblings, fe);
+            if (idx >= 0) {
+              const tag = fe.tagName.toLowerCase();
+              frameSelector = `${tag}:nth-of-type(${idx + 1})`;
+            }
+          }
+
+          if (frameSelector) {
+            this._frameContext = {
+              frameSelector,
+              frameId,
+              frameName,
+              frameSrc,
+              isSameOrigin: true,
+            };
+            this.log('FRAME_CONTEXT_DETECTED', {
+              frameSelector,
+              frameId,
+              frameName,
+              sessionId: this.config?.sessionId || null,
+            });
+          }
+        }
+      }
+    } catch (_) {
+      // SecurityError = cross-origin. _frameContext stays null. Silent.
+    }
     this.activeRequests = 0;
     this.eventQueue = []; // Your queue variable
     this.queue = this.eventQueue; // Alias just in case I used 'this.queue' in other methods
@@ -4333,12 +4392,24 @@ class AIRInterceptor {
       replayableQueueEvents.push(ev);
     }
 
-    const slimEvents = replayableQueueEvents.map(ev => ({
-      ...ev,
-      pageSnapshot: null,
-      pageState:    null,
-      interactionContext: null,
-    }));
+    const slimEvents = replayableQueueEvents.map(ev => {
+      const eventCopy = {
+        ...ev,
+        pageSnapshot: null,
+        pageState:    null,
+        interactionContext: null,
+      };
+
+      if (eventCopy.fingerprint && eventCopy.fingerprint._selectorDecision) {
+        const decision = eventCopy.fingerprint._selectorDecision;
+        eventCopy.fingerprint = { ...eventCopy.fingerprint };
+        delete eventCopy.fingerprint._selectorDecision;
+        
+        eventCopy.selectorResolution = this._buildSelectorResolutionForWire(decision);
+      }
+
+      return eventCopy;
+    });
 
     // ── STEP 2: Stash full events to localStorage (The Gold Standard) ─────────
     // Merges with any existing stash for this session (e.g. multiple rapid
@@ -6745,60 +6816,7 @@ class AIRInterceptor {
       _selectorDecision = shadowWrapper ? shadowWrapper.selectorDecision : null;
 
       // --- SHADOW PROOF PIPELINE INJECTION ---
-      try {
-        if (ENABLE_SHADOW_PROOF_PIPELINE && globalThis.__AIR_SELECTOR_ENGINE__?.assembleSelectorProofPacketV0) {
-          const proofs = [];
-          
-          const testId = element.getAttribute ? element.getAttribute('data-testid') : null;
-          if (testId) {
-            proofs.push({
-              source: "interceptor.js",
-              identityType: "data-testid",
-              value: testId,
-              isLikelyDynamic: false
-            });
-          }
-
-          const id = element.id || null;
-          if (id) {
-            proofs.push({
-              source: "interceptor.js",
-              identityType: "id",
-              value: id,
-              isLikelyDynamic: this._isLikelyDynamicId(id)
-            });
-          }
-
-          const rawAccessibilityProof = shadowWrapper?.rawAccessibilityProof;
-          console.log('[AIR Trace 1] Escrow Proof:', rawAccessibilityProof);
-          if (rawAccessibilityProof && rawAccessibilityProof.role && rawAccessibilityProof.accessibleName) {
-            proofs.push({
-              source: "role-name.js",
-              proofType: "accessibility",
-              ...rawAccessibilityProof
-            });
-          }
-
-          const rawLabelProof = shadowWrapper?.rawLabelProof;
-          console.log('[AIR Trace 3] Shadow injection:', JSON.stringify(rawLabelProof, null, 2));
-          if (
-            rawLabelProof &&
-            rawLabelProof.isValid === true &&
-            rawLabelProof.fieldLabelText &&
-            ['label-for', 'wrapped-label', 'aria-labelledby'].includes(rawLabelProof.fieldRelation)
-          ) {
-            proofs.push({
-              source: 'labels.js',
-              proofType: 'label',
-              ...rawLabelProof
-            });
-          }
-
-          selectorProofPacketV0 = globalThis.__AIR_SELECTOR_ENGINE__.assembleSelectorProofPacketV0(proofs);
-        }
-      } catch (e) {
-        // Swallow error to protect primary interception
-      }
+      selectorProofPacketV0 = shadowWrapper?.selectorProofPacketV0;
       // ---------------------------------------
 
     } catch (error) {
@@ -7569,7 +7587,7 @@ class AIRInterceptor {
     canonicalTargetSummary,
     legacyBoundedFieldContext,
   }) {
-    if (!this.config?.debugMode || !this.config?.selectorEngineShadowLogDiffs) return;
+    if (!this.config?.selectorEngineShadowLogDiffs) return;
     if (!selectorEngine || typeof selectorEngine !== "object") return;
 
     const timingsMs = {};
@@ -7583,7 +7601,7 @@ class AIRInterceptor {
             canonicalTargetInfo,
           }))
         : null;
-    console.log('[AIR Trace 1] labelContextEvidence created:', JSON.stringify(labelContextEvidence, null, 2));
+
     const accessibilityEvidence =
       typeof selectorEngine.resolveAccessibilityEvidence === "function"
         ? this._measureSelectorEngineShadowCall(timingsMs, "accessibility", () =>
@@ -7655,6 +7673,16 @@ class AIRInterceptor {
             accessibilityEvidence,
           }))
         : null;
+    const treeNodeContextEvidence =
+      typeof selectorEngine.resolveTreeNodeContextEvidence === "function"
+        ? this._measureSelectorEngineShadowCall(timingsMs, "treeNode", () =>
+          selectorEngine.resolveTreeNodeContextEvidence({
+            element,
+            eventContext,
+            canonicalTargetInfo,
+            accessibilityEvidence,
+          }))
+        : null;
     const genericContainerContextEvidence =
       typeof selectorEngine.resolveGenericContainerProof === "function"
         ? this._measureSelectorEngineShadowCall(timingsMs, "genericContainer", () =>
@@ -7719,6 +7747,75 @@ class AIRInterceptor {
           }))
         : null;
 
+      // ----------------------------------------------------------------------
+      // Assemble proof-packet candidates for Rule 0
+      // ----------------------------------------------------------------------
+      let _assembledProofPacket = undefined;
+      let proofPacketCandidates = [];
+      try {
+        if (typeof selectorEngine.assembleSelectorProofPacketV0 === 'function') {
+          const proofs = [];
+
+          const testId = element?.getAttribute?.('data-testid');
+          if (testId) proofs.push({ source: 'interceptor.js', identityType: 'data-testid', value: testId, isLikelyDynamic: false });
+
+          const id = element?.id;
+          if (id) proofs.push({ source: 'interceptor.js', identityType: 'id', value: id, isLikelyDynamic: this._isLikelyDynamicId(id) });
+
+          ['name', 'href', 'value', 'title', 'alt'].forEach(attr => {
+            const attrValue = element?.getAttribute?.(attr);
+            if (attrValue) proofs.push({ source: 'interceptor.js', identityType: attr, value: attrValue, isLikelyDynamic: attr === 'name' ? this._isLikelyDynamicId(attrValue) : false });
+          });
+
+          if (accessibilityEvidence?.role && accessibilityEvidence?.accessibleName) {
+            proofs.push({ source: 'role-name.js', proofType: 'accessibility', ...accessibilityEvidence });
+          }
+
+          if (labelContextEvidence?.isValid === true &&
+              labelContextEvidence?.fieldLabelText &&
+              ['label-for', 'wrapped-label', 'aria-labelledby'].includes(labelContextEvidence?.fieldRelation)) {
+            proofs.push({ source: 'labels.js', proofType: 'label', ...labelContextEvidence });
+          }
+
+          if (labelContextEvidence?.isValid === false &&
+              labelContextEvidence?.blockedReason === 'bounded-field-duplicate-label' &&
+              labelContextEvidence?.fieldLabelText &&
+              typeof labelContextEvidence?.targetIndexWithinAmbiguity === 'number') {
+            proofs.push({ source: 'labels.js', proofType: 'label', ...labelContextEvidence });
+          }
+
+          if (boundedFieldContextEvidence?.isValid === true) {
+            proofs.push({ source: 'context/bounded-field.js', proofType: 'bounded-field', ...boundedFieldContextEvidence });
+          }
+          if (boundedFieldContextEvidence?.isValid === false &&
+              boundedFieldContextEvidence?.blockedReason === 'bounded-field-duplicate-label') {
+            proofs.push({ source: 'context/bounded-field.js', proofType: 'bounded-field', ...boundedFieldContextEvidence });
+          }
+
+          if (tableRowContextEvidence?.isValid === true) {
+            proofs.push({ source: 'context/table-row.js', proofType: 'table-row', ...tableRowContextEvidence });
+          }
+
+          if (optionPanelContextEvidence) {
+            proofs.push({ source: 'context/option-panel.js', proofType: 'option-panel', ...optionPanelContextEvidence });
+          }
+
+          if (treeNodeContextEvidence?.isValid === true) {
+            proofs.push({ source: 'context/tree-node.js', proofType: 'tree-node', ...treeNodeContextEvidence });
+          }
+
+          if (genericContainerContextEvidence?.isValid === true) {
+            proofs.push({ source: 'context/generic-container.js', proofType: 'generic-container', ...genericContainerContextEvidence });
+          }
+
+          _assembledProofPacket = selectorEngine.assembleSelectorProofPacketV0(proofs);
+          proofPacketCandidates = Array.isArray(_assembledProofPacket?.candidates) ? _assembledProofPacket.candidates : [];
+        }
+      } catch (_proofErr) {
+        // Swallow - proof packet failure must never block the decision
+        proofPacketCandidates = [];
+      }
+
     const selectorDecision = typeof selectorEngine.buildSelectorDecision === "function"
       ? selectorEngine.buildSelectorDecision({
           primarySelector: typeof selectorResult?.selector === "string" ? selectorResult.selector : null,
@@ -7731,7 +7828,8 @@ class AIRInterceptor {
           tableRowSelectorProposals: Array.isArray(tableRowSelectorProposals?.proposals) ? tableRowSelectorProposals.proposals : [],
           optionPanelContextEvidence,
           optionPanelSelectorProposals: Array.isArray(optionPanelSelectorProposals?.proposals) ? optionPanelSelectorProposals.proposals : [],
-          genericContainerProposals
+          genericContainerProposals,
+          proofPacketCandidates
         })
       : null;
 
@@ -7780,10 +7878,15 @@ class AIRInterceptor {
 
     const returnObj = {
       selectorDecision,
+      selectorProofPacketV0: _assembledProofPacket,
       rawAccessibilityProof: accessibilityEvidence,
-      rawLabelProof: labelContextEvidence
+      rawLabelProof: labelContextEvidence,
+      rawBoundedFieldProof: boundedFieldContextEvidence,
+      rawTableRowProof: tableRowContextEvidence,
+      rawGenericContainerProof: genericContainerContextEvidence,
+      rawOptionPanelProof: optionPanelContextEvidence,
+      rawTreeNodeProof: treeNodeContextEvidence
     };
-    console.log('[AIR Trace 2] Wrapper returning:', JSON.stringify(returnObj.rawLabelProof, null, 2));
     return returnObj;
   }
 
@@ -9283,7 +9386,8 @@ class AIRInterceptor {
       /[0-9a-f]{8}-[0-9a-f]{4}/i.test(id) ||
       /^:[a-z0-9]+:$/i.test(id) ||
       /\d{5,}/.test(id) ||
-      /^(?:css|sc)-[a-zA-Z0-9]+$/.test(id)
+      /^(?:css|sc)-[a-zA-Z0-9]+$/.test(id) ||
+      /^\d+_\d+$/.test(id)
     );
   }
 
@@ -10778,7 +10882,18 @@ class AIRInterceptor {
 
   queueEvent(event) {
     if (this.disabled) return;
-    const queuedEvent = this._isPlainObject(event) ? { ...event } : event;
+    const queuedEvent = this._isPlainObject(event) ? { 
+      ...event,
+      ...(this._frameContext ? { frameContext: this._frameContext } : {}) 
+    } : event;
+    
+    // Inject directly on object if not plain to handle edge cases
+    if (!this._isPlainObject(event) && this._frameContext && typeof queuedEvent === 'object' && queuedEvent !== null) {
+      try {
+        queuedEvent.frameContext = this._frameContext;
+      } catch (e) {}
+    }
+
     if (
       this._isPlainObject(queuedEvent) &&
       (queuedEvent.tabId === undefined || queuedEvent.tabId === null) &&

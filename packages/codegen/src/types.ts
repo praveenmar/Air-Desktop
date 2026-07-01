@@ -1050,6 +1050,7 @@ export interface CodegenServiceOptions {
 export type GenerationEventMetadata = {
   id: string;
   selectorResolution?: SelectorResolutionV1;
+  frameContext?: { frameSelector: string; isSameOrigin: true };
   fallbackHints?: {
     legacySelector?: string;
     elementText?: string;

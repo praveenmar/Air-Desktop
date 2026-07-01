@@ -289,6 +289,11 @@ export function resolveOptionPanelContextEvidence({
       triggerBlockedReason: null,
       visibleItemCountInContainer: null,
       targetIndexWithinContainer: null,
+      containerId: null,
+      isDynamicContainerId: false,
+      uniqueByAriaName: false,
+      uniqueByTrigger: false,
+      containerLabelVolatile: false,
       isValid: false,
       blockedReason: 'detached-target',
     };
@@ -310,7 +315,12 @@ export function resolveOptionPanelContextEvidence({
         ...baseResult,
         itemRole: optCtx.optionRole || null,
         itemName,
-        itemNameSource: itemName ? 'text' : 'none',
+        itemNameSource: itemName ? 'event-context' : 'none',
+        containerId: null,
+        isDynamicContainerId: false,
+        uniqueByAriaName: false,
+        uniqueByTrigger: false,
+        containerLabelVolatile: false,
         containerRole: optCtx.panelRole || null,
         containerSelector,
         itemSelector,
@@ -369,6 +379,11 @@ export function resolveOptionPanelContextEvidence({
       triggerBlockedReason: null,
       visibleItemCountInContainer: null,
       targetIndexWithinContainer: null,
+      containerId: null,
+      isDynamicContainerId: false,
+      uniqueByAriaName: false,
+      uniqueByTrigger: false,
+      containerLabelVolatile: false,
       isValid: false,
       blockedReason: 'option-panel-no-container',
     };
@@ -411,6 +426,25 @@ export function resolveOptionPanelContextEvidence({
   const duplicateItemTextCount = countDuplicateItemText(visibleItems, itemName);
   const uniquePanelBinding = matchingContainerCount === 1
     || (!!triggerSelector && (triggerRelation === 'aria-controls' || triggerRelation === 'aria-owns'));
+
+  // New fields for Class 7 generator gates
+  const containerId = safeTrim(container.id || '') || null;
+  const isDynamicContainerId = containerId ? isLikelyDynamicId(containerId) : false;
+  const uniqueByAriaName = matchingContainerCount === 1;
+  const uniqueByTrigger = !!triggerSelector
+    && (triggerRelation === 'aria-controls' || triggerRelation === 'aria-owns')
+    && !isDynamicContainerId;
+  const containerLabelVolatile = containerLabelSource === 'aria-labelledby'
+    && (() => {
+      try {
+        const refId = safeTrim(container.getAttribute?.('aria-labelledby') || '');
+        if (!refId) return false;
+        const refEl = (container.ownerDocument || document).getElementById(refId);
+        return refEl ? isTriggerLike(refEl) : false;
+      } catch {
+        return false;
+      }
+    })();
   const uniqueTargetBinding = itemSelectorMatchCountInContainer === 1
     || (!!itemName && duplicateItemTextCount === 1);
   const requiresPositionalDisambiguation = !uniqueTargetBinding && targetIndexWithinContainer >= 0;
@@ -451,6 +485,11 @@ export function resolveOptionPanelContextEvidence({
     uniquePanelBinding,
     uniqueTargetBinding,
     requiresPositionalDisambiguation,
+    containerId,
+    isDynamicContainerId,
+    uniqueByAriaName,
+    uniqueByTrigger,
+    containerLabelVolatile,
     isValid,
     blockedReason,
   };

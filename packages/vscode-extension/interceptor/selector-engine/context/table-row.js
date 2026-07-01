@@ -19,7 +19,10 @@ function summarizeTarget(element) {
   return _summarizeTarget(element, { includeClassList: true });
 }
 
-const TABLE_SELECTOR = 'table, [role="table"], [role="grid"]';
+// [role="treegrid"] included: a treegrid is a hybrid tree+grid widget.
+// Class 8 handles row identity + action (grid dimension).
+// Class 9 handles ancestry (tree dimension). Both can emit for the same element.
+const TABLE_SELECTOR = 'table, [role="table"], [role="grid"], [role="treegrid"]';
 const ROW_SELECTOR = 'tr, [role="row"]';
 const CELL_SELECTOR = 'td, th, [role="cell"], [role="gridcell"], [role="rowheader"], [role="columnheader"]';
 const ACTION_SELECTOR = 'button, [role="button"], input[type="submit"], input[type="button"], input[type="reset"], a[href], input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="radio"], [role="switch"]';
@@ -203,7 +206,9 @@ function getTargetActionIndexWithinRow(row, target, actionSelector, actionName) 
 
   if (actionSelector) {
     try {
-      const matches = Array.from(row.querySelectorAll(actionSelector)).filter(isFastVisible);
+      // Use raw DOM order without visibility filtering so the index perfectly
+      // aligns with Playwright's .nth() which counts all matched nodes.
+      const matches = Array.from(row.querySelectorAll(actionSelector));
       return matches.indexOf(target);
     } catch {
       // Ignore selector failures.
@@ -211,7 +216,8 @@ function getTargetActionIndexWithinRow(row, target, actionSelector, actionName) 
   }
 
   if (!actionName) return -1;
-  const matches = queryVisibleElements(row, ACTION_SELECTOR)
+  // Use raw querySelectorAll instead of queryVisibleElements
+  const matches = Array.from(row.querySelectorAll(ACTION_SELECTOR))
     .filter((candidate) => extractActionName(candidate, null) === actionName);
   return matches.indexOf(target);
 }
@@ -231,8 +237,27 @@ function buildRowScopedActionSelector(tableSelector, rowIdentityTexts, actionSel
     return null;
   }
 
+  // Use :has(cell:text-is("exact")) instead of :has-text("substring").
+  //
+  // Rationale:
+  //   :has-text("Alice") - substring, matches "Alice" AND "Alice Smith" -> strict-mode violation
+  //   :has(td:text-is("Alice"), [role="cell"]:text-is("Alice")) - exact cell content match only
+  //
+  // Multiple identity texts chain as AND conditions (each :has() must be satisfied independently):
+  //   :has(td:text-is("Alice"),...):has(td:text-is("admin"),...) -> row must contain BOTH cells
+  //
+  // Cell selector covers: td, th, [role="cell"], [role="gridcell"], [role="rowheader"], [role="columnheader"]
+  // This mirrors CELL_SELECTOR used elsewhere in this file.
+  const CELL_TEXT_TARGETS = 'td, th, [role="cell"], [role="gridcell"], [role="rowheader"], [role="columnheader"]';
   const textScope = rowIdentityTexts
-    .map((text) => `:has-text("${escapeTextLiteral(text)}")`)
+    .map((text) => {
+      const escaped = escapeTextLiteral(text);
+      const cellSelectors = CELL_TEXT_TARGETS
+        .split(',')
+        .map((s) => `${s.trim()}:text-is("${escaped}")`)
+        .join(', ');
+      return `:has(${cellSelectors})`;
+    })
     .join('');
   return `${tableSelector} ${buildRowSelector(row)}${textScope} ${actionSelector}`;
 }
@@ -381,7 +406,13 @@ export function resolveTableRowContextEvidence({
   const tableSelector = buildSelectorForElement(table, { allowRole: true });
   const actionSelector = buildActionSelector(effectiveTarget, accessibilityProof);
   const visibleRows = getVisibleRows(table);
-  const targetRowIndexWithinTable = visibleRows.indexOf(row);
+  // CRITICAL: Playwright's .nth(N) counts ALL matching elements including hidden ones.
+  // visibleRows.indexOf(row) gives the index in the visibility-filtered subset - this does NOT
+  // match .nth(N) semantics. Tables with sticky headers, collapsed row groups, or hidden
+  // pagination rows will produce off-by-N errors with the visible-only index.
+  // Use full DOM order (all rows, including hidden) so .nth(N) lands on the correct row.
+  const allTableRows = Array.from(table.querySelectorAll(ROW_SELECTOR));
+  const targetRowIndexWithinTable = allTableRows.indexOf(row);
   const targetActionIndexWithinRow = getTargetActionIndexWithinRow(row, effectiveTarget, actionSelector, actionName);
   const columnIndex = getColumnIndex(effectiveTarget, row);
   const headerTexts = getHeaderTexts(table);

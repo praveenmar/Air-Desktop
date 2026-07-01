@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Selector Engine Comprehensive Test Suite</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            padding: 20px;
+            background-color: #f9f9f9;
+        }
+
+        .test-section {
+            background-color: #fff;
+            border: 1px solid #ddd;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+
+        .test-section h2 {
+            margin-top: 0;
+            color: #333;
+            border-bottom: 2px solid #eee;
+            padding-bottom: 10px;
+        }
+
+        /* Visibility and Layout Tests */
+        .hidden {
+            display: none;
+        }
+
+        .invisible {
+            visibility: hidden;
+        }
+
+        .opacity-0 {
+            opacity: 0;
+        }
+
+        .zero-size {
+            width: 0;
+            height: 0;
+            overflow: hidden;
+            border: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .off-screen {
+            position: absolute;
+            left: -9999px;
+        }
+
+        /* Z-Index Overlap Tests */
+        .overlap-container {
+            position: relative;
+            width: 150px;
+            height: 150px;
+            border: 1px solid #ccc;
+            background: #fafafa;
+        }
+
+        .layer-bottom {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1;
+            width: 100px;
+            height: 100px;
+            background: rgba(255, 99, 71, 0.8);
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .layer-top {
+            position: absolute;
+            top: 30px;
+            left: 30px;
+            z-index: 2;
+            width: 100px;
+            height: 100px;
+            background: rgba(70, 130, 180, 0.9);
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Instructions Styling */
+        .instruction {
+            display: block;
+            margin-top: 8px;
+            margin-bottom: 15px;
+            font-size: 0.85rem;
+            color: #d97706;
+            font-family: monospace;
+            background: #fffbeb;
+            padding: 8px;
+            border-left: 3px solid #f59e0b;
+        }
+
+        .item-container {
+            margin-bottom: 15px;
+            border-bottom: 1px dashed #eee;
+            padding-bottom: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Selector Engine Comprehensive Test Suite</h1>
+    <p>This document contains various DOM structures to rigorously test selector engine parsing, traversal, and
+        filtering for e2e testing tools.</p>
+
+    <div class="test-section" id="section-basic">
+        <h2>1. Basic Selectors (ID, Class, Tag)</h2>
+        <div class="item-container">
+            <div class="simple-class">Simple Class Element</div>
+            <p>Paragraph Element</p>
+            <span id="unique-span" class="multi-class class1 class2">Multiple Classes</span>
+            <span class="instruction">👉 CLICK these basic elements to ensure standard class/id/tag extraction
+                works.</span>
+        </div>
+        <div class="item-container">
+            <div id="escaped:id" class="escaped[class]">Escaped Characters in ID and Class</div>
+            <span class="instruction">👉 CLICK here. Expect the engine to properly escape colons and brackets in the
+                selector.</span>
+        </div>
+        <div class="item-container">
+            <div id="123-number-start-id">Number starting ID</div>
+            <span class="instruction">👉 CLICK here. Expect the engine to properly escape IDs starting with
+                numbers.</span>
+        </div>
+    </div>
+
+    <div class="test-section" id="section-hierarchy">
+        <h2>2. Hierarchy and Combinators</h2>
+        <div class="item-container">
+            <div class="parent">
+                Parent Text
+                <div class="child-1">Child 1</div>
+                <div class="child-2">
+                    Child 2
+                    <div class="grandchild">Grandchild</div>
+                </div>
+                <span class="sibling-a">Sibling A</span>
+                <span class="sibling-b">Sibling B</span>
+                <span class="sibling-c">Sibling C</span>
+            </div>
+            <span class="instruction">👉 CLICK elements in this tree. Expect the engine to utilize parent/child
+                combinators or nth-child correctly to uniquely target siblings.</span>
+        </div>
+    </div>
+
+    <div class="test-section" id="section-attributes">
+        <h2>3. Attributes</h2>
+        <div class="item-container">
+            <input type="text" data-test="exact-match" value="exact">
+            <input type="text" data-test="prefix-match-123" value="prefix">
+            <input type="text" data-test="123-suffix-match" value="suffix">
+            <input type="text" data-test="word1 contains-word word2" value="contains-word">
+            <input type="text" data-test="substring-match-here" value="substring">
+            <a href="https://example.com/test?q=1" target="_blank" rel="noopener noreferrer">External Link</a>
+            <div data-empty="">Empty Attribute</div>
+            <div custom-boolean-attr>Boolean Attribute</div>
+            <span class="instruction">👉 TYPE or CLICK in these elements. Expect the engine to leverage unique data-*
+                attributes for robust selectors.</span>
+        </div>
+        <div class="item-container">
+            <div data-quote="value with 'single' quotes">Single Quotes</div>
+            <div data-quote='value with "double" quotes'>Double Quotes</div>
+            <span class="instruction">👉 CLICK these items. Expect the engine to correctly escape quotes inside
+                attribute value selectors.</span>
+        </div>
+    </div>
+
+    <div class="test-section" id="section-text-content">
+        <h2>4. Text Content</h2>
+        <div class="item-container">
+            <div id="exact-text">Exact Text Match</div>
+            <div id="partial-text">This element contains partial text match.</div>
+            <div id="whitespace-text">
+                Lots of
+                whitespace
+            </div>
+            <div id="nested-text">Parent <span>Nested</span> Text</div>
+            <div id="case-text">CaSe SeNsItIvE</div>
+            <div id="hidden-text-parent">Visible <span class="hidden">Hidden</span> Text</div>
+            <div id="empty-text"></div>
+            <div id="special-chars-text">Symbols: !@#$%^&*()_+{}|:"<>?</div>
+            <span class="instruction">👉 CLICK the text elements above. Expect the engine to cleanly extract text
+                content, properly handling deeply nested text, hidden spans, and whitespace normalization (like
+                playwright's has-text).</span>
+        </div>
+    </div>
+
+    <div class="test-section" id="section-forms">
+        <h2>5. Forms and State</h2>
+        <div class="item-container">
+            <form id="test-form" onsubmit="event.preventDefault()">
+                <input type="text" id="enabled-input" name="enabled" value="enabled">
+                <input type="text" id="disabled-input" name="disabled" value="disabled" disabled>
+                <input type="text" id="readonly-input" name="readonly" value="readonly" readonly>
+
+                <label><input type="checkbox" id="checked-box" checked> Checked Box</label>
+                <label><input type="checkbox" id="unchecked-box"> Unchecked Box</label>
+
+                <label><input type="radio" name="group1" id="radio1" checked> Radio 1</label>
+                <label><input type="radio" name="group1" id="radio2"> Radio 2</label>
+
+                <select id="dropdown">
+                    <option value="opt1">Option 1</option>
+                    <option value="opt2" selected>Option 2</option>
+                    <option value="opt3" disabled>Option 3</option>
+                </select>
+
+                <button type="submit" id="submit-btn">Submit</button>
+            </form>
+            <span class="instruction">👉 INTERACT with the form (type, check, select). Expect the disabled/readonly
+                elements to correctly block action or fire warnings. Ensure select interactions bind to the correct
+                options.</span>
+        </div>
+    </div>
+
+    <div class="test-section" id="section-shadow-dom">
+        <h2>6. Shadow DOM</h2>
+        <div class="item-container">
+            <div id="shadow-host-open"></div>
+            <div id="shadow-host-closed"></div>
+            <script>
+                const openHost = document.getElementById('shadow-host-open');
+                const openRoot = openHost.attachShadow({ mode: 'open' });
+                openRoot.innerHTML = `
+                    <div class="shadow-child" style="padding: 10px; border: 1px dashed blue;">Open Shadow Content</div>
+                    <div class="nested-shadow-host" style="margin-top: 10px;"></div>
+                `;
+                const nestedHost = openRoot.querySelector('.nested-shadow-host');
+                const nestedRoot = nestedHost.attachShadow({ mode: 'open' });
+                nestedRoot.innerHTML = '<span class="nested-shadow-child" style="padding: 10px; border: 1px solid green;">Nested Shadow Content</span>';
+
+                const closedHost = document.getElementById('shadow-host-closed');
+                const closedRoot = closedHost.attachShadow({ mode: 'closed' });
+                closedRoot.innerHTML = '<div class="closed-shadow-child" style="padding: 10px; margin-top: 10px; border: 1px dashed red;">Closed Shadow Content</div>';
+            </script>
+            <span class="instruction">👉 CLICK inside the dashed boxes. Expect the engine to successfully pierce Open
+                Shadow roots and identify the host boundaries, while treating the Closed Shadow Root as opaque.</span>
+        </div>
+    </div>
+
+    <div class="test-section" id="section-visibility">
+        <h2>7. Visibility and Display</h2>
+        <div class="item-container">
+            <div id="vis-display-none" class="hidden">Display None</div>
+            <div id="vis-hidden" class="invisible">Visibility Hidden</div>
+            <div id="vis-opacity-0" class="opacity-0">Opacity 0</div>
+            <div id="vis-zero-size" class="zero-size">Zero Size</div>
+            <div id="vis-off-screen" class="off-screen">Off Screen</div>
+            <div id="vis-visible">Normal Element</div>
+            <span class="instruction">👉 (If you can find them) Try interacting with hidden/opacity:0 elements. The
+                engine should flag them as invisible/not-interactable.</span>
+        </div>
+
+        <div class="item-container">
+            <h3 style="margin-top: 15px;">Overlapping Elements (Hit-testing)</h3>
+            <div class="overlap-container">
+                <div id="overlap-bottom" class="layer-bottom">Bottom Layer</div>
+                <div id="overlap-top" class="layer-top">Top Layer</div>
+            </div>
+            <span class="instruction">👉 TRY TO CLICK the red Bottom Layer. Since the blue Top Layer is covering it,
+                expect the engine to record the click on the Top Layer or flag the Bottom Layer as visually
+                occluded.</span>
+        </div>
+    </div>
+
+    <div class="test-section" id="section-dynamic">
+        <h2>8. Dynamic Content</h2>
+        <div class="item-container">
+            <div id="dynamic-container"></div>
+            <button id="trigger-dynamic" onclick="addDynamicElement()">Add Element in 1s</button>
+            <script>
+                function addDynamicElement() {
+                    const btn = document.getElementById('trigger-dynamic');
+                    btn.disabled = true;
+                    btn.textContent = 'Wait...';
+                    setTimeout(() => {
+                        const el = document.createElement('div');
+                        el.id = 'delayed-element';
+                        el.className = 'newly-added';
+                        el.textContent = 'I appear after a delay';
+                        el.style.padding = '10px';
+                        el.style.marginTop = '10px';
+                        el.style.background = '#e6ffe6';
+                        el.style.border = '1px solid #b3ffb3';
+                        document.getElementById('dynamic-container').appendChild(el);
+
+                        btn.disabled = false;
+                        btn.textContent = 'Add Another';
+                    }, 1000);
+                }
+            </script>
+            <span class="instruction">👉 CLICK the trigger button, wait 1 second, then CLICK the newly spawned green
+                element. Expect the engine to seamlessly link your click to the new DOM node.</span>
+        </div>
+    </div>
+
+    <div class="test-section" id="section-aria">
+        <h2>9. Accessibility (ARIA)</h2>
+        <div class="item-container">
+            <button aria-label="Close dialog" id="aria-btn">X</button>
+            <div role="alert" id="aria-alert">Alert Message</div>
+            <div aria-hidden="true" id="aria-hidden-el">Visually present but ARIA hidden</div>
+            <ul role="listbox" style="list-style-type: none; padding: 0;">
+                <li role="option" aria-selected="true" id="opt-selected" style="font-weight: bold;">Selected Option</li>
+                <li role="option" aria-selected="false" id="opt-unselected">Unselected Option</li>
+            </ul>
+            <div style="margin-top: 10px;">
+                <input type="text" aria-describedby="desc-id" id="aria-input">
+                <span id="desc-id" style="font-size: 0.8em; color: #666;">Description for input</span>
+            </div>
+            <span class="instruction">👉 CLICK around the ARIA elements. Expect the engine to prefer ARIA labels and
+                roles (e.g. getByRole('alert') or getByLabel('Close dialog')) over raw CSS selectors where
+                possible.</span>
+        </div>
+    </div>
+
+    <div class="test-section" id="section-svg">
+        <h2>10. Namespaces (SVG & MathML)</h2>
+        <div class="item-container">
+            <svg id="test-svg" width="100" height="100" xmlns="http://www.w3.org/2000/svg"
+                style="border: 1px solid #ccc;">
+                <circle id="svg-circle" cx="50" cy="50" r="40" stroke="green" stroke-width="4" fill="yellow"
+                    class="svg-class" />
+                <text x="10" y="20" id="svg-text">SVG Text</text>
+            </svg>
+            <math id="test-math" xmlns="http://www.w3.org/1998/Math/MathML" style="font-size: 24px; margin-left: 20px;">
+                <mi id="math-mi">x</mi>
+                <mo>+</mo>
+                <mi>y</mi>
+            </math>
+            <span class="instruction">👉 CLICK the SVG circle or MathML text. Expect the engine to generate
+                XML-namespace safe selectors that don't assume they are normal HTML tags.</span>
+        </div>
+    </div>
+
+    <div class="test-section" id="section-custom-elements">
+        <h2>11. Custom Elements</h2>
+        <div class="item-container">
+            <custom-widget id="widget-1" data-state="active"
+                style="display: block; border: 2px solid purple; padding: 10px;">
+                <custom-header style="font-weight: bold; display: block; border-bottom: 1px solid purple;">Widget
+                    Header</custom-header>
+                <custom-body class="widget-body" style="display: block; padding-top: 5px;">Widget Body</custom-body>
+            </custom-widget>
+            <span class="instruction">👉 CLICK the custom widget. Expect the engine to successfully target custom HTML
+                tags.</span>
+        </div>
+    </div>
+
+    <div class="test-section" id="section-iframes">
+        <h2>12. Iframes (Same Origin)</h2>
+        <div class="item-container">
+            <iframe id="test-iframe"
+                srcdoc="<!DOCTYPE html><html><body style='font-family: sans-serif;'><div id='iframe-content' class='iframe-class'>Iframe Content</div><button id='iframe-btn'>Iframe Button</button></body></html>"
+                width="300" height="150" title="Test Iframe" style="border: 1px solid #999;"></iframe>
+            <span class="instruction">👉 CLICK the Iframe Button inside the frame. Expect the engine to pierce the
+                iframe boundary.</span>
+        </div>
+    </div>
+
+    <div class="test-section" id="section-pseudo">
+        <h2>13. Pseudo-classes Context</h2>
+        <div class="item-container">
+            <ul id="pseudo-list">
+                <li>Item 1</li>
+                <li>Item 2</li>
+                <li>Item 3</li>
+                <li>Item 4</li>
+                <li>Item 5</li>
+            </ul>
+            <div id="pseudo-empty" class="empty-node"></div>
+            <div id="pseudo-not-empty" class="not-empty-node">Has text</div>
+            <div id="pseudo-has" style="margin-top: 10px;">
+                <span>No Target</span>
+                <div class="has-child-container"><span class="has-child">Target Child</span></div>
+            </div>
+            <span class="instruction">👉 CLICK the list items or the target child. Expect the engine to accurately use
+                structural pseudo-classes (:nth-child, :empty, :has) to resolve ambiguities.</span>
+        </div>
+    </div>
+</body>
+
+</html>

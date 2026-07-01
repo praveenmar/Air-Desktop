@@ -7,7 +7,7 @@ import {
   safeTrim,
 } from '../utils.js';
 import { resolveCanonicalCustomControlTargetInternal } from '../canonical-target.js';
-import { isFastVisible, queryVisibleElements } from '../shared/visibility.js';
+import { isFastVisible, queryVisibleElements, queryVisibleElementsPiercingShadow } from '../shared/visibility.js';
 import { getRole } from '../shared/dom-attributes.js';
 import { normalizeLabelText, extractReferencedText } from '../shared/text.js';
 import { summarizeTarget as _summarizeTarget } from '../shared/target-summary.js';
@@ -113,6 +113,7 @@ function collectExplicitLabelProof(target) {
         return {
           fieldLabelText: text,
           fieldRelation: 'label-for',
+          labelElement: label,
         };
       }
     } catch {
@@ -126,6 +127,7 @@ function collectExplicitLabelProof(target) {
     return {
       fieldLabelText: wrappedText,
       fieldRelation: 'wrapped-label',
+      labelElement: wrappedLabel,
     };
   }
 
@@ -404,12 +406,17 @@ function buildChildSelector(target, selectorResult, controlKind) {
   return tagName;
 }
 
-function countDocumentLabelDuplicates(target, fieldLabelText) {
+function countDocumentLabelDuplicates(target, fieldLabelText, associatedLabelElement = null) {
   const documentRef = target?.ownerDocument || document;
   const normalized = normalizeLabelText(fieldLabelText || '');
-  if (!documentRef || !normalized) return 0;
-  const labels = queryVisibleElements(documentRef, LABEL_CANDIDATE_SELECTOR);
-  return labels.filter((label) => normalizeLabelText(label.textContent || '') === normalized).length;
+  if (!documentRef || !normalized) return { count: 0, targetIndex: -1 };
+  const labels = queryVisibleElementsPiercingShadow(documentRef, LABEL_CANDIDATE_SELECTOR);
+  const matchingLabels = labels.filter((label) => normalizeLabelText(label.textContent || '') === normalized);
+  let targetIndex = -1;
+  if (associatedLabelElement && matchingLabels.length > 0) {
+    targetIndex = matchingLabels.indexOf(associatedLabelElement);
+  }
+  return { count: matchingLabels.length, targetIndex };
 }
 
 function resolveControlBoundary(scopeTarget, effectiveTarget, controlKind) {
@@ -450,13 +457,15 @@ function findBoundedContainerProof(scopeTarget, effectiveTarget, childTarget, se
     if (labelCandidates.length > 0 && hasClearWinner && controls.length === 1 && targetIndex === 0) {
       const selectors = deriveContainerSelectorCandidates(current);
       const fieldLabelText = topLabel.text;
+      const duplicateInfo = countDocumentLabelDuplicates(scopeTarget, fieldLabelText, topLabel.element);
       return {
         fieldLabelText,
         fieldRelation: topLabel.element.parentElement === current ? 'sibling-label' : 'bounded-container',
         visibleControlCountInContainer: 1,
         competingControlCount: 0,
         targetIndexWithinContainer: 0,
-        duplicateLabelCount: countDocumentLabelDuplicates(scopeTarget, fieldLabelText),
+        duplicateLabelCount: duplicateInfo.count,
+        targetIndexWithinAmbiguity: duplicateInfo.targetIndex,
         boundedContainerSummary: buildContainerSummary(current),
         cleanParentSelector: selectors.cleanParentSelector,
         cleanChildSelector: buildChildSelector(childTarget, selectorResult, controlKind),
@@ -513,6 +522,7 @@ export function resolveLabelContextEvidence({
     competingControlCount: null,
     targetIndexWithinContainer: null,
     duplicateLabelCount: null,
+    targetIndexWithinAmbiguity: null,
     boundedContainerSummary: null,
     cleanParentSelector: null,
     cleanChildSelector: null,
@@ -549,11 +559,13 @@ export function resolveLabelContextEvidence({
 
   const explicitProof = collectExplicitLabelProof(effectiveTarget);
   if (explicitProof?.fieldLabelText) {
+    const duplicateInfo = countDocumentLabelDuplicates(scopeTarget, explicitProof.fieldLabelText, explicitProof.labelElement);
     return {
       ...base,
       fieldLabelText: explicitProof.fieldLabelText,
       fieldRelation: explicitProof.fieldRelation,
-      duplicateLabelCount: countDocumentLabelDuplicates(scopeTarget, explicitProof.fieldLabelText),
+      duplicateLabelCount: duplicateInfo.count,
+      targetIndexWithinAmbiguity: duplicateInfo.targetIndex,
       cleanChildSelector: buildChildSelector(effectiveTarget, selectorResult, targetControlKind),
       boundedContainerSelectorCandidates: [],
       isValid: true,
@@ -575,6 +587,7 @@ export function resolveLabelContextEvidence({
     competingControlCount: boundedProof.competingControlCount ?? null,
     targetIndexWithinContainer: boundedProof.targetIndexWithinContainer ?? null,
     duplicateLabelCount: boundedProof.duplicateLabelCount ?? null,
+    targetIndexWithinAmbiguity: boundedProof.targetIndexWithinAmbiguity ?? null,
     boundedContainerSummary: boundedProof.boundedContainerSummary || null,
     cleanParentSelector: boundedProof.cleanParentSelector || null,
     cleanChildSelector: boundedProof.cleanChildSelector || null,

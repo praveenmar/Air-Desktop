@@ -26,8 +26,16 @@ import { collectWeakAppShadowCoverage } from './weak-app-shadow.js';
 import { chooseSemanticRowIdentity } from './context/semantic-row-anchor.js';
 import { buildSelectorDecision } from './decision-normalization.js';
 import { generateDirectIdentityShadow } from './generators/shadow-identity.js';
+import { applyNativeDomNormalization } from './generators/native-dom-normalization.js';
 import { generateSemanticIdentityShadow } from './generators/semantic-identity.js';
 import { generateLabelBoundIdentityShadow } from './generators/label-bound-identity.js';
+import { trackSelectorPacket } from './telemetry.js';
+import { generateSemanticContextShadow } from './generators/semantic-context-filtering.js';
+import { generateStructuralDisambiguationShadow } from './generators/structural-disambiguation.js';
+import { generateStatefulLifecycleShadow } from './generators/stateful-lifecycle.js';
+import { generateCollectionMembershipShadow } from './generators/collection-membership.js';
+import { generateHierarchicalNavigationShadow } from './generators/hierarchical-navigation.js';
+import { resolveTreeNodeContextEvidence } from './context/tree-node.js';
 
 export const ENABLE_SHADOW_PROOF_PIPELINE = true;
 
@@ -147,31 +155,71 @@ export function assembleSelectorProofPacketV0(proofs = []) {
   if (!ENABLE_SHADOW_PROOF_PIPELINE) return undefined;
 
   try {
-    const candidates = [];
-    console.log('[AIR Trace 2] Orchestrator received proofs array:', JSON.stringify(proofs, null, 2));
+    const shadowCandidates = [];
     
     // --- Route Proofs to Pure Generators ---
-    for (const proof of proofs) {
-      if (proof.identityType === 'data-testid' || proof.identityType === 'id') {
-        const candidate = generateDirectIdentityShadow(proof);
-        if (candidate) candidates.push(candidate);
-      } else if (proof.proofType === 'accessibility') {
-        const candidate = generateSemanticIdentityShadow(proof);
-        if (candidate) candidates.push(candidate);
-      } else if (proof.proofType === 'label') {
-        const candidate = generateLabelBoundIdentityShadow(proof);
-        if (candidate) candidates.push(candidate);
+    if (Array.isArray(proofs)) {
+      for (const rawProof of proofs) {
+        if (!rawProof) continue;
+
+        // Class 11 - Native DOM Normalization:
+        // Normalize invisible/variant Unicode in human-readable text fields before
+        // any generator runs. Identity attribute fields (id, data-testid, name, href)
+        // are intentionally NOT normalized - they are developer-set values, not
+        // rendered text. All generator classes receive the normalized proof.
+        const proof = applyNativeDomNormalization(rawProof);
+        
+        const identityCandidate = generateDirectIdentityShadow(proof);
+        if (identityCandidate) shadowCandidates.push(identityCandidate);
+
+        const semanticCandidate = generateSemanticIdentityShadow(proof);
+        if (semanticCandidate) shadowCandidates.push(semanticCandidate);
+
+        const labelCandidate = generateLabelBoundIdentityShadow(proof);
+        if (labelCandidate) shadowCandidates.push(labelCandidate);
+
+        const class7Result = generateStatefulLifecycleShadow(proof);
+        if (Array.isArray(class7Result)) {
+          if (class7Result.length) shadowCandidates.push(...class7Result);
+        } else if (class7Result) {
+          shadowCandidates.push(class7Result); // legacy fallback
+        }
+
+        const disambiguationCandidate = generateStructuralDisambiguationShadow(proof);
+        if (disambiguationCandidate) shadowCandidates.push(disambiguationCandidate);
+
+        const class8Result = generateCollectionMembershipShadow(proof);
+        if (Array.isArray(class8Result)) {
+          if (class8Result.length) shadowCandidates.push(...class8Result);
+        } else if (class8Result) {
+          shadowCandidates.push(class8Result); // legacy fallback
+        }
+
+        const class9Result = generateHierarchicalNavigationShadow(proof);
+        if (Array.isArray(class9Result)) {
+          if (class9Result.length) shadowCandidates.push(...class9Result);
+        } else if (class9Result) {
+          shadowCandidates.push(class9Result); // legacy fallback
+        }
       }
     }
+    
+    // Process Class 4 Semantic Context candidates in bulk
+    const class4Candidates = generateSemanticContextShadow(proofs);
+    shadowCandidates.push(...class4Candidates);
+  }
 
     // --- Assemble Packet with Versioning ---
     const packet = {
       version: 0,
-      candidates
+      candidates: shadowCandidates
     };
 
     // User requested console print that doesn't hide nested objects
-    console.log('[AIR Trace 4] Selector Packet Generation:\n' + JSON.stringify(packet, null, 2));
+    globalThis.__SHADOW_PACKET__ = packet;
+    console.error('[[[SHADOW_PACKET_DUMP]]]\n' + JSON.stringify(packet, null, 2));
+
+    trackSelectorPacket(packet);
 
     return packet;
   } catch (err) {
@@ -196,6 +244,7 @@ const api = {
   collectOptionPanelSelectorProposals,
   resolveTableRowContextEvidence,
   collectTableRowSelectorProposals,
+  resolveTreeNodeContextEvidence,
   resolveGenericContainerProof,
   collectGenericContainerProposals,
   classifySelectorCandidatePreference,

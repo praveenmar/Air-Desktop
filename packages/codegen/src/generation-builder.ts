@@ -9,6 +9,9 @@ import {
 } from './runtime-schemas';
 import { CodegenSession, CodegenStep, GenerationEventMetadata, CodegenAssertion } from './types';
 
+// SINGLE FLIP TO PROMOTE SHADOW SELECTORS TO MCP
+const ENABLE_SHADOW_SELECTOR_PROMOTION = true; // <- change to true for Phase C
+
 /**
  * Phase 3C + GC-1A: Pure GenerationContext Builder
  *
@@ -54,6 +57,8 @@ export function deriveGenerationContext(input: {
     let fallbackHints: GenerationStepV1['fallbackHints'] = undefined;
 
     if (isTargetNeeded) {
+      const isShadow = selectorResolution?.selected?.source === 'shadow-preference';
+
       if (
         selectorResolution &&
         selectorResolution.status === 'resolved' &&
@@ -61,14 +66,28 @@ export function deriveGenerationContext(input: {
         selectorResolution.selected.replaySafe === true &&
         typeof selectorResolution.selected.selector === 'string' &&
         selectorResolution.selected.selector.trim().length > 0 &&
-        (selectorResolution.selected.engine === 'css' || selectorResolution.selected.engine === 'xpath')
+        (selectorResolution.selected.engine === 'css' || 
+         selectorResolution.selected.engine === 'xpath' ||
+         selectorResolution.selected.engine === 'playwright-aria' ||
+         selectorResolution.selected.engine === 'playwright-native') &&
+        (!isShadow || ENABLE_SHADOW_SELECTOR_PROMOTION)
       ) {
         locatorStatus = 'resolved';
         resolvedTarget = {
-          kind: selectorResolution.selected.engine,
+          kind: inferKindFromSelector(selectorResolution.selected.selector, selectorResolution.selected.engine as 'css' | 'xpath' | 'playwright-aria' | 'playwright-native'),
           value: selectorResolution.selected.selector,
+          ...(selectorResolution.selected.realizationSteps ? { realizationSteps: selectorResolution.selected.realizationSteps } : {}),
+          ...(selectorResolution.selected.proofSource ? { classId: selectorResolution.selected.proofSource } : {}),
           source: 'selectorResolution',
           replaySafe: true,
+        };
+      } else if (isShadow && !ENABLE_SHADOW_SELECTOR_PROMOTION && metadata?.fallbackHints?.legacySelector) {
+        locatorStatus = 'resolved';
+        resolvedTarget = {
+          kind: 'css',
+          value: metadata.fallbackHints.legacySelector,
+          source: 'legacy_fallback',
+          replaySafe: false,
         };
       } else {
         locatorStatus = 'unresolved';
@@ -86,6 +105,47 @@ export function deriveGenerationContext(input: {
         if (Object.keys(hints).length > 0) {
           fallbackHints = hints;
         }
+      }
+
+      // Class 10 - Boundary Traversal: wrap resolvedTarget with frameLocator if event is from an iframe
+      const frameContext = metadata?.frameContext;
+      if (
+        resolvedTarget &&
+        locatorStatus === 'resolved' &&
+        frameContext?.frameSelector &&
+        frameContext.isSameOrigin === true
+      ) {
+        let innerLocator: string;
+        if (resolvedTarget.kind === 'css') {
+          innerLocator = `locator('${resolvedTarget.value.replace(/'/g, "\\'")}')`;
+        } else if (resolvedTarget.kind === 'xpath') {
+          innerLocator = `locator('xpath=${resolvedTarget.value.replace(/'/g, "\\'")}')`;
+        } else {
+          // 'role', 'text', 'label', 'placeholder', 'testid' - already a method chain
+          innerLocator = resolvedTarget.value;
+        }
+        resolvedTarget = {
+          kind: 'frame',
+          value: `frameLocator('${frameContext.frameSelector.replace(/'/g, "\\'")}').${innerLocator}`,
+          ...(resolvedTarget.realizationSteps 
+            ? { 
+                realizationSteps: resolvedTarget.realizationSteps.map(rs => {
+                  let rsInner = rs.value;
+                  if (rs.kind === 'css') rsInner = `locator('${rs.value.replace(/'/g, "\\'")}')`;
+                  else if (rs.kind === 'xpath') rsInner = `locator('xpath=${rs.value.replace(/'/g, "\\'")}')`;
+                  
+                  return {
+                    ...rs,
+                    kind: 'frame',
+                    value: `frameLocator('${frameContext.frameSelector.replace(/'/g, "\\'")}').${rsInner}`
+                  };
+                })
+              } 
+            : {}),
+          ...(resolvedTarget.classId ? { classId: resolvedTarget.classId } : {}),
+          source: 'selectorResolution',
+          replaySafe: resolvedTarget.replaySafe,
+        };
       }
     }
 
@@ -348,7 +408,14 @@ function buildGenerationGuidance(): GenerationGuidanceV1 {
       'Use ignoredSteps only for context, diagnostics, or fallback explanation.',
       'Do not skip or reorder steps unless the user explicitly instructs it.',
       'Preserve custom-control-open steps; they are required for dropdown and menu visibility before selection.',
+      'If realizationSteps are provided on a resolvedTarget, you MUST write the Playwright code to execute those steps first (in order) before interacting with the primary target.',
+      'Use resolvedTarget.classId to understand the semantic intent and origin of the generated locator.',
       'Use resolvedTarget.value as the locator when locatorStatus is "resolved".',
+      'When resolvedTarget.kind is "css", wrap value in page.locator(value) or use it directly as a CSS selector string.',
+      'When resolvedTarget.kind is "xpath", use page.locator("xpath=" + value).',
+      'When resolvedTarget.kind is "native", the value is a Playwright native locator chain (e.g. locator(...).nth(...)). Use it as page.{value}.{action}() - do NOT wrap in page.locator().',
+      'When resolvedTarget.kind is "role", "text", "label", "placeholder", or "testid", the value is a Playwright ARIA locator chain (e.g. getByRole(...).getByRole(...)). Use it as page.{value}.{action}() - do NOT wrap in page.locator().',
+      'When resolvedTarget.kind is "frame", the value is a Playwright frameLocator chain (e.g. frameLocator(\'iframe#id\').locator(...)). Use it as page.{value}.{action}() - do NOT wrap in page.locator().',
       'Use fallbackHints.legacySelector only when locatorStatus is "unresolved".',
       'Do not invent or guess selectors.',
       'Replace <LLM_GENERATE_MOCK_DATA> with safe mock data or environment-backed test data.',
@@ -356,6 +423,42 @@ function buildGenerationGuidance(): GenerationGuidanceV1 {
     ],
   };
 }
+
+//
+// GC-1A: KIND INFERENCE
+//
+
+/**
+ * Maps a selector string + wire engine to the richer resolvedTarget.kind value.
+ *
+ * The wire schema only stores 'css' | 'xpath' (schema constraint), but
+ * shadow-class generators produce ARIA/native Playwright locator chains
+ * (e.g. getByRole(...).getByRole(...), locator(...).nth(N)).
+ * Detect these from the selector string so the LLM guidance is unambiguous.
+ */
+function inferKindFromSelector(
+  selector: string,
+  wireEngine: 'css' | 'xpath' | 'playwright-aria' | 'playwright-native'
+): GenerationStepV1['resolvedTarget'] extends { kind: infer K } ? K : 'css' {
+  if (wireEngine === 'xpath') return 'xpath' as any;
+  if (wireEngine === 'playwright-aria' || wireEngine === 'playwright-native') return 'native' as any;
+  const s = selector.trimStart();
+  if (s.startsWith('getByRole(')) return 'role' as any;
+  if (s.startsWith('getByText(')) return 'text' as any;
+  if (s.startsWith('getByLabel(')) return 'label' as any;
+  if (s.startsWith('getByPlaceholder(')) return 'placeholder' as any;
+  if (s.startsWith('getByTestId(')) return 'testid' as any;
+  if (s.startsWith('locator(')) return 'native' as any;
+  return 'css' as any;
+}
+
+// Class 10 - Boundary Traversal scope:
+// SUPPORTED: Same-origin iframes (window.frameElement accessible, isSameOrigin: true).
+// OUT OF SCOPE: Cross-origin iframes (Stripe, PayPal, Google login, etc.).
+//   These are blocked at transport layer — Mixed Content (HTTPS iframe -> HTTP localhost)
+//   or external CSP headers prevent event delivery. Not an AIR limitation to solve.
+// OUT OF SCOPE: Nested iframes (iframe inside iframe). window.frameElement only gives
+//   the immediate parent frame. Multi-level nesting is Phase D territory.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SHARED UTILITIES
