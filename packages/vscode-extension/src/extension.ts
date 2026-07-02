@@ -14,6 +14,8 @@ let extensionContext: vscode.ExtensionContext | null = null;
 let outputChannel: vscode.OutputChannel | null = null;
 let startRecordingStatusBarItem: vscode.StatusBarItem | null = null;
 let stopRecordingStatusBarItem: vscode.StatusBarItem | null = null;
+let historyStatusBarItem: vscode.StatusBarItem | null = null;
+let historyPanel: vscode.WebviewPanel | null = null;
 
 let serverProcess: ChildProcess | null = null;
 let serverPort: number | null = null;
@@ -143,6 +145,13 @@ function createStatusBarItems(context: vscode.ExtensionContext): void {
   stopRecordingStatusBarItem.tooltip = 'Stop AIR recording';
   stopRecordingStatusBarItem.hide();
   context.subscriptions.push(stopRecordingStatusBarItem);
+
+  historyStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 98);
+  historyStatusBarItem.command = 'air.showSessionHistory';
+  historyStatusBarItem.text = '$(history) AIR History';
+  historyStatusBarItem.tooltip = 'View all AIR session IDs';
+  historyStatusBarItem.show();
+  context.subscriptions.push(historyStatusBarItem);
 }
 
 function updateStatusBarItems(): void {
@@ -578,7 +587,14 @@ async function startRecording() {
       serverUrl: baseUrl,
     });
 
-    void vscode.window.showInformationMessage(`AIR Recording: ${currentSessionId}`);
+    void vscode.window
+      .showInformationMessage(`AIR: Recording started (${currentSessionId})`, 'View History')
+      .then((choice) => {
+        if (choice === 'View History') {
+          void showSessionHistory();
+        }
+      });
+    void refreshHistoryPanel();
   } catch (error) {
     console.error(`[${SCOPE}] Failed to start recording`, error);
     logToOutput(`[${SCOPE}] Failed to start recording`, { error: String(error) });
@@ -633,6 +649,7 @@ async function stopRecording() {
     logToOutput(`[${SCOPE}] Recording stopped`, { sessionId: currentSessionId });
     currentSessionId = null;
     void vscode.window.showInformationMessage('AIR: Recording stopped');
+    void refreshHistoryPanel();
   } catch (error) {
     console.error(`[${SCOPE}] Error during stop`, error);
   } finally {
@@ -670,6 +687,154 @@ async function listSessions() {
   } catch (error) {
     console.error(`[${SCOPE}] Failed to list sessions`, error);
     void vscode.window.showErrorMessage('Failed to list sessions');
+  }
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function getHistoryWebviewHtml(
+  sessions: Array<{ id: string; startedAt: string; endedAt?: string | null }>,
+): string {
+  const rows = sessions
+    .map((s) => {
+      const started = new Date(s.startedAt).toLocaleString();
+      const isEnded = Boolean(s.endedAt);
+      const id = escapeHtml(s.id);
+      return `
+        <tr>
+          <td class="id-cell">
+            <span class="id-text">${id}</span>
+            <button class="copy-btn" data-id="${id}">Copy</button>
+          </td>
+          <td>${escapeHtml(started)}</td>
+          <td><span class="badge ${isEnded ? 'ended' : 'active'}">${isEnded ? 'Ended' : 'Active'}</span></td>
+        </tr>`;
+    })
+    .join('');
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); padding: 16px 20px; }
+  h2 { margin: 0 0 4px 0; font-size: 15px; }
+  .subtitle { margin: 0 0 16px 0; font-size: 12px; opacity: 0.7; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--vscode-panel-border); vertical-align: middle; }
+  th { font-weight: 600; font-size: 11px; text-transform: uppercase; opacity: 0.65; letter-spacing: 0.03em; }
+  .id-cell { display: flex; align-items: center; gap: 10px; }
+  .id-text { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; word-break: break-all; }
+  .copy-btn { flex-shrink: 0; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; padding: 3px 10px; border-radius: 3px; cursor: pointer; font-size: 11px; }
+  .copy-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  .copy-btn.copied { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .badge { padding: 2px 9px; border-radius: 10px; font-size: 11px; white-space: nowrap; }
+  .badge.active { background: rgba(80,200,120,0.18); color: #4ec9b0; }
+  .badge.ended { background: rgba(150,150,150,0.18); color: var(--vscode-descriptionForeground); }
+  .empty { opacity: 0.7; padding: 32px 0; text-align: center; font-size: 13px; }
+  .toolbar { display: flex; justify-content: flex-end; margin-bottom: 10px; }
+  .refresh-btn { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 4px 12px; border-radius: 3px; cursor: pointer; font-size: 12px; }
+  .refresh-btn:hover { background: var(--vscode-button-hoverBackground); }
+</style>
+</head>
+<body>
+  <h2>AIR Session History</h2>
+  <p class="subtitle">${sessions.length} session${sessions.length === 1 ? '' : 's'} recorded</p>
+  <div class="toolbar"><button class="refresh-btn" id="refresh">Refresh</button></div>
+  ${
+    sessions.length === 0
+      ? '<div class="empty">No sessions recorded yet.</div>'
+      : `<table>
+          <thead><tr><th>Session ID</th><th>Started</th><th>Status</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`
+  }
+  <script>
+    const vscode = acquireVsCodeApi();
+    document.querySelectorAll('.copy-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.getAttribute('data-id');
+        vscode.postMessage({ type: 'copy', id });
+        const original = btn.textContent;
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.textContent = original;
+          btn.classList.remove('copied');
+        }, 1200);
+      });
+    });
+    document.getElementById('refresh')?.addEventListener('click', () => {
+      vscode.postMessage({ type: 'refresh' });
+    });
+  </script>
+</body>
+</html>`;
+}
+
+async function fetchSessionsForHistory(): Promise<
+  Array<{ id: string; startedAt: string; endedAt?: string | null }>
+> {
+  const baseUrl = await getServerBaseUrl();
+  const res = await fetch(`${baseUrl}/api/sessions`);
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  const sessions: Array<{ id: string; startedAt: string; endedAt?: string | null }> = await res.json();
+  return sessions.sort(
+    (a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime(),
+  );
+}
+
+async function refreshHistoryPanel(): Promise<void> {
+  if (!historyPanel) return;
+  try {
+    const sessions = await fetchSessionsForHistory();
+    historyPanel.webview.html = getHistoryWebviewHtml(sessions);
+  } catch (error) {
+    console.error(`[${SCOPE}] Failed to refresh session history`, error);
+  }
+}
+
+async function showSessionHistory() {
+  try {
+    if (historyPanel) {
+      historyPanel.reveal(vscode.ViewColumn.Active);
+      await refreshHistoryPanel();
+      return;
+    }
+
+    historyPanel = vscode.window.createWebviewPanel(
+      'airSessionHistory',
+      'AIR Session History',
+      vscode.ViewColumn.Active,
+      { enableScripts: true, retainContextWhenHidden: true },
+    );
+
+    historyPanel.webview.onDidReceiveMessage(async (message) => {
+      if (message?.type === 'copy' && typeof message.id === 'string') {
+        await vscode.env.clipboard.writeText(message.id);
+        void vscode.window.setStatusBarMessage(`AIR: Copied session ID ${message.id}`, 2500);
+      } else if (message?.type === 'refresh') {
+        await refreshHistoryPanel();
+      }
+    });
+
+    historyPanel.onDidDispose(() => {
+      historyPanel = null;
+    });
+
+    await refreshHistoryPanel();
+  } catch (error) {
+    console.error(`[${SCOPE}] Failed to load session history`, error);
+    void vscode.window.showErrorMessage('AIR: Failed to load session history');
   }
 }
 
@@ -870,6 +1035,7 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('air.deleteSession', deleteSession),
     vscode.commands.registerCommand('air.debugEvents', debugEvents),
     vscode.commands.registerCommand('air.inspectSession', inspectSession),
+    vscode.commands.registerCommand('air.showSessionHistory', showSessionHistory),
     vscode.commands.registerCommand('air.showLogs', () => {
       if (!outputChannel) {
         outputChannel = vscode.window.createOutputChannel('AIR');
@@ -973,5 +1139,7 @@ export async function deactivate() {
     currentSessionId = null;
     isStoppingRecording = false;
     outputChannel = null;
+    historyPanel?.dispose();
+    historyPanel = null;
   }
 }
