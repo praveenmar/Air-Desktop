@@ -2,8 +2,6 @@
 
 > Capture user interactions with rich context and empower AI coding assistants to generate accurate automation scripts.
 
-![AIR Logo](images/logo.png)
-
 ## Overview
 
 AIR (AI Interaction Recorder) is a VS Code extension designed for QA engineers, automation engineers, and developers.

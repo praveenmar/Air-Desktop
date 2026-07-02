@@ -3,7 +3,8 @@
   "displayName": "AIR (AI Interaction Recorder)",
   "description": "An intelligent DOM interceptor and semantic data layer providing LLMs with deterministic web automation context.",
   "version": "0.1.0",
-  "publisher": "AIRAIInteractionRecorder",
+  "publisher": "TestMasterHubAI",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/air-desktop/air-desktop"
@@ -12,7 +13,6 @@
     "vscode": "^1.90.0"
   },
   "icon": "icon.png",
-  "license": "MIT",
   "keywords": [
     "air",
     "mcp",
@@ -31,9 +31,13 @@
     "dist",
     "interceptor",
     "interceptor.js",
+    "icon.png",
     "patch.js",
     "patch-interceptor.js",
-    "run-hardening.js"
+    "run-hardening.js",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -90,7 +94,7 @@
   "scripts": {
     "build": "node esbuild.js",
     "watch": "node esbuild.js --watch",
-    "package": "vsce package"
+    "package": "npm run build && vsce package --no-dependencies --allow-unused-files-pattern"
   },
   "dependencies": {
     "playwright": "^1.58.2",
@@ -98,7 +102,7 @@
   },
   "devDependencies": {
     "archiver": "^8.0.0",
-    "@air/core": "*",
+    "@air/core": "file:../../core",
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.90.0",
     "@vscode/vsce": "^3.0.0"
