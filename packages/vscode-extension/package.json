@@ -11,6 +11,15 @@
   "engines": {
     "vscode": "^1.90.0"
   },
+  "icon": "icon.png",
+  "license": "MIT",
+  "keywords": [
+    "air",
+    "mcp",
+    "automation",
+    "testing",
+    "playwright"
+  ],
    "categories": [
     "Testing",
     "AI",
@@ -24,19 +33,10 @@
     "interceptor.js",
     "patch.js",
     "patch-interceptor.js",
-    "run-hardening.js",
-    "validation_lab.html"
+    "run-hardening.js"
   ],
   "activationEvents": [
-    "onCommand:air.startRecording",
-    "onCommand:air.stopRecording",
-    "onCommand:air.listSessions",
-    "onCommand:air.exportSession",
-    "onCommand:air.deleteSession",
-    "onCommand:air.debugEvents",
-    "onCommand:air.inspectSession",
-    "onCommand:air.showLogs",
-    "onCommand:air.copyMcpConfig"
+    "onStartupFinished"
   ],
   "contributes": {
     "commands": [

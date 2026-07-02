@@ -2,12 +2,24 @@
   "name": "air-mcp-server",
   "version": "0.1.0",
   "description": "AIR MCP Server",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "license": "MIT",
+  "keywords": [
+    "air",
+    "mcp",
+    "test-automation",
+    "playwright",
+    "recording"
+  ],
   "main": "dist/index.js",
   "files": [
     "dist",
     "bin"
   ],
   "bin": {
+    "air-mcp-server": "./bin/air-mcp.js",
     "air-mcp": "./bin/air-mcp.js",
     "air-mcp-http": "./bin/air-mcp-http.js"
   },

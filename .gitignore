@@ -56,3 +56,12 @@ scratch/run-air-orangehrm-selector-debug.js
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+
+.air.db
+
+tmp/
+
+test-results/
+scratch/
+e2e/
+build-vsix/

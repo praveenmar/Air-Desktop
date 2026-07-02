@@ -397,6 +397,15 @@ async function startRecording() {
     return;
   }
 
+  let tempBrowser: Browser;
+  try {
+    tempBrowser = await launchRecordingBrowser();
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    void vscode.window.showErrorMessage(`AIR: ${msg}`);
+    return;
+  }
+
   const url = await vscode.window.showInputBox({
     prompt: 'Enter URL to record',
     placeHolder: 'https://example.com',
@@ -410,7 +419,10 @@ async function startRecording() {
     },
   });
 
-  if (!url) return;
+  if (!url) {
+    await tempBrowser.close();
+    return;
+  }
 
   try {
     const baseUrl = await getServerBaseUrl();
@@ -441,7 +453,7 @@ async function startRecording() {
       serverUrl: baseUrl,
     });
 
-    activeBrowser = await launchRecordingBrowser();
+    activeBrowser = tempBrowser;
     activeContext = await activeBrowser.newContext({
     bypassCSP: true
     });
@@ -776,6 +788,7 @@ async function copyMcpConfig() {
   let args: string[];
 
   if (choice.label === 'Production (NPX)') {
+    vscode.window.showWarningMessage('Note: air-mcp-server is not yet published to NPM. This configuration will not work until the package is published.');
     command = process.platform === 'win32' ? 'npx.cmd' : 'npx';
     args = ['-y', 'air-mcp-server@latest'];
   } else {
