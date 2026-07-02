@@ -12,6 +12,8 @@ let activeContext: BrowserContext | null = null;
 let currentSessionId: string | null = null;
 let extensionContext: vscode.ExtensionContext | null = null;
 let outputChannel: vscode.OutputChannel | null = null;
+let startRecordingStatusBarItem: vscode.StatusBarItem | null = null;
+let stopRecordingStatusBarItem: vscode.StatusBarItem | null = null;
 
 let serverProcess: ChildProcess | null = null;
 let serverPort: number | null = null;
@@ -40,9 +42,18 @@ async function launchRecordingBrowser(): Promise<Browser> {
     label: string;
     options: ChromiumLaunchOptions;
   }> = [
-    { label: 'Microsoft Edge', options: { headless: false, channel: 'msedge' } },
-    { label: 'Google Chrome', options: { headless: false, channel: 'chrome' } },
-    { label: 'Playwright Chromium', options: { headless: false } },
+    {
+      label: 'Google Chrome',
+      options: { headless: false, channel: 'chrome', args: ['--start-maximized'] },
+    },
+    {
+      label: 'Microsoft Edge',
+      options: { headless: false, channel: 'msedge', args: ['--start-maximized'] },
+    },
+    {
+      label: 'Playwright Chromium',
+      options: { headless: false, args: ['--start-maximized'] },
+    },
   ];
 
   const errors: string[] = [];
@@ -116,6 +127,37 @@ function createServerReadyPromise(): Promise<number> {
     serverReadyReject = reject;
   });
   return serverReadyPromise;
+}
+
+function createStatusBarItems(context: vscode.ExtensionContext): void {
+  startRecordingStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  startRecordingStatusBarItem.command = 'air.startRecording';
+  startRecordingStatusBarItem.text = '$(record) AIR Start';
+  startRecordingStatusBarItem.tooltip = 'Start AIR recording';
+  startRecordingStatusBarItem.show();
+  context.subscriptions.push(startRecordingStatusBarItem);
+
+  stopRecordingStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
+  stopRecordingStatusBarItem.command = 'air.stopRecording';
+  stopRecordingStatusBarItem.text = '$(debug-stop) AIR Stop';
+  stopRecordingStatusBarItem.tooltip = 'Stop AIR recording';
+  stopRecordingStatusBarItem.hide();
+  context.subscriptions.push(stopRecordingStatusBarItem);
+}
+
+function updateStatusBarItems(): void {
+  if (!startRecordingStatusBarItem || !stopRecordingStatusBarItem) {
+    return;
+  }
+
+  const isRecording = Boolean(activeBrowser);
+  if (isRecording) {
+    startRecordingStatusBarItem.hide();
+    stopRecordingStatusBarItem.show();
+  } else {
+    stopRecordingStatusBarItem.hide();
+    startRecordingStatusBarItem.show();
+  }
 }
 
 async function waitForServerReady(timeoutMs = 10_000): Promise<number> {
@@ -454,8 +496,10 @@ async function startRecording() {
     });
 
     activeBrowser = tempBrowser;
+    updateStatusBarItems();
     activeContext = await activeBrowser.newContext({
-    bypassCSP: true
+      bypassCSP: true,
+      viewport: null,
     });
 
     const eventEndpoint = `http://127.0.0.1:${Number(baseUrl.split(':').pop())}/api/events`;
@@ -596,6 +640,7 @@ async function stopRecording() {
     activeContext = null;
     currentSessionId = null;
     isStoppingRecording = false;
+    updateStatusBarItems();
   }
 }
 
@@ -788,7 +833,6 @@ async function copyMcpConfig() {
   let args: string[];
 
   if (choice.label === 'Production (NPX)') {
-    vscode.window.showWarningMessage('Note: air-mcp-server is not yet published to NPM. This configuration will not work until the package is published.');
     command = process.platform === 'win32' ? 'npx.cmd' : 'npx';
     args = ['-y', 'air-mcp-server@latest'];
   } else {
@@ -837,6 +881,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
   console.log(`[${SCOPE}] Commands registered`);
   logToOutput(`[${SCOPE}] Commands registered`);
+
+  createStatusBarItems(context);
+  updateStatusBarItems();
 
   // Initialize server in background (non-blocking)
   try {
