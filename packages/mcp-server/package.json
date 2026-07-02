@@ -36,11 +36,11 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "esbuild": "^0.24.0",
-    "typescript": "5.6.3",
     "@air/codegen": "0.1.0",
     "@air/core": "*",
-    "@air/shared": "0.1.0"
+    "@air/shared": "0.1.0",
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "5.6.3"
   }
 }

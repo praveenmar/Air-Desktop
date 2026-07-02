@@ -1,13 +1,13 @@
 {
-  "name": "air",
+  "name": "AIRAIInteractionRecorder",
   "displayName": "AIR (AI Interaction Recorder)",
   "description": "An intelligent DOM interceptor and semantic data layer providing LLMs with deterministic web automation context.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "TestMasterHubAI",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/air-desktop/air-desktop"
+    "url": "https://github.com/TestMasterHub/testmasterhub-app-support"
   },
   "engines": {
     "vscode": "^1.90.0"
@@ -27,18 +27,6 @@
     "Programming Languages"
   ],
   "main": "./dist/extension.js",
-  "files": [
-    "dist",
-    "interceptor",
-    "interceptor.js",
-    "icon.png",
-    "patch.js",
-    "patch-interceptor.js",
-    "run-hardening.js",
-    "LICENSE",
-    "README.md",
-    "CHANGELOG.md"
-  ],
   "activationEvents": [
     "onStartupFinished"
   ],
