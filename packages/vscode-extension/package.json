@@ -2,7 +2,7 @@
   "name": "AIRAIInteractionRecorder",
   "displayName": "AIR (AI Interaction Recorder)",
   "description": "An intelligent DOM interceptor and semantic data layer providing LLMs with deterministic web automation context.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "TestMasterHubAI",
   "license": "MIT",
   "repository": {
