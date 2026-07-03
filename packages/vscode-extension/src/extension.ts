@@ -344,45 +344,36 @@ function buildConfigScript(sessionId: string, port: number): string {
     window.__air_gmSend = async (url, payload) => {
       const targetUrl = typeof url === 'string' ? url : ${JSON.stringify(eventEndpoint)};
       const body = typeof payload === 'string' ? payload : JSON.stringify(payload ?? {});
-
-      try {
-        // Browser fetch path keeps /api/events visible in DevTools Network.
-        return await fetch(targetUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body,
-          mode: 'cors',
-          keepalive: true
-        });
-      } catch (_) {
-        // Fall through to node bridge fallback.
+      // Node bridge is always primary - bypasses browser CORS and PNA entirely.
+      // The call executes in Node.js (driver side), so no browser origin exists.
+      if (typeof window.__air_nodeSend === 'function') {
+        return window.__air_nodeSend(targetUrl, body);
       }
-
-      if (typeof window.__air_nodeSend !== 'function') {
-        return { ok: false, status: 0, statusText: 'Transport unavailable' };
-      }
-
-      return window.__air_nodeSend(targetUrl, body);
+      // Fallback: browser fetch - works only on HTTP origins (no HTTPS->localhost PNA issue).
+      return fetch(targetUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        mode: 'cors',
+        keepalive: true
+      });
     };
     window.__air_gmBeacon = (url, payload) => {
       const targetUrl = typeof url === 'string' ? url : ${JSON.stringify(eventEndpoint)};
       const body = typeof payload === 'string' ? payload : JSON.stringify(payload ?? {});
-
-      try {
-        const blob = new Blob([body], { type: 'application/json' });
-        const sent = navigator.sendBeacon(targetUrl, blob);
-        if (sent) {
-          return true;
-        }
-      } catch (_) {}
-
+      // Node bridge first - bypasses CORS/PNA on all origins.
       try {
         if (typeof window.__air_nodeSend === 'function') {
           window.__air_nodeSend(targetUrl, body).catch(() => {});
           return true;
         }
       } catch (_) {}
-
+      // Fallback: sendBeacon - works only on HTTP origins.
+      try {
+        const blob = new Blob([body], { type: 'application/json' });
+        const sent = navigator.sendBeacon(targetUrl, blob);
+        if (sent) return true;
+      } catch (_) {}
       return false;
     };
   `;
