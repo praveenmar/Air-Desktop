@@ -36,6 +36,7 @@ import { generateStatefulLifecycleShadow } from './generators/stateful-lifecycle
 import { generateCollectionMembershipShadow } from './generators/collection-membership.js';
 import { generateHierarchicalNavigationShadow } from './generators/hierarchical-navigation.js';
 import { resolveTreeNodeContextEvidence } from './context/tree-node.js';
+import { collectPragmaticCssCandidates } from './generators/pragmatic-css.js';
 
 export const ENABLE_SHADOW_PROOF_PIPELINE = true;
 
@@ -105,6 +106,7 @@ export function collectShadowSelectorCandidates({
     : resolveCanonicalTargetInternal(element, eventContext);
   const baseCandidateInputs = [
     ...collectDirectCandidates(element),
+    ...collectPragmaticCssCandidates(element),
     ...collectSecondaryCandidates(element),
     ...collectCanonicalTargetCandidates(resolvedCanonicalTargetInfo),
   ];

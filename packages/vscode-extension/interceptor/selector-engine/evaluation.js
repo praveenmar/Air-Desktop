@@ -109,8 +109,14 @@ function collectMatches(root, candidateInput) {
     };
   }
 
+  let selector = candidateInput?.selector;
+  const requiresPlaywrightEngine = candidateInput?.requiresPlaywrightEngine || candidateInput?.metadata?.requiresPlaywrightEngine;
+  if (requiresPlaywrightEngine) {
+    selector = selector.replace(/:visible$/, '');
+  }
+
   return {
-    matches: queryAll(root, candidateInput?.selector),
+    matches: queryAll(root, selector),
     warningCodes: [],
   };
 }
@@ -139,8 +145,16 @@ export function collectMatchMetadata(element, candidateInput) {
     warningCodes.push('too-many-matches-for-visible-index');
   }
 
+  let effectiveMatchCount = matchCount;
+  const requiresPlaywrightEngine = candidateInput?.requiresPlaywrightEngine || candidateInput?.metadata?.requiresPlaywrightEngine;
+  if (requiresPlaywrightEngine && visibleMatchCount === 1) {
+    effectiveMatchCount = 1;
+    const warnIdx = warningCodes.indexOf('multiple-matches');
+    if (warnIdx > -1) warningCodes.splice(warnIdx, 1);
+  }
+
   return {
-    matchCount,
+    matchCount: effectiveMatchCount,
     visibleMatchCount,
     positionInAllMatches: positionInAllMatches >= 0 ? positionInAllMatches : null,
     positionInVisibleMatches: positionInVisibleMatches >= 0 ? positionInVisibleMatches : null,

@@ -4,6 +4,7 @@
  * @property {string} [identityType] - The type of identity (e.g., 'data-testid', 'id')
  * @property {string} [value] - The value of the identity attribute
  * @property {boolean} [isLikelyDynamic] - Whether the ID appears auto-generated
+ * @property {boolean} [isGloballyUnique] - Whether the element was unique in the DOM at capture
  */
 
 /**

@@ -327,16 +327,28 @@ function deriveContainerSelectorCandidates(container) {
     candidates.push({ selector, kind, isClean });
   };
 
-  const dataTestIdSelector = buildAttributeSelector(null, 'data-testid', container.getAttribute('data-testid'), { tagScoped: false });
-  if (dataTestIdSelector) pushCandidate(dataTestIdSelector, 'data-testid', true);
-
-  for (const attrName of ['data-cy', 'data-qa']) {
-    const selector = buildAttributeSelector(tagName, attrName, container.getAttribute(attrName));
-    if (selector) pushCandidate(selector, attrName, true);
-  }
+  ['data-testid', 'data-cy', 'data-qa'].forEach(attrName => {
+    const attrValue = container.getAttribute(attrName);
+    if (attrValue) {
+      let isGloballyUnique = false;
+      try {
+        isGloballyUnique = document.querySelectorAll(`[${attrName}="${attrValue.replace(/"/g, '\\"')}"]`).length === 1;
+      } catch (e) {}
+      if (isGloballyUnique) {
+        const selector = buildAttributeSelector(attrName === 'data-testid' ? null : tagName, attrName, attrValue, { tagScoped: attrName !== 'data-testid' });
+        if (selector) pushCandidate(selector, attrName, true);
+      }
+    }
+  });
 
   if (container.id && !isLikelyDynamicId(container.id)) {
-    pushCandidate(`#${safeCssEscape(container.id)}`, 'id', true);
+    let isGloballyUnique = false;
+    try {
+      isGloballyUnique = document.querySelectorAll(`#${container.id.replace(/"/g, '\\"')}`).length === 1;
+    } catch (e) {}
+    if (isGloballyUnique) {
+      pushCandidate(`#${safeCssEscape(container.id)}`, 'id', true);
+    }
   }
 
   const classToken = getBestStableClassToken(container);

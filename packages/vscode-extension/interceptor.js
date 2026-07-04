@@ -7756,15 +7756,33 @@ class AIRInterceptor {
         if (typeof selectorEngine.assembleSelectorProofPacketV0 === 'function') {
           const proofs = [];
 
-          const testId = element?.getAttribute?.('data-testid');
-          if (testId) proofs.push({ source: 'interceptor.js', identityType: 'data-testid', value: testId, isLikelyDynamic: false });
-
+          ['data-testid', 'data-cy', 'data-qa'].forEach(attrName => {
+            const testId = element?.getAttribute?.(attrName);
+            if (testId) {
+              let isGloballyUnique = false;
+              try {
+                isGloballyUnique = document.querySelectorAll(`[${attrName}="${testId.replace(/"/g, '\\"')}"]`).length === 1;
+              } catch (e) {}
+              proofs.push({ source: 'interceptor.js', identityType: 'data-testid', value: testId, isLikelyDynamic: false, isGloballyUnique });
+            }
+          });
           const id = element?.id;
-          if (id) proofs.push({ source: 'interceptor.js', identityType: 'id', value: id, isLikelyDynamic: this._isLikelyDynamicId(id) });
-
+          if (id) {
+            let isGloballyUnique = false;
+            try {
+              isGloballyUnique = document.querySelectorAll(`#${id.replace(/"/g, '\\"')}`).length === 1;
+            } catch (e) {}
+            proofs.push({ source: 'interceptor.js', identityType: 'id', value: id, isLikelyDynamic: this._isLikelyDynamicId(id), isGloballyUnique });
+          }
           ['name', 'href', 'value', 'title', 'alt'].forEach(attr => {
             const attrValue = element?.getAttribute?.(attr);
-            if (attrValue) proofs.push({ source: 'interceptor.js', identityType: attr, value: attrValue, isLikelyDynamic: attr === 'name' ? this._isLikelyDynamicId(attrValue) : false });
+            if (attrValue) {
+              let isGloballyUnique = false;
+              try {
+                isGloballyUnique = document.querySelectorAll(`[${attr}="${attrValue.replace(/"/g, '\\"')}"]`).length === 1;
+              } catch (e) {}
+              proofs.push({ source: 'interceptor.js', identityType: attr, value: attrValue, isLikelyDynamic: attr === 'name' ? this._isLikelyDynamicId(attrValue) : false, isGloballyUnique });
+            }
           });
 
           if (accessibilityEvidence?.role && accessibilityEvidence?.accessibleName) {

@@ -8,7 +8,8 @@ export const SelectorClassIds = {
   STRUCTURAL_DISAMBIGUATION: 'structural-disambiguation',
   STATEFUL_LIFECYCLE_LINKAGE: 'stateful-lifecycle-linkage',
   COLLECTION_MEMBERSHIP: 'collection-membership',
-  HIERARCHICAL_NAVIGATION: 'hierarchical-navigation'
+  HIERARCHICAL_NAVIGATION: 'hierarchical-navigation',
+  PRAGMATIC_CSS_FALLBACK: 'pragmatic-css-fallback'
 };
 
 export const SelectorEngines = {
@@ -21,11 +22,12 @@ export const SelectorEngines = {
  * Creates an immutable Selector Candidate.
  * Modifiers must return new candidate objects rather than mutating existing ones.
  */
-export function createCandidate({ classId, selector, engine, proof, realizationSteps, metadata = {} }) {
+export function createCandidate({ classId, selector, engine, family, proof, realizationSteps, metadata = {} }) {
   const candidate = {
     classId,
     selector,
     engine,
+    ...(family ? { family } : {}),
     realizationSteps: realizationSteps ? Object.freeze([...realizationSteps]) : undefined,
     appliedModifiers: Object.freeze([]),
     proof: Object.freeze({ ...proof }),

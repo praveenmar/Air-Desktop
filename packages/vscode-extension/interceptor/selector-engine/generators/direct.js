@@ -12,10 +12,17 @@ function collectTestIdCandidates(element) {
     const value = element.getAttribute(attributeName);
     const selector = buildAttributeSelector(null, attributeName, value, { tagScoped: false });
     if (selector) {
+      // Synchronous DOM check to prevent poisoning the shadow packet (Rule 0)
+      let isGloballyUnique = false;
+      try {
+        isGloballyUnique = document.querySelectorAll(selector).length === 1;
+      } catch (e) {}
+
       candidates.push({
         selector,
         engine: 'css',
         family: 'test-id',
+        isGloballyUnique
       });
     }
   }
@@ -25,10 +32,22 @@ function collectTestIdCandidates(element) {
 function collectIdCandidate(element) {
   const id = element.id;
   if (!id || isLikelyDynamicId(id)) return [];
+  
+  const selector = `#${safeCssEscape(id)}`;
+  
+  // Synchronous DOM check to prevent poisoning the shadow packet (Rule 0)
+  let isGloballyUnique = false;
+  try {
+    isGloballyUnique = document.querySelectorAll(selector).length === 1;
+  } catch (e) {
+    // If querySelectorAll fails (e.g. invalid escaped ID), default to false
+  }
+
   return [{
-    selector: `#${safeCssEscape(id)}`,
+    selector,
     engine: 'css',
     family: 'id',
+    isGloballyUnique
   }];
 }
 

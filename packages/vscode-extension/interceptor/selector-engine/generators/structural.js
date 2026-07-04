@@ -125,7 +125,7 @@ function isHashedRandomClassToken(token) {
   return false;
 }
 
-function scoreClassCandidate(token) {
+export function scoreClassCandidate(token) {
   let penalty = 0;
   let bonus = 0;
 
@@ -149,7 +149,7 @@ function scoreClassCandidate(token) {
   };
 }
 
-function analyzeClassToken(token) {
+export function analyzeClassToken(token) {
   const normalized = safeTrim(token);
   return {
     isFramework: isFrameworkClassToken(normalized),
@@ -330,17 +330,35 @@ function buildParentSelector(container) {
 
   const dataTestId = container.getAttribute('data-testid');
   if (dataTestId) {
-    return `[data-testid="${escapeAttributeValue(dataTestId)}"]`;
+    let isGloballyUnique = false;
+    try {
+      isGloballyUnique = document.querySelectorAll(`[data-testid="${escapeAttributeValue(dataTestId)}"]`).length === 1;
+    } catch (e) {}
+    if (isGloballyUnique) {
+      return `[data-testid="${escapeAttributeValue(dataTestId)}"]`;
+    }
   }
 
   for (const attrName of ['data-cy', 'data-qa']) {
     const attrValue = container.getAttribute(attrName);
     if (!attrValue) continue;
-    return `${tagName}[${attrName}="${escapeAttributeValue(attrValue)}"]`;
+    let isGloballyUnique = false;
+    try {
+      isGloballyUnique = document.querySelectorAll(`[${attrName}="${escapeAttributeValue(attrValue)}"]`).length === 1;
+    } catch (e) {}
+    if (isGloballyUnique) {
+      return `${tagName}[${attrName}="${escapeAttributeValue(attrValue)}"]`;
+    }
   }
 
   if (container.id && !isLikelyDynamicId(container.id)) {
-    return `#${safeCssEscape(container.id)}`;
+    let isGloballyUnique = false;
+    try {
+      isGloballyUnique = document.querySelectorAll(`#${safeCssEscape(container.id)}`).length === 1;
+    } catch (e) {}
+    if (isGloballyUnique) {
+      return `#${safeCssEscape(container.id)}`;
+    }
   }
 
   const classCandidate = getBestStableClassCandidate(container);

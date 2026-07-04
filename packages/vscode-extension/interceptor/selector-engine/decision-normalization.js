@@ -111,6 +111,7 @@ function countChainLinks(selector) {
 function baseProofPacketScore(classId, proof, metadata) {
   switch (classId) {
     case 'direct-identity': {
+      if (proof.isGloballyUnique === false) return 40; // Ambiguous ID fallback
       const identityType = proof?.identityType || '';
       if (identityType === 'data-testid') return 97;
       if (identityType === 'id')          return 92;
@@ -138,6 +139,7 @@ function baseProofPacketScore(classId, proof, metadata) {
       return 82; // Shape N and P-aria
     }
     case 'boundary-traversal': return 80;
+    case 'pragmatic-css-fallback': return 65;
     default:                   return 45;
   }
 }
@@ -206,6 +208,7 @@ function isProofBackedReplaySafe(candidate) {
 
   switch (candidate.classId) {
     case 'direct-identity':
+      if (proof.isGloballyUnique === false) return false;
       return proof.isLikelyDynamic !== true && !!proof.identityType;
 
     case 'semantic-identity':
