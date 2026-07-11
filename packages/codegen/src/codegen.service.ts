@@ -1648,7 +1648,7 @@ export class CodegenService {
         }
       }
 
-      console.log('CODEGEN_STEP_MAPPED', {
+      console.error('CODEGEN_STEP_MAPPED', {
         sessionId,
         step: step.step,
         eventId: ev.eventId ?? null,
@@ -1800,7 +1800,7 @@ export class CodegenService {
       }
 
       const snapshotEngineAvailable = !!(jsdomCtor || linkedomParse);
-      console.log('[DEBUG] loadSnapshots: jsdomCtor=', !!jsdomCtor, 'linkedomParse=', !!linkedomParse);
+      console.error('[DEBUG] loadSnapshots: jsdomCtor=', !!jsdomCtor, 'linkedomParse=', !!linkedomParse);
 
       const emptyInventory: SnapshotInventory = {
         snapshotEngineAvailable,
@@ -2073,7 +2073,7 @@ export class CodegenService {
         return loadDocumentCached(`node:${sourceLabel}:${nodeId}`, () => {
           const row = getNodeSnapshotStmt.get(nodeId) as { snapshotHtml?: string | null } | undefined;
           const snapshotHtml = row?.snapshotHtml;
-          console.log(`[DEBUG] loadSnapshots: nodeId=${nodeId}, snapshotHtml length=${snapshotHtml ? snapshotHtml.length : 0}`);
+          console.error(`[DEBUG] loadSnapshots: nodeId=${nodeId}, snapshotHtml length=${snapshotHtml ? snapshotHtml.length : 0}`);
           if (!snapshotHtml) return null;
           return parseHtmlToDocument(snapshotHtml, `${sourceLabel}:${nodeId}`);
         });
@@ -2290,7 +2290,7 @@ export class CodegenService {
         }
       }
 
-      console.log('[DEBUG] loadSnapshots inventory', {
+      console.error('[DEBUG] loadSnapshots inventory', {
         exactEventLocal: inventory.eventLocalByEventId.size,
         sourceNodes: inventory.sourceNodeById.size,
         destinationNodes: inventory.destinationNodeById.size,

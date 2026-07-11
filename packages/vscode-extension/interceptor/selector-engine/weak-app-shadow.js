@@ -114,6 +114,12 @@ function buildIndexedDomXPath(element) {
     const tagName = current.tagName?.toLowerCase?.();
     if (!tagName) return null;
 
+    // F-S3: SVG elements live in the SVG XML namespace. Raw tagName steps like
+    // '//path' or '//circle' fail in namespace-aware XPath contexts. Use
+    // local-name() to build namespace-agnostic steps for any SVG interior element.
+    const isSvgElement = current.namespaceURI === 'http://www.w3.org/2000/svg' && tagName !== 'svg';
+    const xpathTagExpr = isSvgElement ? `*[local-name()='${tagName}']` : tagName;
+
     if (current.id) {
       segments.unshift(`*[@id="${String(current.id).replace(/"/g, '\\"')}"]`);
       return `//*[@id="${String(current.id).replace(/"/g, '\\"')}"]${segments.length > 1 ? `/${segments.slice(1).join('/')}` : ''}`;
@@ -123,7 +129,7 @@ function buildIndexedDomXPath(element) {
       ? Array.from(current.parentElement.children).filter((child) => child.tagName === current.tagName)
       : [current];
     const index = siblings.indexOf(current) + 1;
-    segments.unshift(`${tagName}[${index}]`);
+    segments.unshift(`${xpathTagExpr}[${index}]`);
 
     current = current.parentElement;
     if (!current) break;
@@ -251,6 +257,20 @@ export function collectWeakAppShadowCoverage({
     };
   }
 
+  // F-G5: Detect closed shadow DOM before generating any fallbacks.
+  // Elements inside a closed shadow root are inaccessible to standard DOM queries.
+  // We can still attempt structural fallbacks but consumers must be warned.
+  let closedShadowWarning = null;
+  try {
+    const rootNode = typeof element.getRootNode === 'function' ? element.getRootNode() : null;
+    const ShadowRootCtor = typeof ShadowRoot !== 'undefined' ? ShadowRoot : null;
+    if (ShadowRootCtor && rootNode instanceof ShadowRootCtor && rootNode.mode === 'closed') {
+      closedShadowWarning = 'closed-shadow-root';
+    }
+  } catch {
+    // Ignore SecurityError — treat as non-closed.
+  }
+
   if (hasPreferredSelector(currentCandidates)) {
     return {
       targetSummary,
@@ -260,14 +280,29 @@ export function collectWeakAppShadowCoverage({
     };
   }
 
+  // F-G4: Track whether a text-based candidate was generated.
+  // buildScopedTextCandidate returns null when the element has no inner text
+  // (icon-only buttons, SVG-only elements, etc.). When it returns null AND all
+  // surviving fallbacks are positional, we tag the fallbacks with 'no-semantic-anchor'.
+  const textCandidate = buildScopedTextCandidate(element, boundedFieldContextEvidence);
+  const nthOfTypeCandidate = buildNthOfTypeCandidate(element, boundedFieldContextEvidence);
+  const indexedXPathCandidate = buildIndexedXPathCandidate(element);
+
   const generatedCandidates = dedupeGeneratedCandidates([
-    buildScopedTextCandidate(element, boundedFieldContextEvidence),
-    buildNthOfTypeCandidate(element, boundedFieldContextEvidence),
-    buildIndexedXPathCandidate(element),
+    textCandidate,
+    nthOfTypeCandidate,
+    indexedXPathCandidate,
   ]);
 
   const fallbacks = generatedCandidates.map((candidateInput) => {
     const metadata = collectMatchMetadata(element, candidateInput);
+
+    // Merge generator-level warning codes with evaluation-time warning codes.
+    const baseWarningCodes = [...(metadata.warningCodes || [])];
+    if (closedShadowWarning && !baseWarningCodes.includes(closedShadowWarning)) {
+      baseWarningCodes.push(closedShadowWarning);
+    }
+
     const candidate = {
       selector: candidateInput.selector,
       engine: candidateInput.engine || 'css',
@@ -279,7 +314,7 @@ export function collectWeakAppShadowCoverage({
       visibleMatchCount: metadata.visibleMatchCount,
       positionInAllMatches: metadata.positionInAllMatches,
       positionInVisibleMatches: metadata.positionInVisibleMatches,
-      warningCodes: metadata.warningCodes,
+      warningCodes: baseWarningCodes,
     };
     const classified = classifySelectorCandidatePreference(candidate);
     return forceWeakCoverageTier({
@@ -291,10 +326,26 @@ export function collectWeakAppShadowCoverage({
     });
   });
 
+  // F-G4: If no text candidate was generated and every fallback is positional/indexed,
+  // tag all fallbacks with 'no-semantic-anchor' so consumers can warn the user that
+  // the engine could not find any stable semantic anchor for this element.
+  const hasOnlyPositionalFallbacks =
+    !textCandidate &&
+    fallbacks.length > 0 &&
+    fallbacks.every((f) => f.usesIndex === true);
+
+  const finalFallbacks = hasOnlyPositionalFallbacks
+    ? fallbacks.map((f) => ({
+        ...f,
+        warningCodes: [...(f.warningCodes || []), 'no-semantic-anchor'],
+      }))
+    : fallbacks;
+
   return {
     targetSummary,
-    needsWeakCoverage: fallbacks.length > 0,
-    blockedReason: fallbacks.length > 0 ? null : 'no-weak-coverage-generated',
-    fallbacks,
+    needsWeakCoverage: finalFallbacks.length > 0,
+    noSemanticAnchor: hasOnlyPositionalFallbacks,
+    blockedReason: finalFallbacks.length > 0 ? null : 'no-weak-coverage-generated',
+    fallbacks: finalFallbacks,
   };
 }

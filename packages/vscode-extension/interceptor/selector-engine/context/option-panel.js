@@ -155,6 +155,37 @@ function isTriggerLike(element) {
   return false;
 }
 
+/**
+ * F-G8: Broadened trigger check used ONLY in the DOM-proximity scan path.
+ *
+ * When collecting trigger candidates by sibling/ancestor proximity (not via
+ * aria-controls/aria-owns), we accept any visible interactive element as a
+ * potential trigger. Custom dropdowns built with React, Vue, or Headless UI
+ * frequently use plain <button onClick={open}> without aria-haspopup, so the
+ * strict isTriggerLike() check rejects them.
+ *
+ * Scope: used exclusively in the proximity scan (sibling walk), NOT in the
+ * aria-controls/aria-owns ARIA reference scan, to avoid false positives from
+ * globally querying all interactive elements.
+ */
+function isTriggerLikeByProximity(element) {
+  if (!element || element.nodeType !== Node.ELEMENT_NODE || isFastVisible(element) === false) return false;
+  // First: accept everything the strict check accepts.
+  if (isTriggerLike(element)) return true;
+  const role = getRole(element);
+  const tagName = element.tagName?.toLowerCase?.() || '';
+  // Proximity heuristic: any visible button or button-role element adjacent to the
+  // panel is a candidate trigger. We require it to be interactive (button, role=button,
+  // or a link) — not just any clickable div.
+  if (tagName === 'button') return true;
+  if (role === 'button') return true;
+  if (tagName === 'a' && element.hasAttribute('href')) return true;
+  if (tagName === 'input' && ['button', 'submit', 'reset'].includes(
+    safeTrim(element.getAttribute?.('type') || '').toLowerCase()
+  )) return true;
+  return false;
+}
+
 function hasIdReferenceToken(element, attributeName, targetId) {
   const value = safeTrim(element?.getAttribute?.(attributeName) || '');
   if (!value || !targetId) return false;
@@ -183,7 +214,10 @@ function collectTriggerCandidates(documentRef, container) {
   while (parent && depth < MAX_PARENT_TRIGGER_SCAN && candidates.length === 0) {
     for (const sibling of Array.from(parent.children || [])) {
       if (sibling === container || sibling.contains?.(container)) continue;
-      if (isTriggerLike(sibling)) candidates.push(sibling);
+      // F-G8: Use the broadened proximity check here instead of the strict
+      // isTriggerLike() check. This catches plain <button> elements used as
+      // dropdown triggers in React/Vue/Headless UI custom components.
+      if (isTriggerLikeByProximity(sibling)) candidates.push(sibling);
     }
     parent = parent.parentElement;
     depth += 1;

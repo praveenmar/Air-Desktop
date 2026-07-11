@@ -7522,6 +7522,10 @@ class AIRInterceptor {
         this._summarizeSelectorEngineCompactTableRow(tableRowContextEvidence),
       genericContainer: genericContainerContextEvidence && typeof genericContainerContextEvidence === "object"
         ? {
+            proofType: typeof genericContainerContextEvidence.proofType === "string" ? genericContainerContextEvidence.proofType : null,
+            repeatedContainer: genericContainerContextEvidence.repeatedContainer === true,
+            cardUniqueText: typeof genericContainerContextEvidence.cardUniqueText === "string" ? genericContainerContextEvidence.cardUniqueText : null,
+            cardPositionalIndex: typeof genericContainerContextEvidence.cardPositionalIndex === "number" ? genericContainerContextEvidence.cardPositionalIndex : null,
             containerType: typeof genericContainerContextEvidence.containerType === "string" ? genericContainerContextEvidence.containerType : null,
             containerAnchorText: typeof genericContainerContextEvidence.containerAnchorText === "string" ? genericContainerContextEvidence.containerAnchorText : null,
             anchorSource: typeof genericContainerContextEvidence.anchorSource === "string" ? genericContainerContextEvidence.anchorSource : null,
@@ -7823,7 +7827,7 @@ class AIRInterceptor {
           }
 
           if (genericContainerContextEvidence?.isValid === true) {
-            proofs.push({ source: 'context/generic-container.js', proofType: 'generic-container', ...genericContainerContextEvidence });
+            proofs.push({ source: 'context/generic-container.js', ...genericContainerContextEvidence });
           }
 
           _assembledProofPacket = selectorEngine.assembleSelectorProofPacketV0(proofs);
@@ -7847,7 +7851,8 @@ class AIRInterceptor {
           optionPanelContextEvidence,
           optionPanelSelectorProposals: Array.isArray(optionPanelSelectorProposals?.proposals) ? optionPanelSelectorProposals.proposals : [],
           genericContainerProposals,
-          proofPacketCandidates
+          proofPacketCandidates,
+          weakAppShadowCoverage
         })
       : null;
 

@@ -8,9 +8,28 @@ import { getRole } from '../shared/dom-attributes.js';
 import { summarizeTarget as _summarizeTarget } from '../shared/target-summary.js';
 
 
+// Known volatile suffixes that encode transient UI state but can be safely stripped
+// before checking if the remaining accessible name is dynamic.
+// e.g. "Country (required)" → "Country" (stable) ✓
+//      "Price $12.99" → dynamic (still blocked after stripping) ✗
+const STRIPPABLE_SUFFIX_PATTERN = /(?:\s*(?:\(required\)|\(optional\)|\*|\(new\)|\(beta\)|\(preview\)))+$/i;
+
+/**
+ * Strips known non-volatile suffixes from an accessible name before dynamic detection.
+ * Returns the trimmed base name, or the original string if no suffix was stripped.
+ */
+function stripVolatileSuffixes(name) {
+  if (typeof name !== 'string') return name;
+  return name.replace(STRIPPABLE_SUFFIX_PATTERN, '').trim();
+}
+
 function isAccessibleNameDynamic(name) {
   if (!name) return false;
-  return /[\d$€£¥]|selected|\d{1,2}\/\d{1,2}/i.test(name);
+  // F-G9: Strip known safe suffixes before checking for dynamic content.
+  // This prevents over-blocking labels like "Email (required)" while still
+  // correctly blocking "Price $12.99" or "3 items selected".
+  const stripped = stripVolatileSuffixes(name);
+  return /[\d$€£¥]|selected|\d{1,2}\/\d{1,2}/i.test(stripped);
 }
 function summarizeTarget(element) {
   return _summarizeTarget(element, { includeAriaLabels: true, includeTextExcerpt: true });
@@ -248,6 +267,55 @@ function uniqueTargets(rawTarget, effectiveTarget) {
   return targets;
 }
 
+function getAriaMatches(documentRef, role, name) {
+  if (!role || !name) return [];
+  try {
+    let query = '*';
+    if (role === 'button') query = 'button, [role="button"], input[type="button"], input[type="submit"]';
+    else if (role === 'link') query = 'a, [role="link"]';
+    else if (role === 'textbox') query = 'input:not([type="hidden"]), textarea, [role="textbox"]';
+    else if (role === 'checkbox') query = 'input[type="checkbox"], [role="checkbox"]';
+    else if (role === 'combobox') query = 'select, input, [role="combobox"]';
+    else query = `[role="${role}"], ${role}`;
+
+    const candidates = [];
+    
+    function walk(node) {
+      if (!node) return;
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        if (node.matches && node.matches(query)) {
+          candidates.push(node);
+        }
+        if (node.shadowRoot) {
+          walk(node.shadowRoot);
+        }
+      }
+      let child = node.firstChild;
+      while (child) {
+        walk(child);
+        child = child.nextSibling;
+      }
+    }
+    
+    walk(documentRef);
+
+    const matches = [];
+    for (let i = 0; i < candidates.length; i++) {
+      const el = candidates[i];
+      if (el.offsetWidth === 0 && el.offsetHeight === 0 && el.getClientRects().length === 0) continue;
+      if (el.closest('[aria-hidden="true"]') !== null) continue;
+
+      const evidence = buildEvidenceForTarget(el);
+      if (evidence.role === role && evidence.accessibleName === name) {
+        matches.push(el);
+      }
+    }
+    return matches;
+  } catch {
+    return [];
+  }
+}
+
 export function resolveAccessibilityEvidence({
   element,
   eventContext,
@@ -305,6 +373,22 @@ export function resolveAccessibilityEvidence({
     };
   }
 
+  const documentRef = effectiveTarget.ownerDocument || document;
+  const ariaMatches = getAriaMatches(
+    documentRef, 
+    winner.evidence.role, 
+    winner.evidence.accessibleName
+  );
+  const ariaMatchCount = ariaMatches.length;
+  // Only assert uniqueness when we found > 0 matches.
+  // 0 matches means our DOM-based accessible-name computation diverged from
+  // Playwright's (e.g. whitespace, inner-text trimming) — this is a false
+  // negative, NOT a confirmed "multiple matches" scenario. Leaving it
+  // undefined preserves the pre-getAriaMatches behaviour for Rule 0 and
+  // avoids incorrectly blocking a valid semantic-identity selector.
+  const uniqueByAriaName = ariaMatchCount > 0 ? ariaMatchCount === 1 : undefined;
+  const ariaMatchIndex = ariaMatches.indexOf(effectiveTarget);
+
   return {
     ...base,
     proofTargetSummary: winner.summary,
@@ -316,6 +400,9 @@ export function resolveAccessibilityEvidence({
     accessibleNameSource: winner.evidence.accessibleNameSource || 'none',
     labelledByIds: winner.evidence.labelledByIds,
     isNativeLabelAssociation: winner.evidence.isNativeLabelAssociation,
+    uniqueByAriaName,
+    ariaMatchCount,
+    ariaMatchIndex: ariaMatchIndex >= 0 ? ariaMatchIndex : null,
     blockedReason: null,
   };
 }

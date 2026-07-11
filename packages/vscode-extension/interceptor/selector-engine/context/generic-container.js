@@ -5,6 +5,51 @@ import { getRole } from '../shared/dom-attributes.js';
 
 const MAX_CONTAINER_ANCESTOR_DEPTH = 8;
 
+// Escapes double-quote characters in CSS attribute values.
+function escapeAttributeValue(value) {
+  return String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+/**
+ * Finds the shortest visible text snippet that exists in targetContainer
+ * but does not appear in any of the siblingContainers.
+ */
+function extractUniqueDescendantText(targetContainer, siblingContainers) {
+  const MIN_LEN = 2;
+  const MAX_LEN = 60;
+  
+  // Prevent CPU blast: target only text-heavy semantic tags instead of '*'
+  const queryStr = 'h1, h2, h3, h4, h5, h6, p, span, strong, b, label, li, a';
+
+  const siblingTexts = new Set();
+  for (const sibling of siblingContainers) {
+    if (sibling === targetContainer) continue;
+    try {
+      const els = Array.from(sibling.querySelectorAll(queryStr));
+      for (const el of els) {
+        if (el.childElementCount > 1) continue;
+        const text = normalizeLabelText(el.textContent);
+        if (text && text.length >= MIN_LEN && text.length <= MAX_LEN) {
+          siblingTexts.add(text.toLowerCase());
+        }
+      }
+    } catch (_) {}
+  }
+
+  try {
+    const els = Array.from(targetContainer.querySelectorAll(queryStr));
+    for (const el of els) {
+      if (!isFastVisible(el)) continue;
+      if (el.childElementCount > 1) continue;
+      const text = normalizeLabelText(el.textContent);
+      if (!text || text.length < MIN_LEN || text.length > MAX_LEN) continue;
+      if (!siblingTexts.has(text.toLowerCase())) return text;
+    }
+  } catch (_) {}
+
+  return null;
+}
+
 const ALLOWED_ACTIONS = [
   'button',
   'a[href]',
@@ -62,7 +107,7 @@ function extractContainerAnchor(container) {
   }
 
   // 2. aria-label (for dialog and region)
-  if (['dialog', 'region'].includes(tagName) || ['dialog', 'alertdialog', 'region'].includes(role)) {
+  if (['dialog', 'region', 'li'].includes(tagName) || ['dialog', 'alertdialog', 'region', 'group', 'listitem'].includes(role)) {
     const label = container.getAttribute('aria-label');
     if (label) {
       const text = normalizeLabelText(label);
@@ -113,12 +158,14 @@ function findValidContainer(target) {
     } else if (role === 'region') {
       isCandidate = true;
       containerType = 'region';
+    } else if ((role === 'group' && current.getAttribute('aria-label')) || role === 'listitem' || tagName === 'li') {
+      isCandidate = true;
+      containerType = role || 'listitem';
     }
 
     if (isCandidate) {
       const anchor = extractContainerAnchor(current);
-      // Sections MUST have an anchor to be valid
-      if (anchor) {
+      if (anchor || containerType === 'listitem') {
         return { container: current, containerType, anchor };
       }
     }
@@ -185,6 +232,7 @@ export function resolveGenericContainerProof({
     else if (r === 'dialog' || r === 'alertdialog') isC = true;
     else if (tn === 'section') isC = true;
     else if (r === 'region') isC = true;
+    else if ((r === 'group' && currNode.getAttribute('aria-label')) || r === 'listitem' || currNode.tagName.toLowerCase() === 'li') isC = true;
     
     if (isC) {
       const anc = extractContainerAnchor(currNode);
@@ -204,9 +252,9 @@ export function resolveGenericContainerProof({
     }
   }
 
-  const containerSelector = containerType === 'region' || containerType === 'dialog' || containerType === 'alertdialog'
-    ? `[role="${containerType}"]`
-    : containerType;
+  const isRoleBacked = containerType === 'region' || containerType === 'dialog' ||
+    containerType === 'alertdialog' || containerType === 'group' || containerType === 'listitem';
+  const containerSelector = isRoleBacked ? `[role="${containerType}"]` : containerType;
     
   const allContainers = queryVisibleElements(container.ownerDocument || document, containerSelector);
   let duplicateContainerFound = false;
@@ -221,6 +269,71 @@ export function resolveGenericContainerProof({
   }
 
   if (duplicateContainerFound) {
+    if (containerType === 'group' || containerType === 'listitem') {
+      if (tableRow?.isValid) return { ...basePayload, suppressedBy: 'table-row', blockedReason: 'specialized-proof-already-available' };
+      if (boundedField?.isValid) return { ...basePayload, suppressedBy: 'bounded-field', blockedReason: 'specialized-proof-already-available' };
+      if (optionPanel?.isValid) return { ...basePayload, suppressedBy: 'option-panel', blockedReason: 'specialized-proof-already-available' };
+
+      const cardUniqueText = extractUniqueDescendantText(container, allContainers);
+      const cardPositionalIndex = Array.from(allContainers).indexOf(container);
+      
+      // Null-safe selector builder (listitems often have no anchor)
+      const repeatedContainerSelectorKind = (containerType === 'group' || anchor?.text)
+        ? `[role="${containerType}"][aria-label="${escapeAttributeValue(anchor?.text)}"]`
+        : `[role="${containerType}"]`;
+
+      if (cardUniqueText) {
+        return {
+          ...basePayload,
+          proofType: 'repeated-group-action',
+          containerType,
+          containerTag: container.tagName.toLowerCase(),
+          containerRole: getRole(container) || null,
+          containerSelectorKind: repeatedContainerSelectorKind,
+          containerAnchorText: anchor?.text || null,
+          anchorSource: anchor?.source || null,
+          cardUniqueText,
+          cardPositionalIndex,
+          actionName: actionEvidence.actionName,
+          actionRole: actionEvidence.actionRole,
+          actionTag: actionEvidence.actionTag,
+          actionInputType: actionEvidence.actionInputType,
+          actionNameSource: actionEvidence.nameSource,
+          uniqueContainerBinding: false,
+          uniqueAnchorBinding: false,
+          uniqueActionBinding: false,
+          repeatedContainer: true,
+          isValid: true,
+          eligibleForSelection: true,
+          reasons: ['repeated-group-container', 'unique-descendant-text-filter', 'action-scoped-by-filter'],
+        };
+      } else if (cardPositionalIndex >= 0) {
+        return {
+          ...basePayload,
+          proofType: 'repeated-group-action',
+          containerType,
+          containerTag: container.tagName.toLowerCase(),
+          containerRole: getRole(container) || null,
+          containerSelectorKind: repeatedContainerSelectorKind,
+          containerAnchorText: anchor?.text || null,
+          anchorSource: anchor?.source || null,
+          cardUniqueText: null,
+          cardPositionalIndex,
+          actionName: actionEvidence.actionName,
+          actionRole: actionEvidence.actionRole,
+          actionTag: actionEvidence.actionTag,
+          actionInputType: actionEvidence.actionInputType,
+          actionNameSource: actionEvidence.nameSource,
+          uniqueContainerBinding: false,
+          uniqueAnchorBinding: false,
+          uniqueActionBinding: false,
+          repeatedContainer: true,
+          isValid: true,
+          eligibleForSelection: true,
+          reasons: ['repeated-group-container', 'positional-index-fallback', 'action-scoped-by-nth'],
+        };
+      }
+    }
     return { ...basePayload, blockedReason: 'generic-container-ambiguous-anchor' };
   }
 

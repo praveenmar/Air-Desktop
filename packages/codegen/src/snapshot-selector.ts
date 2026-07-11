@@ -729,7 +729,7 @@ function buildActionCandidates(step: CodegenStep, inventory: SnapshotInventory):
   const candidates: SnapshotCandidateOption[] = [];
 
   if (!step.eventId) {
-    console.log('event_local_unavailable_missing_eventId', {
+    console.error('event_local_unavailable_missing_eventId', {
       step: step.step,
       traceId: step.traceId ?? null,
       sourceNodeId: step.sourceNodeId ?? null,

@@ -137,7 +137,16 @@ export function collectMatchMetadata(element, candidateInput) {
   let positionInVisibleMatches = null;
 
   if (matchCount <= MAX_VISIBLE_MATCHES_FOR_INDEX) {
-    const visibleMatches = matches.filter((candidate) => isVisible(candidate));
+    // F-S4: Filter aria-hidden elements from visibleMatchCount.
+    // Playwright's getByRole() implicitly skips aria-hidden="true" elements.
+    // Raw CSS locators do not — so a selector that appears to match 2 elements
+    // may only match 1 *accessible* element. By filtering here, we correctly
+    // classify such selectors as unique for accessible-name-based locators.
+    // NOTE: matchCount is intentionally left unfiltered — it reflects raw DOM
+    // reality, which is needed to accurately flag CSS strict-mode collisions.
+    const visibleMatches = matches.filter(
+      (candidate) => isVisible(candidate) && candidate.getAttribute('aria-hidden') !== 'true'
+    );
     visibleMatchCount = visibleMatches.length;
     positionInVisibleMatches = visibleMatches.indexOf(targetElement);
     if (visibleMatchCount > 1) warningCodes.push('multiple-visible-matches');
