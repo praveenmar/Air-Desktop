@@ -294,11 +294,88 @@ export function resolveCanonicalCustomControlTargetInternal(rawTarget, eventCont
   };
 }
 
+const LABEL_ACTIONABLE_ROLES = new Set([
+  'button', 'link', 'menuitem', 'tab', 'switch', 'option',
+]);
+
+function isLabelSelfActionable(label) {
+  const role = (label.getAttribute?.('role') || '').toLowerCase();
+  if (LABEL_ACTIONABLE_ROLES.has(role)) return true;
+
+  const tabIndexAttr = label.getAttribute?.('tabindex');
+  if (tabIndexAttr !== null && !Number.isNaN(Number(tabIndexAttr)) && Number(tabIndexAttr) >= 0) return true;
+
+  if (label.hasAttribute?.('aria-pressed') || label.hasAttribute?.('aria-expanded')) return true;
+
+  return false;
+}
+
+function resolveLabelledControl(label) {
+  if (!label || (label.tagName || '').toLowerCase() !== 'label') return null;
+  if (isLabelSelfActionable(label)) return null; // #4: label has its own interactive semantics, don't redirect
+
+  const candidate = (label.control && label.control.nodeType === Node.ELEMENT_NODE)
+    ? label.control
+    : (() => {
+        const forId = label.getAttribute('for');
+        if (forId) {
+          const byId = label.ownerDocument?.getElementById(forId);
+          if (byId) return byId;
+        }
+        return label.querySelector('input, select, textarea');
+      })();
+
+  if (!candidate) return null;
+  if (candidate.disabled === true) return null;      // #2
+  if (!isFastVisible(candidate)) return null;         // #3
+
+  return candidate;
+}
+
+export function resolveCanonicalLabelTarget(rawTarget) {
+  const base = {
+    rawTarget,
+    canonicalTarget: null,
+    rawTargetSummary: summarizeTarget(rawTarget),
+    canonicalTargetSummary: null,
+    canonicalReason: null,
+    canonicalConfidence: null,
+    canonicalDiffers: false,
+    blockedReason: null,
+  };
+
+  if (!rawTarget || rawTarget.nodeType !== Node.ELEMENT_NODE || rawTarget.isConnected === false) {
+    return { ...base, blockedReason: 'detached-target' };
+  }
+
+  if ((rawTarget.tagName || '').toLowerCase() !== 'label') {
+    return { ...base, blockedReason: 'not-a-label-node' };
+  }
+
+  const control = resolveLabelledControl(rawTarget);
+  if (!control) {
+    return { ...base, blockedReason: 'label-no-associated-control' };
+  }
+
+  return {
+    ...base,
+    canonicalTarget: control,
+    canonicalTargetSummary: summarizeTarget(control),
+    canonicalReason: 'label-owns-associated-control',
+    canonicalConfidence: 0.92,
+    canonicalDiffers: true,
+  };
+}
+
 export function resolveCanonicalCustomControlTarget(rawTarget, eventContext) {
   return stripInternalTargets(resolveCanonicalCustomControlTargetInternal(rawTarget, eventContext));
 }
 
 export function resolveCanonicalTargetInternal(rawTarget, eventContext) {
+  const labelResult = resolveCanonicalLabelTarget(rawTarget);
+  if (labelResult.canonicalDiffers) {
+    return labelResult;
+  }
   const iconResult = resolveCanonicalIconTarget(rawTarget);
   if (iconResult.canonicalDiffers) {
     return iconResult;

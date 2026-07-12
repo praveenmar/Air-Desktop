@@ -173,8 +173,8 @@ export function deriveGenerationContext(input: {
 
     const cleanStep = stripUndefined(mappedStep) as GenerationStepV1;
 
-    // GC-1A: Classify whether this step should move to ignoredSteps
-    const noiseClassification = classifyNoiseStep(step, cleanStep);
+    // GC-1A/GC-2: Classify whether this step should move to ignoredSteps
+    const noiseClassification = classifyNoiseStep(step, cleanStep, nextStep);
 
     if (noiseClassification !== null) {
       const ignoredStep: IgnoredGenerationStepV1 = {
@@ -219,14 +219,17 @@ interface NoiseClassification {
  * Returns null if the step is replay-safe and must stay in steps.
  * Returns a NoiseClassification if the step should be ignored.
  *
- * GC-1A only handles: broad_no_change_container_click
- * GC-2 will add: duplicate_lower_quality_action
+ * GC-1A handles: broad_no_change_container_click
+ * GC-2 handles: duplicate_lower_quality_action
+ *   (label click that bubbles to its associated control's input event —
+ *    same traceId, click is the lower-quality duplicate of the input step)
  *
  * Safety rules (NEVER ignore these):
  *   - Any action other than 'click'
  *   - Any click with assertions
  *   - Any click with outcomeType !== 'no_change'
  *   - Concrete interactive controls (button, a[href], input, select, role controls)
+ *     UNLESS it is a GC-2 traceId-paired label/input duplicate (see below)
  *   - custom-control-open / custom-select / custom-menu-select
  *   - input / submit / navigate / scroll actions
  *
@@ -235,8 +238,9 @@ interface NoiseClassification {
 function classifyNoiseStep(
   rawStep: CodegenStep,
   mappedStep: GenerationStepV1,
+  nextRawStep?: CodegenStep,
 ): NoiseClassification | null {
-  // Only 'click' actions can be noise-classified in GC-1A
+  // Only 'click' actions can be noise-classified in GC-1A/GC-2
   if (rawStep.action !== 'click') {
     return null;
   }
@@ -249,6 +253,25 @@ function classifyNoiseStep(
   // Only classify no_change outcome — state_refresh and navigation are meaningful
   if (rawStep.outcomeType !== 'no_change') {
     return null;
+  }
+
+  // GC-2: label→control coalescing. A click on a <label> triggers the browser's
+  // native "click bubbles to associated control" behavior, producing a second
+  // event (input) with the SAME traceId on the real control. The input step
+  // carries the actual state change — drop the redundant click, keep the input.
+  // This intentionally runs BEFORE the looksLikeConcreteControl check below,
+  // because label:has-text(...) selectors are otherwise whitelisted as concrete
+  // and would never reach classification.
+  if (
+    nextRawStep &&
+    rawStep.traceId &&
+    nextRawStep.traceId === rawStep.traceId &&
+    nextRawStep.action === 'input'
+  ) {
+    return {
+      reason: 'duplicate_lower_quality_action',
+      explanation: `Click on "${rawStep.selector ?? 'target'}" shares a traceId with the following input step, which carries the actual state change. Use the input step instead.`,
+    };
   }
 
   // Determine the effective selector for classification
@@ -403,23 +426,41 @@ function buildGenerationGuidance(): GenerationGuidanceV1 {
     replaySource: 'steps',
     ignoredStepsPolicy: 'context_only',
     rules: [
+      // ── Fundamentals (primacy) ──
       'Generate replay code only from steps, in order.',
+      'Do not invent or guess selectors.',
+      'Do not skip or reorder steps unless the user explicitly instructs it.',
+
+      // ── ignoredSteps policy ──
       'Do not generate code from ignoredSteps by default.',
       'Use ignoredSteps only for context, diagnostics, or fallback explanation.',
-      'Do not skip or reorder steps unless the user explicitly instructs it.',
+      'A step with ignoredReason "duplicate_lower_quality_action" means an earlier click was part of the same physical gesture as a later step on the same traceId (e.g. a label click that triggers its associated control). The kept step already represents the correct action — do not add a separate interaction for the ignored one.',
+
+      // ── Locator strategy (kind-specific; inherently tied to how resolvedTarget.value is authored for the current locator engine) ──
       'Preserve custom-control-open steps; they are required for dropdown and menu visibility before selection.',
-      'If realizationSteps are provided on a resolvedTarget, you MUST write the Playwright code to execute those steps first (in order) before interacting with the primary target.',
+      'If realizationSteps are provided on a resolvedTarget, you MUST execute those steps first (in order) before interacting with the primary target.',
       'Use resolvedTarget.classId to understand the semantic intent and origin of the generated locator.',
       'Use resolvedTarget.value as the locator when locatorStatus is "resolved".',
-      'When resolvedTarget.kind is "css", wrap value in page.locator(value) or use it directly as a CSS selector string.',
-      'When resolvedTarget.kind is "xpath", use page.locator("xpath=" + value).',
-      'When resolvedTarget.kind is "native", the value is a Playwright native locator chain (e.g. locator(...).nth(...)). Use it as page.{value}.{action}() - do NOT wrap in page.locator().',
-      'When resolvedTarget.kind is "role", "text", "label", "placeholder", or "testid", the value is a Playwright ARIA locator chain (e.g. getByRole(...).getByRole(...)). Use it as page.{value}.{action}() - do NOT wrap in page.locator().',
-      'When resolvedTarget.kind is "frame", the value is a Playwright frameLocator chain (e.g. frameLocator(\'iframe#id\').locator(...)). Use it as page.{value}.{action}() - do NOT wrap in page.locator().',
+      'When resolvedTarget.kind is "css", use value as a CSS selector string.',
+      'When resolvedTarget.kind is "xpath", use value as an XPath expression.',
+      'When resolvedTarget.kind is "native", "role", "text", "label", "placeholder", or "testid", value is a locator-engine-specific chain already authored for the current locator API — translate it to your framework\'s equivalent locator construct rather than treating it as a raw selector string.',
+      'When resolvedTarget.kind is "frame", value expresses a frame boundary followed by an inner locator — resolve the frame context first, then apply the inner locator within that frame in your framework\'s idiom.',
       'Use fallbackHints.legacySelector only when locatorStatus is "unresolved".',
-      'Do not invent or guess selectors.',
+
+      // ── Action semantics → framework-neutral interaction type ──
+      'Map step.action to the semantically correct interaction for the resolved element type, not by action name alone: "input" on a checkbox or radio means toggling its checked state, not typing text; "input" on a <select> or combobox-role element means choosing an option, not typing text; "input" on a text field, textarea, or contenteditable element means entering text; "click" means a click/tap interaction; "hover" means a mouseover/hover interaction; "submit" means triggering form submission via the resolved control. Use whichever API your target test framework provides for each of these interaction types.',
+      'If a single traceId spans more than one step remaining in steps (not moved to ignoredSteps), treat them as sequential parts of one user interaction — confirm each represents a distinct required action before emitting multiple calls for it.',
+
+      // ── Values, assertions, warnings ──
       'Replace <LLM_GENERATE_MOCK_DATA> with safe mock data or environment-backed test data.',
+      'Use step.assertions to generate verification calls after the action, using your framework\'s assertion/verification API. Map assertion.type to the closest available check: "url" → current page URL, "element_visible" → element visibility, "element_text" → element text content, "title" → page title.',
+      'If resolvedTarget.warningCodes or selectorResolution.selected.warningCodes includes "positional-fallback-only" or "ambiguous-action-binding", add a one-line comment above that action noting the locator may be brittle.',
+
+      // ── Framework / output style ──
       'Generate code in the current repository\'s test framework style.',
+
+      // ── Fundamentals repeated (recency) ──
+      'Do not invent or guess selectors — this rule is repeated because it is the most common failure mode.',
     ],
   };
 }
