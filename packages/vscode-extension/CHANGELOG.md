@@ -7,6 +7,53 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.1.3] - 2026-07-04
+
+### Fixed
+
+- Fixed an issue where multiple elements could resolve to the same selector.
+- Selector logic improvements for more reliable, unique element targeting.
+
+---
+
+## [0.1.2] - 2026-07-03
+
+### ✨ Major UI Upgrade
+
+AIR now introduces a modern visual workflow inside VS Code, replacing the previous command-centric experience.
+
+### Added
+
+- New Status Bar controls for quick access.
+- AIR Start button.
+- AIR Stop button.
+- AIR History button.
+- Dedicated Session History webview.
+- One-click Copy Session ID action.
+- Session status indicators (Active / Ended).
+- Refresh option inside Session History.
+
+### Improved
+
+- Eliminated the need to use Command Palette for everyday operations.
+- Faster recording workflow.
+- Cleaner developer experience.
+- Better session management.
+- Improved VS Code integration.
+- Updated extension documentation.
+- Updated Marketplace presentation.
+
+### Fixed
+
+- Fixed multiple recording workflow issues.
+- Fixed session handling improvements.
+- Fixed UI consistency issues.
+- Improved browser lifecycle handling.
+- Improved extension stability.
+- General bug fixes and performance improvements.
+
+---
+
 ## [0.1.0] - 2026-07-02
 
 ### 🎉 Initial Release
