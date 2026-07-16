@@ -42,6 +42,7 @@ tests/
 .last-run.json
 
 air-*.json 
+AIRAIInteractionRecorder-*.vsix
 tmp/
 interceptor logs.txt
 

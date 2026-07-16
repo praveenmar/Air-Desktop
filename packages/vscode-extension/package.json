@@ -1,14 +1,10 @@
 {
   "name": "AIRAIInteractionRecorder",
-  "displayName": "AIR (AI Interaction Recorder)",
+  "displayName": "AIR (AI Interaction Recorder) — Beta",
   "description": "An intelligent DOM interceptor and semantic data layer providing LLMs with deterministic web automation context.",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "publisher": "TestMasterHubAI",
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/TestMasterHub/testmasterhub-app-support"
-  },
   "engines": {
     "vscode": "^1.90.0"
   },

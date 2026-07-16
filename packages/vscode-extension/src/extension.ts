@@ -6,6 +6,8 @@ import { spawn, ChildProcess } from 'child_process';
 import { randomUUID } from 'crypto';
 import { resolveInterceptorAssetPaths } from './utils/interceptor-loader';
 import { ensureAirHome, getDatabasePath } from '../../../core/utils/air-home';
+import { SessionManagerPanel } from './webview/session-manager-panel';
+import { DevConsolePanel, LogEntry, McpConfigVariant } from './webview/dev-console-panel';
 
 let activeBrowser: Browser | null = null;
 let activeContext: BrowserContext | null = null;
@@ -15,7 +17,11 @@ let outputChannel: vscode.OutputChannel | null = null;
 let startRecordingStatusBarItem: vscode.StatusBarItem | null = null;
 let stopRecordingStatusBarItem: vscode.StatusBarItem | null = null;
 let historyStatusBarItem: vscode.StatusBarItem | null = null;
-let historyPanel: vscode.WebviewPanel | null = null;
+let sessionManagerPanel: SessionManagerPanel | null = null;
+let devConsolePanel: DevConsolePanel | null = null;
+
+const MAX_EXTENSION_LOG_ENTRIES = 500;
+let extensionLogBuffer: LogEntry[] = [];
 
 let serverProcess: ChildProcess | null = null;
 let serverPort: number | null = null;
@@ -95,13 +101,18 @@ function toLogString(value: unknown): string {
 }
 
 function logToOutput(message: string, data?: unknown): void {
+  const timestamp = Date.now();
+  extensionLogBuffer.push({ timestamp, source: 'extension', message, data });
+  if (extensionLogBuffer.length > MAX_EXTENSION_LOG_ENTRIES) {
+    extensionLogBuffer = extensionLogBuffer.slice(extensionLogBuffer.length - MAX_EXTENSION_LOG_ENTRIES);
+  }
+
   if (!outputChannel) {
     return;
   }
 
-  const timestamp = new Date().toISOString();
   const suffix = data === undefined ? '' : ` ${toLogString(data)}`;
-  outputChannel.appendLine(`[${timestamp}] ${message}${suffix}`);
+  outputChannel.appendLine(`[${new Date(timestamp).toISOString()}] ${message}${suffix}`);
 }
 
 function flushServerChunk(stream: 'stdout' | 'stderr', chunk: string): void {
@@ -582,10 +593,10 @@ async function startRecording() {
       .showInformationMessage(`AIR: Recording started (${currentSessionId})`, 'View History')
       .then((choice) => {
         if (choice === 'View History') {
-          void showSessionHistory();
+          void showSessionManager();
         }
       });
-    void refreshHistoryPanel();
+    void getSessionManagerPanel().refreshIfOpen();
   } catch (error) {
     console.error(`[${SCOPE}] Failed to start recording`, error);
     logToOutput(`[${SCOPE}] Failed to start recording`, { error: String(error) });
@@ -640,7 +651,7 @@ async function stopRecording() {
     logToOutput(`[${SCOPE}] Recording stopped`, { sessionId: currentSessionId });
     currentSessionId = null;
     void vscode.window.showInformationMessage('AIR: Recording stopped');
-    void refreshHistoryPanel();
+    void getSessionManagerPanel().refreshIfOpen();
   } catch (error) {
     console.error(`[${SCOPE}] Error during stop`, error);
   } finally {
@@ -652,360 +663,122 @@ async function stopRecording() {
   }
 }
 
-async function listSessions() {
-  try {
-    const baseUrl = await getServerBaseUrl();
-    const res = await fetch(`${baseUrl}/api/sessions`);
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
-
-    const sessions: any[] = await res.json();
-
-    if (!Array.isArray(sessions) || sessions.length === 0) {
-      void vscode.window.showInformationMessage('AIR: No sessions found');
-      return;
-    }
-
-    const lines = sessions.map(
-      (s) =>
-        `${s.id} | ${new Date(s.startedAt).toISOString()} | ${
-          s.endedAt ? 'Ended' : 'Active'
-        }`,
-    );
-
-    lines.forEach((line) => console.log(`[${SCOPE}] ${line}`));
-  } catch (error) {
-    console.error(`[${SCOPE}] Failed to list sessions`, error);
-    void vscode.window.showErrorMessage('Failed to list sessions');
-  }
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function getHistoryWebviewHtml(
-  sessions: Array<{ id: string; startedAt: string; endedAt?: string | null }>,
-): string {
-  const rows = sessions
-    .map((s) => {
-      const started = new Date(s.startedAt).toLocaleString();
-      const isEnded = Boolean(s.endedAt);
-      const id = escapeHtml(s.id);
-      return `
-        <tr>
-          <td class="id-cell">
-            <span class="id-text">${id}</span>
-            <button class="copy-btn" data-id="${id}">Copy</button>
-          </td>
-          <td>${escapeHtml(started)}</td>
-          <td><span class="badge ${isEnded ? 'ended' : 'active'}">${isEnded ? 'Ended' : 'Active'}</span></td>
-        </tr>`;
-    })
-    .join('');
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<style>
-  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); padding: 16px 20px; }
-  h2 { margin: 0 0 4px 0; font-size: 15px; }
-  .subtitle { margin: 0 0 16px 0; font-size: 12px; opacity: 0.7; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--vscode-panel-border); vertical-align: middle; }
-  th { font-weight: 600; font-size: 11px; text-transform: uppercase; opacity: 0.65; letter-spacing: 0.03em; }
-  .id-cell { display: flex; align-items: center; gap: 10px; }
-  .id-text { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; word-break: break-all; }
-  .copy-btn { flex-shrink: 0; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; padding: 3px 10px; border-radius: 3px; cursor: pointer; font-size: 11px; }
-  .copy-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
-  .copy-btn.copied { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-  .badge { padding: 2px 9px; border-radius: 10px; font-size: 11px; white-space: nowrap; }
-  .badge.active { background: rgba(80,200,120,0.18); color: #4ec9b0; }
-  .badge.ended { background: rgba(150,150,150,0.18); color: var(--vscode-descriptionForeground); }
-  .empty { opacity: 0.7; padding: 32px 0; text-align: center; font-size: 13px; }
-  .toolbar { display: flex; justify-content: flex-end; margin-bottom: 10px; }
-  .refresh-btn { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 4px 12px; border-radius: 3px; cursor: pointer; font-size: 12px; }
-  .refresh-btn:hover { background: var(--vscode-button-hoverBackground); }
-</style>
-</head>
-<body>
-  <h2>AIR Session History</h2>
-  <p class="subtitle">${sessions.length} session${sessions.length === 1 ? '' : 's'} recorded</p>
-  <div class="toolbar"><button class="refresh-btn" id="refresh">Refresh</button></div>
-  ${
-    sessions.length === 0
-      ? '<div class="empty">No sessions recorded yet.</div>'
-      : `<table>
-          <thead><tr><th>Session ID</th><th>Started</th><th>Status</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>`
-  }
-  <script>
-    const vscode = acquireVsCodeApi();
-    document.querySelectorAll('.copy-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const id = btn.getAttribute('data-id');
-        vscode.postMessage({ type: 'copy', id });
-        const original = btn.textContent;
-        btn.textContent = 'Copied!';
-        btn.classList.add('copied');
-        setTimeout(() => {
-          btn.textContent = original;
-          btn.classList.remove('copied');
-        }, 1200);
-      });
+function getSessionManagerPanel(): SessionManagerPanel {
+  if (!sessionManagerPanel) {
+    sessionManagerPanel = SessionManagerPanel.getInstance({
+      getBaseUrl: getServerBaseUrl,
+      onLog: (message, data) => logToOutput(message, data),
+      onError: (message, error) => {
+        console.error(`[${SCOPE}] ${message}`, error);
+        logToOutput(`[${SCOPE}] ${message}`, { error: String(error) });
+      },
     });
-    document.getElementById('refresh')?.addEventListener('click', () => {
-      vscode.postMessage({ type: 'refresh' });
-    });
-  </script>
-</body>
-</html>`;
-}
-
-async function fetchSessionsForHistory(): Promise<
-  Array<{ id: string; startedAt: string; endedAt?: string | null }>
-> {
-  const baseUrl = await getServerBaseUrl();
-  const res = await fetch(`${baseUrl}/api/sessions`);
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}`);
   }
-  const sessions: Array<{ id: string; startedAt: string; endedAt?: string | null }> = await res.json();
-  return sessions.sort(
-    (a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime(),
-  );
+  return sessionManagerPanel;
 }
 
-async function refreshHistoryPanel(): Promise<void> {
-  if (!historyPanel) return;
+async function showSessionManager() {
   try {
-    const sessions = await fetchSessionsForHistory();
-    historyPanel.webview.html = getHistoryWebviewHtml(sessions);
+    await getSessionManagerPanel().show();
   } catch (error) {
-    console.error(`[${SCOPE}] Failed to refresh session history`, error);
+    console.error(`[${SCOPE}] Failed to load session manager`, error);
+    void vscode.window.showErrorMessage('AIR: Failed to load session manager');
   }
 }
 
 async function showSessionHistory() {
-  try {
-    if (historyPanel) {
-      historyPanel.reveal(vscode.ViewColumn.Active);
-      await refreshHistoryPanel();
-      return;
-    }
+  await showSessionManager();
+}
 
-    historyPanel = vscode.window.createWebviewPanel(
-      'airSessionHistory',
-      'AIR Session History',
-      vscode.ViewColumn.Active,
-      { enableScripts: true, retainContextWhenHidden: true },
-    );
-
-    historyPanel.webview.onDidReceiveMessage(async (message) => {
-      if (message?.type === 'copy' && typeof message.id === 'string') {
-        await vscode.env.clipboard.writeText(message.id);
-        void vscode.window.setStatusBarMessage(`AIR: Copied session ID ${message.id}`, 2500);
-      } else if (message?.type === 'refresh') {
-        await refreshHistoryPanel();
-      }
-    });
-
-    historyPanel.onDidDispose(() => {
-      historyPanel = null;
-    });
-
-    await refreshHistoryPanel();
-  } catch (error) {
-    console.error(`[${SCOPE}] Failed to load session history`, error);
-    void vscode.window.showErrorMessage('AIR: Failed to load session history');
-  }
+async function listSessions() {
+  await showSessionManager();
 }
 
 async function exportSession() {
-  try {
-    const baseUrl = await getServerBaseUrl();
-    const res = await fetch(`${baseUrl}/api/sessions`);
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
-
-    const sessions: any[] = await res.json();
-    if (!Array.isArray(sessions) || sessions.length === 0) {
-      void vscode.window.showWarningMessage('No sessions found');
-      return;
-    }
-
-    const sessionId = await vscode.window.showQuickPick(
-      sessions.map((s) => s.id),
-      {
-        placeHolder: 'Select session to export',
-      },
-    );
-    if (!sessionId) return;
-
-    const uri = await vscode.window.showSaveDialog({
-      defaultUri: vscode.Uri.file(`session-${sessionId}.json`),
-      filters: { JSON: ['json'] },
-    });
-    if (!uri) return;
-
-    const exportRes = await fetch(`${baseUrl}/api/sessions/${sessionId}/export`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ outputPath: uri.fsPath }),
-    });
-
-    if (!exportRes.ok) {
-      throw new Error(`Export failed with HTTP ${exportRes.status}`);
-    }
-
-    console.log(`[${SCOPE}] Session exported`, { sessionId, outputPath: uri.fsPath });
-    void vscode.window.showInformationMessage(`Exported to ${uri.fsPath}`);
-  } catch (error) {
-    console.error(`[${SCOPE}] Export failed`, error);
-    void vscode.window.showErrorMessage('Export failed');
-  }
+  await showSessionManager();
 }
 
 async function deleteSession() {
-  try {
-    const baseUrl = await getServerBaseUrl();
-    const res = await fetch(`${baseUrl}/api/sessions`);
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
+  await showSessionManager();
+}
 
-    const sessions: any[] = await res.json();
-    if (!Array.isArray(sessions) || sessions.length === 0) {
-      void vscode.window.showInformationMessage('AIR: No sessions to delete');
-      return;
-    }
+function buildProductionMcpConfig(): McpConfigVariant {
+  const command = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+  const args = ['-y', 'air-mcp-server@latest'];
+  return { label: 'Production (NPX)', command, args, available: true };
+}
 
-    const sessionId = await vscode.window.showQuickPick(
-      sessions.map((s) => s.id),
-      { placeHolder: 'Delete session' },
-    );
-    if (!sessionId) return;
+function buildDevelopmentMcpConfig(): McpConfigVariant {
+  const isDev = extensionContext?.extensionMode === vscode.ExtensionMode.Development;
+  if (!isDev || !extensionContext) {
+    return {
+      label: 'Local Development',
+      command: '',
+      args: [],
+      available: false,
+      unavailableReason: 'Only available when the extension is running in development mode.',
+    };
+  }
 
-    const confirm = await vscode.window.showWarningMessage(
-      `Delete ${sessionId}?`,
-      { modal: true },
-      'Delete',
-    );
-    if (confirm !== 'Delete') return;
+  const mcpPath = vscode.Uri.joinPath(
+    extensionContext.extensionUri,
+    '..',
+    'mcp-server',
+    'bin',
+    'air-mcp.js',
+  ).fsPath;
 
-    const delRes = await fetch(`${baseUrl}/api/sessions/${sessionId}`, {
-      method: 'DELETE',
+  return {
+    label: 'Local Development',
+    command: 'node',
+    args: [mcpPath],
+    available: true,
+  };
+}
+
+function getDevConsolePanel(): DevConsolePanel {
+  if (!devConsolePanel) {
+    devConsolePanel = DevConsolePanel.getInstance({
+      getBaseUrl: getServerBaseUrl,
+      onLog: (message, data) => logToOutput(message, data),
+      onError: (message, error) => {
+        console.error(`[${SCOPE}] ${message}`, error);
+        logToOutput(`[${SCOPE}] ${message}`, { error: String(error) });
+      },
+      getExtensionLogs: () => extensionLogBuffer.slice(),
+      clearExtensionLogs: () => {
+        extensionLogBuffer = [];
+      },
+      getProductionMcpConfig: buildProductionMcpConfig,
+      getDevelopmentMcpConfig: buildDevelopmentMcpConfig,
     });
+  }
+  return devConsolePanel;
+}
 
-    if (!delRes.ok) {
-      throw new Error(`Delete failed with HTTP ${delRes.status}`);
-    }
-
-    void vscode.window.showInformationMessage('Deleted.');
+async function showDevConsole(tab: 'inspector' | 'events' | 'logs' | 'mcp') {
+  try {
+    await getDevConsolePanel().show(tab);
   } catch (error) {
-    console.error(`[${SCOPE}] Delete failed`, error);
-    void vscode.window.showErrorMessage('Delete failed');
+    console.error(`[${SCOPE}] Failed to open developer console`, error);
+    void vscode.window.showErrorMessage('AIR: Failed to open developer console');
   }
 }
 
 async function debugEvents() {
-  try {
-    const baseUrl = await getServerBaseUrl();
-    const res = await fetch(`${baseUrl}/api/debug/events`);
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
-
-    const data = await res.json();
-    console.log(`[${SCOPE}] Recent Events`, data);
-  } catch (error) {
-    console.error(`[${SCOPE}] Debug events failed`, error);
-    void vscode.window.showErrorMessage('Failed to load debug events');
-  }
+  await showDevConsole('events');
 }
 
 async function inspectSession() {
-  try {
-    const baseUrl = await getServerBaseUrl();
-    const listRes = await fetch(`${baseUrl}/api/sessions`);
-    if (!listRes.ok) {
-      throw new Error(`HTTP ${listRes.status}`);
-    }
+  await showDevConsole('inspector');
+}
 
-    const sessions: Array<{ id: string }> = await listRes.json();
-    if (!Array.isArray(sessions) || sessions.length === 0) {
-      void vscode.window.showInformationMessage('AIR: No sessions found');
-      return;
-    }
-
-    const sessionId = await vscode.window.showQuickPick(
-      sessions.map((s) => s.id),
-      { placeHolder: 'Inspect session data' },
-    );
-    if (!sessionId) return;
-
-    const inspectRes = await fetch(`${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/inspect`);
-    if (!inspectRes.ok) {
-      throw new Error(`Inspect failed with HTTP ${inspectRes.status}`);
-    }
-
-    const snapshot = await inspectRes.json();
-    const doc = await vscode.workspace.openTextDocument({
-      language: 'json',
-      content: JSON.stringify(snapshot, null, 2),
-    });
-    await vscode.window.showTextDocument(doc, { preview: false });
-    logToOutput(`[${SCOPE}] Session inspection opened`, { sessionId });
-  } catch (error) {
-    console.error(`[${SCOPE}] Inspect session failed`, error);
-    logToOutput(`[${SCOPE}] Inspect session failed`, { error: String(error) });
-    void vscode.window.showErrorMessage('AIR: Failed to inspect session');
-  }
+async function showLogsCommand() {
+  await showDevConsole('logs');
 }
 
 async function copyMcpConfig() {
-  const isDev = extensionContext?.extensionMode === vscode.ExtensionMode.Development;
-  const options = [
-    { label: 'Production (NPX)', description: 'Recommended for end users (Requires NPM publish)' }
-  ];
-  
-  if (isDev) {
-    options.push({ label: 'Local Development', description: 'Absolute path to local workspace (For testing)' });
-  }
-
-  const choice = await vscode.window.showQuickPick(options);
-  if (!choice) return;
-
-  let command: string;
-  let args: string[];
-
-  if (choice.label === 'Production (NPX)') {
-    command = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-    args = ['-y', 'air-mcp-server@latest'];
-  } else {
-    const mcpPath = vscode.Uri.joinPath(extensionContext!.extensionUri, '..', 'mcp-server', 'bin', 'air-mcp.js').fsPath;
-    command = 'node';
-    args = [mcpPath];
-  }
-
-  const mcpConfig = {
-    "air-desktop": {
-      command,
-      args
-    }
-  };
-
-  await vscode.env.clipboard.writeText(JSON.stringify(mcpConfig, null, 2));
-  void vscode.window.showInformationMessage(`AIR MCP Config (${choice.label}) copied to clipboard! Paste it into your MCP settings.`);
+  await showDevConsole('mcp');
 }
 
 
@@ -1027,12 +800,7 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('air.debugEvents', debugEvents),
     vscode.commands.registerCommand('air.inspectSession', inspectSession),
     vscode.commands.registerCommand('air.showSessionHistory', showSessionHistory),
-    vscode.commands.registerCommand('air.showLogs', () => {
-      if (!outputChannel) {
-        outputChannel = vscode.window.createOutputChannel('AIR');
-      }
-      outputChannel.show(true);
-    }),
+    vscode.commands.registerCommand('air.showLogs', showLogsCommand),
     vscode.commands.registerCommand('air.copyMcpConfig', copyMcpConfig),
   );
 
@@ -1130,7 +898,9 @@ export async function deactivate() {
     currentSessionId = null;
     isStoppingRecording = false;
     outputChannel = null;
-    historyPanel?.dispose();
-    historyPanel = null;
+    sessionManagerPanel?.dispose();
+    sessionManagerPanel = null;
+    devConsolePanel?.dispose();
+    devConsolePanel = null;
   }
-}
+}
