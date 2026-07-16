@@ -243,10 +243,10 @@ export function resolveGenericContainerProof({
     currNode = currNode.parentElement;
   }
 
-  if (anchor.source === 'heading' || anchor.source === 'legend') {
+  if (anchor?.source === 'heading' || anchor?.source === 'legend') {
     const anchorElements = Array.from(container.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"], legend'));
     for (const node of anchorElements) {
-      if (node.contains(element) && normalizeLabelText(node.textContent) === anchor.text) {
+      if (node.contains(element) && normalizeLabelText(node.textContent) === anchor?.text) {
         return { ...basePayload, blockedReason: 'generic-container-anchor-is-action' };
       }
     }
@@ -262,7 +262,7 @@ export function resolveGenericContainerProof({
   for (const c of allContainers) {
     if (c === container) continue;
     const otherAnchor = extractContainerAnchor(c);
-    if (otherAnchor && otherAnchor.text === anchor.text) {
+    if (otherAnchor && otherAnchor.text === anchor?.text) {
       duplicateContainerFound = true;
       break;
     }
@@ -376,10 +376,10 @@ export function resolveGenericContainerProof({
     containerTag: container.tagName.toLowerCase(),
     containerRole: getRole(container) || null,
     containerSelectorKind: containerType,
-    containerAnchorText: anchor.text,
-    anchorSource: anchor.source,
-    anchorTag: anchor.element ? anchor.element.tagName.toLowerCase() : null,
-    anchorId: anchor.id || null,
+    containerAnchorText: anchor?.text || null,
+    anchorSource: anchor?.source || null,
+    anchorTag: anchor?.element ? anchor.element.tagName.toLowerCase() : null,
+    anchorId: anchor?.id || null,
     actionName: actionEvidence.actionName,
     actionRole: actionEvidence.actionRole,
     actionTag: actionEvidence.actionTag,

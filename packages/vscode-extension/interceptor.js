@@ -3315,9 +3315,14 @@ class AIRInterceptor {
 
   _inferSelectorEngine(candidate) {
     if (!candidate || !candidate.selector) return "css";
+    // Trust the engine field already set by decision-normalization.js (e.g. 'playwright-aria', 'playwright-native').
+    // Only fall back to inference for legacy candidates that don't carry an explicit engine field.
+    const VALID_ENGINES = ["css", "xpath", "playwright-aria", "playwright-native"];
+    if (candidate.engine && VALID_ENGINES.includes(candidate.engine)) return candidate.engine;
+    // Legacy inference: detect XPath selectors by their prefix.
     if (candidate.selector.startsWith('//') || candidate.selector.startsWith('.//')) return "xpath";
     if (candidate.family && candidate.family.includes('xpath')) return "xpath";
-    return "css"; // Everything else executes via CSS engine in Playwright
+    return "css";
   }
 
   _buildSelectorResolutionForWire(decision) {
@@ -5926,7 +5931,19 @@ class AIRInterceptor {
       return;
     }
 
-    const optionFingerprint = this.generateFingerprint(optionData.el);
+    // Pass eventContext so _resolveSelectorCandidateCollectionMode returns "advanced"
+    // (custom-menu-select / custom-select are in SELECTOR_CANDIDATE_ADVANCED_EVENT_TYPES).
+    // Without this, no selectorCandidates are collected, _runSelectorEngineShadowComparison
+    // gets empty input, and _selectorDecision is always null — meaning Phase 2a passes null
+    // to _handleCustomDropdownSelection, and the emitted event has no selectorResolution.
+    const mousedownEventType = optionData.el?.getAttribute?.('role') === 'menuitem' ||
+      (this._openDropdown?.controlFamily === 'menu')
+      ? EventType.CUSTOM_MENU_SELECT
+      : EventType.CUSTOM_SELECT;
+    const optionFingerprint = this.generateFingerprint(optionData.el, {
+      eventType: mousedownEventType,
+      trigger: 'mousedown-precapture',
+    });
     const optionContainer = this._findDropdownContainer(optionData.el);
     const containerRole = (optionContainer?.getAttribute?.('role') || '').toLowerCase();
     const optionRole = (optionData.el?.getAttribute?.('role') || '').toLowerCase();

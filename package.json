@@ -11,7 +11,7 @@
   ],
   "scripts": {
     "postinstall": "echo skipping sqlite rebuild",
-    "build": "npm --workspace core run build && npm --workspace packages/shared run build && npm --workspace packages/codegen run build && npm --workspace packages/mcp-server run build",
+    "build": "npm --workspace core run build && npm --workspace packages/shared run build && npm --workspace packages/codegen run build && npm --workspace packages/mcp-server run build && npm --workspace packages/vscode-extension run build",
     "build:mcp": "npm run build",
     "mcp:stdio": "node scripts/air-mcp.cjs",
     "mcp:http": "node scripts/air-mcp.cjs --transport http",
