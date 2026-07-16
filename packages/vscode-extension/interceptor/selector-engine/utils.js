@@ -99,11 +99,32 @@ export function getQueryRoot(element) {
 export function queryAll(root, selector) {
   const normalizedSelector = safeTrim(selector);
   if (!root || !normalizedSelector) return [];
-  try {
-    return Array.from(root.querySelectorAll(normalizedSelector));
-  } catch {
-    return [];
+  
+  const matches = [];
+
+  function walk(node) {
+    if (!node) return;
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      if (node.matches && node.matches(normalizedSelector)) {
+        matches.push(node);
+      }
+      if (node.shadowRoot) {
+        walk(node.shadowRoot);
+      }
+    }
+    let child = node.firstChild;
+    while (child) {
+      walk(child);
+      child = child.nextSibling;
+    }
   }
+
+  try {
+    walk(root);
+  } catch {
+    // Catch cross-origin iframe errors or invalid selector syntax
+  }
+  return matches;
 }
 
 export function queryXPathAll(root, expression, contextNode) {

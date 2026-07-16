@@ -3,6 +3,7 @@ import {
   escapeQuotedAttributeValue,
   isLikelyDynamicId,
   safeCssEscape,
+  queryAll,
 } from '../utils.js';
 import { debugLog } from '../debug.js';
 
@@ -15,7 +16,7 @@ function collectTestIdCandidates(element) {
       // Synchronous DOM check to prevent poisoning the shadow packet (Rule 0)
       let isGloballyUnique = false;
       try {
-        isGloballyUnique = document.querySelectorAll(selector).length === 1;
+        isGloballyUnique = queryAll(document, selector).length === 1;
       } catch (e) {}
 
       candidates.push({
@@ -38,9 +39,9 @@ function collectIdCandidate(element) {
   // Synchronous DOM check to prevent poisoning the shadow packet (Rule 0)
   let isGloballyUnique = false;
   try {
-    isGloballyUnique = document.querySelectorAll(selector).length === 1;
+    isGloballyUnique = queryAll(document, selector).length === 1;
   } catch (e) {
-    // If querySelectorAll fails (e.g. invalid escaped ID), default to false
+    // If queryAll fails (e.g. invalid escaped ID), default to false
   }
 
   return [{

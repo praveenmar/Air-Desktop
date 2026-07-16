@@ -114,7 +114,10 @@ function baseProofPacketScore(classId, proof, metadata) {
       if (proof.isGloballyUnique === false) return 40; // Ambiguous ID fallback
       const identityType = proof?.identityType || '';
       if (identityType === 'data-testid') return 97;
-      if (identityType === 'id')          return 92;
+      if (identityType === 'id') {
+        const idVal = proof.value || '';
+        return /\d/.test(idVal) ? 82 : 92;
+      }
       return 88; // name, href, alt, title, value
     }
     case 'semantic-identity':           return 89;

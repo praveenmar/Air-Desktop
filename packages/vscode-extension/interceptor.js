@@ -3944,8 +3944,10 @@ class AIRInterceptor {
       // Also correctly handles Request objects passed as args[0].
       let cleanArgs = args;
       if (opts !== undefined && opts !== null && typeof opts === 'object') {
-        const { [_AIR_INTERNAL]: _dropped, ...cleanOpts } = opts;
-        cleanArgs = [args[0], cleanOpts, ...args.slice(2)];
+        if (_AIR_INTERNAL in opts) {
+          const { [_AIR_INTERNAL]: _dropped, ...cleanOpts } = opts;
+          cleanArgs = [args[0], cleanOpts, ...args.slice(2)];
+        }
       }
 
       if (!isInternal) {
@@ -5797,7 +5799,8 @@ class AIRInterceptor {
         source: reason,
         traceId: pending.traceId || null,
       });
-      this._clearPendingOptionSelection();
+      // Do NOT clear pending option selection here. We want the actual click event (Phase 2a)
+      // to consume the pre-captured data, even if it happens >100ms after mousedown.
       return false;
     }
 
@@ -5954,7 +5957,10 @@ class AIRInterceptor {
       typeof optionDecision.selected.selector === 'string' &&
       optionDecision.selected.selector.trim().length > 0 &&
       optionDecision.selected.replaySafe === true &&
-      (optionDecision.selected.engine === 'css' || optionDecision.selected.engine === 'xpath')
+      (optionDecision.selected.engine === 'css' || 
+       optionDecision.selected.engine === 'xpath' ||
+       optionDecision.selected.engine === 'playwright-aria' ||
+       optionDecision.selected.engine === 'playwright-native')
     );
 
     if (isReplaySafeSelectorDecision) {

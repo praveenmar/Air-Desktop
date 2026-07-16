@@ -6,7 +6,7 @@ export function generateSemanticIdentityShadow(proof) {
   }
   
   if (proof?.proofType !== 'accessibility') return null;
-  if (!proof.role) return null; // Semantic Identity fundamentally requires a role
+  if (!proof.role && proof.accessibleNameSource !== 'text-content') return null; // Semantic Identity requires a role or a generic text-content fallback
 
   // --- OWNERSHIP BOUNDARY ENFORCEMENT ---
   // Class 2 (Semantic Identity) owns Intrinsic Semantics.
@@ -20,17 +20,22 @@ export function generateSemanticIdentityShadow(proof) {
   }
 
   // Construct literal Playwright executable string
-  let selector = `getByRole('${proof.role}')`;
+  let selector = '';
+  if (proof.role) {
+    selector = `getByRole('${proof.role}')`;
+  }
   
   if (proof.accessibleName) {
     // Safely escape single quotes and backslashes
     const escapedName = proof.accessibleName.replace(/(['\\])/g, '\\$1');
     
-    if (proof.accessibleNameSource === 'placeholder') {
+    if (proof.accessibleNameSource === 'text-content') {
+      selector = `getByText('${escapedName}', { exact: true })`;
+    } else if (proof.accessibleNameSource === 'placeholder') {
       selector = `getByPlaceholder('${escapedName}')`;
     } else if (proof.accessibleNameSource === 'title') {
       selector = `getByTitle('${escapedName}')`;
-    } else {
+    } else if (proof.role) {
       selector = `getByRole('${proof.role}', { name: '${escapedName}', exact: true })`;
     }
   }

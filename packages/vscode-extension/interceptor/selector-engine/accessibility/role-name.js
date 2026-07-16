@@ -223,6 +223,14 @@ function buildEvidenceForTarget(target) {
     }
   }
 
+  if (textContent && textContent.length <= 60) {
+    return {
+      ...evidence,
+      accessibleName: textContent,
+      accessibleNameSource: 'text-content',
+    };
+  }
+
   return evidence;
 }
 
@@ -247,6 +255,7 @@ function scoreEvidence(evidence) {
     case 'link-text':
     case 'role-text':
     case 'placeholder':
+    case 'text-content':
       score += 1;
       break;
     default:
@@ -267,8 +276,8 @@ function uniqueTargets(rawTarget, effectiveTarget) {
   return targets;
 }
 
-function getAriaMatches(documentRef, role, name) {
-  if (!role || !name) return [];
+function getAriaMatches(documentRef, role, name, accessibleNameSource) {
+  if (!name) return [];
   try {
     let query = '*';
     if (role === 'button') query = 'button, [role="button"], input[type="button"], input[type="submit"]';
@@ -276,14 +285,30 @@ function getAriaMatches(documentRef, role, name) {
     else if (role === 'textbox') query = 'input:not([type="hidden"]), textarea, [role="textbox"]';
     else if (role === 'checkbox') query = 'input[type="checkbox"], [role="checkbox"]';
     else if (role === 'combobox') query = 'select, input, [role="combobox"]';
-    else query = `[role="${role}"], ${role}`;
+    else if (role) query = `[role="${role}"], ${role}`;
+
+    const isPureTextSearch = !role && accessibleNameSource === 'text-content';
+    const targetName = name.toLowerCase();
 
     const candidates = [];
     
     function walk(node) {
       if (!node) return;
       if (node.nodeType === Node.ELEMENT_NODE) {
-        if (node.matches && node.matches(query)) {
+        let shouldEvaluate = true;
+        if (isPureTextSearch) {
+          const tag = node.tagName.toUpperCase();
+          if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') {
+            shouldEvaluate = false;
+          } else if (tag !== 'INPUT' && tag !== 'TEXTAREA') {
+            const rawText = (node.textContent || '').toLowerCase();
+            if (!rawText.includes(targetName)) {
+              shouldEvaluate = false; 
+            }
+          }
+        }
+
+        if (shouldEvaluate && node.matches && node.matches(query)) {
           candidates.push(node);
         }
         if (node.shadowRoot) {
@@ -310,7 +335,21 @@ function getAriaMatches(documentRef, role, name) {
         matches.push(el);
       }
     }
-    return matches;
+    
+    const deepestMatches = [];
+    for (let i = 0; i < matches.length; i++) {
+      let isAncestor = false;
+      for (let j = 0; j < matches.length; j++) {
+        if (i !== j && matches[i].contains(matches[j])) {
+          isAncestor = true;
+          break;
+        }
+      }
+      if (!isAncestor) {
+        deepestMatches.push(matches[i]);
+      }
+    }
+    return deepestMatches;
   } catch {
     return [];
   }
@@ -377,7 +416,8 @@ export function resolveAccessibilityEvidence({
   const ariaMatches = getAriaMatches(
     documentRef, 
     winner.evidence.role, 
-    winner.evidence.accessibleName
+    winner.evidence.accessibleName,
+    winner.evidence.accessibleNameSource
   );
   const ariaMatchCount = ariaMatches.length;
   // Only assert uniqueness when we found > 0 matches.
