@@ -1,7 +1,7 @@
 {
   "name": "air-desktop",
   "version": "1.0.0",
-  "description": "AIR - Automated Intelligence Recorder",
+  "description": "AIR - AI Intent Runtime",
   "main": "./core/dist/index.js",
   "author": "AIR Team",
   "private": true,
