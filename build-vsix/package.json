@@ -1,8 +1,8 @@
 {
-  "name": "air-vscode-extension",
-  "displayName": "AIR Recording",
-  "description": "Autonomous Interaction Recorder",
-  "version": "0.0.3",
+  "name": "AIRAIIntentRuntime",
+  "displayName": "AIR (AI Intent Runtime)",
+  "description": "An intelligent DOM interceptor and semantic data layer providing LLMs with deterministic web automation context.",
+  "version": "0.1.4",
   "publisher": "air-desktop",
   "repository": {
     "type": "git",
