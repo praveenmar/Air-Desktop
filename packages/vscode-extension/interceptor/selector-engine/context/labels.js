@@ -561,14 +561,10 @@ export function resolveLabelContextEvidence({
     };
   }
 
-  if (!targetControlKind) {
-    return {
-      ...base,
-      blockedReason: 'unsupported-control-kind',
-      warningCodes: ['unsupported-control-kind'],
-    };
-  }
-
+  // F-G1: For EXPLICIT label associations (aria-labelledby, label-for, wrapped-label),
+  // bypass the controlKind gate entirely. These are valid for any element type —
+  // buttons, links, custom controls — not just input-like elements.
+  // The controlKind gate only needs to protect the expensive bounded-container search below.
   const explicitProof = collectExplicitLabelProof(effectiveTarget);
   if (explicitProof?.fieldLabelText) {
     const duplicateInfo = countDocumentLabelDuplicates(scopeTarget, explicitProof.fieldLabelText, explicitProof.labelElement);
@@ -581,6 +577,14 @@ export function resolveLabelContextEvidence({
       cleanChildSelector: buildChildSelector(effectiveTarget, selectorResult, targetControlKind),
       boundedContainerSelectorCandidates: [],
       isValid: true,
+    };
+  }
+
+  if (!targetControlKind) {
+    return {
+      ...base,
+      blockedReason: 'unsupported-control-kind',
+      warningCodes: ['unsupported-control-kind'],
     };
   }
 

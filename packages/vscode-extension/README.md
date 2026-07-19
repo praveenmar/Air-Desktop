@@ -1,4 +1,4 @@
-# AIR (AI Interaction Recorder)
+# AIR (AI Intent Runtime)
 
 > Record browser interactions, capture rich automation context, and generate reliable AI-powered automation scripts for your existing test framework.
 
@@ -13,7 +13,7 @@
 
 # Overview
 
-AIR (AI Interaction Recorder) is a Visual Studio Code extension that bridges the gap between browser interactions and AI-powered automation development.
+AIR (AI Intent Runtime) is a Visual Studio Code extension that bridges the gap between browser interactions and AI-powered automation development.
 
 Instead of recording only selectors or generating generic scripts, AIR captures the complete interaction context—including user actions, DOM relationships, semantic information, resilient locators, and metadata—allowing AI coding assistants to generate high-quality automation code that matches your existing project.
 

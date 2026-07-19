@@ -161,6 +161,35 @@ export function resolveTreeNodeContextEvidence({ element, accessibilityEvidence 
     depth = currentDepth;
   }
 
+function checkUniqueTreeNodeName(treeContainer, nodeName, nodeRole) {
+  if (!treeContainer || !nodeName || !nodeRole) return false;
+  try {
+    const selector = nodeRole === 'listitem' ? 'li' : `[role="${nodeRole}"]`;
+    const candidates = treeContainer.querySelectorAll(selector);
+    let matchCount = 0;
+    
+    for (let i = 0; i < candidates.length; i++) {
+      const el = candidates[i];
+      if (el.offsetWidth === 0 && el.offsetHeight === 0 && el.getClientRects().length === 0) continue;
+      if (el.getAttribute('aria-hidden') === 'true') continue;
+      
+      const ariaLabel = normalizeLabelText(safeTrim(el.getAttribute('aria-label') || ''));
+      let elName = ariaLabel;
+      if (!elName) {
+        elName = normalizeLabelText(getShallowText(el));
+      }
+      
+      if (elName === nodeName) {
+        matchCount++;
+        if (matchCount > 1) return false;
+      }
+    }
+    return matchCount === 1;
+  } catch {
+    return false;
+  }
+}
+
   const ariaExpanded = treeNode.getAttribute('aria-expanded');
   const isExpanded = ariaExpanded ? ariaExpanded === 'true' : null;
 
@@ -168,12 +197,15 @@ export function resolveTreeNodeContextEvidence({ element, accessibilityEvidence 
   // In that case isValid = false and no candidate is emitted. This is correct - emitting
   // a selector with no name anchor would produce an unreliable mass-match locator.
   const isValid = !!treeSelector && !!nodeName;
+  
+  const uniqueNodeName = isValid ? checkUniqueTreeNodeName(treeContainer, nodeName, nodeRole) : false;
 
   return {
     rawTargetSummary: summarizeTarget(rawTarget),
     treeSelector,
     nodeSelector,
     nodeName,
+    uniqueNodeName,
     nodeRole,
     containerRole,
     ancestorPath,

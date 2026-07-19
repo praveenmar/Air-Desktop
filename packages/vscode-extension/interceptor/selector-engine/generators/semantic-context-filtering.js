@@ -33,6 +33,14 @@ export function canGenerateClass4(proof) {
            proof.uniqueActionBinding === true;
   }
 
+  if (proof.proofType === 'repeated-group-action') {
+    return proof.repeatedContainer === true &&
+      !!proof.containerSelectorKind &&
+      (!!proof.cardUniqueText || typeof proof.cardPositionalIndex === 'number') &&
+      !!proof.actionName &&
+      (!!proof.actionRole || !proof.actionTag);
+  }
+
   return false;
 }
 
@@ -55,6 +63,35 @@ export function generateSemanticContextShadow(proofs) {
       } else {
         selector = `locator('${safeCssEscape(proof.containerSelectorKind)}').filter({ hasText: '${escapeText(proof.containerAnchorText)}' }).locator('${safeCssEscape(proof.actionTag)}').filter({ hasText: '${escapeText(proof.actionName)}' })`;
       }
+    } else if (proof.proofType === 'repeated-group-action') {
+      let rgaSelector = null;
+      let usesIndex = false;
+
+      if (proof.cardUniqueText) {
+        if (proof.actionRole) {
+          rgaSelector = `locator('${safeCssEscape(proof.containerSelectorKind)}').filter({ hasText: '${escapeText(proof.cardUniqueText)}' }).getByRole('${safeCssEscape(proof.actionRole)}', { name: '${escapeText(proof.actionName)}' })`;
+        } else {
+          rgaSelector = `locator('${safeCssEscape(proof.containerSelectorKind)}').filter({ hasText: '${escapeText(proof.cardUniqueText)}' }).locator('${safeCssEscape(proof.actionTag)}').filter({ hasText: '${escapeText(proof.actionName)}' })`;
+        }
+      } else if (typeof proof.cardPositionalIndex === 'number') {
+        usesIndex = true;
+        if (proof.actionRole) {
+          rgaSelector = `locator('${safeCssEscape(proof.containerSelectorKind)}').nth(${proof.cardPositionalIndex}).getByRole('${safeCssEscape(proof.actionRole)}', { name: '${escapeText(proof.actionName)}' })`;
+        } else {
+          rgaSelector = `locator('${safeCssEscape(proof.containerSelectorKind)}').nth(${proof.cardPositionalIndex}).locator('${safeCssEscape(proof.actionTag)}').filter({ hasText: '${escapeText(proof.actionName)}' })`;
+        }
+      }
+
+      if (rgaSelector) {
+        candidates.push(createCandidate({
+          classId: SelectorClassIds.SEMANTIC_CONTEXT_FILTERING,
+          selector: rgaSelector,
+          engine: SelectorEngines.PLAYWRIGHT_NATIVE,
+          proof,
+          ...(usesIndex ? { usesIndex: true, warningCodes: ['positional-first-fallback'] } : {}),
+        }));
+      }
+      continue; // Skip shared push
     }
 
     if (selector) {

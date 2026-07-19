@@ -204,14 +204,14 @@ Only HALT if the contradiction cannot be resolved
 from repository evidence or previously approved decisions.
 
 ==================================================
-EXTERNAL REFERENCE PROTOCOL
+EXTERNAL REFERENCE PROTOCOL (TACTICAL EVOLUTION)
 ==================================================
 You are authorized to analyze the open-source codebases of Playwright and SelectorHub to understand industry-standard element resolution logic.
 
 HOWEVER, YOU MUST STRICTLY OBEY THE FOLLOWING:
-1. Conceptual Inspiration Only: You may study how they handle shadow DOM piercing, SVG paths, or aria-attribute prioritization.
-2. No Mechanical Plagiarism: You MUST NOT copy their DOM-traversal logic or specific heuristic algorithms.
-3. AIR Doctrine Supremacy: Playwright and SelectorHub evaluate live DOMs. AIR evaluates pre-captured JSON proof. If their approach requires live DOM state (like checking element visibility or computing CSS styles on the fly), you must reject it or adapt it strictly to AIR's static proof constraints.
+1. Low-Level Algorithmic Borrowing is Permitted: You may adapt their low-level DOM-traversal algorithms (e.g., recursive Shadow DOM piercing) directly into AIR's utilities. If a naive native query (like `querySelectorAll`) is causing false-positives or blind spots, you MUST upgrade AIR's utilities with proven open-source walker logic.
+2. High-Level Wrapper Prohibition: You MUST NEVER import their high-level decision engines (e.g., Playwright's `InjectedScript` evaluator). AIR must remain framework-agnostic. All JSON Proof Packets and the 12-Class MECE Architecture must be preserved. We upgrade the math, not the framework.
+3. AIR Doctrine Supremacy: Playwright and SelectorHub evaluate live DOMs. AIR evaluates pre-captured JSON proof. If their approach requires live DOM state (like checking element visibility or computing CSS styles on the fly), you must adapt it strictly to AIR's static proof constraints.
 
 ==================================================
 DISCOVERY BOARD CROSS-EXAMINATION

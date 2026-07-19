@@ -63,7 +63,7 @@ export class FlowReviewFormatter {
    *
    * @example
    * const review = FlowReviewService.build(session);
-   * console.log(FlowReviewFormatter.formatForConsole(review));
+   * console.error(FlowReviewFormatter.formatForConsole(review));
    */
   static formatForConsole(review: FlowReview): string {
     const lines: string[] = [];

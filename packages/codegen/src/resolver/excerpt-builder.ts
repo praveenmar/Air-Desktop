@@ -479,7 +479,7 @@ export function serializeSnapshotExcerpt(
       const boundarySizeBefore = stripNoise(boundaryHtmlElement.outerHTML).length;
       const boundarySizeAfter = stripNoise((boundaryClone as HTMLElement).outerHTML || '').length;
 
-      console.log('[AIR] [RESOLVER] Excerpt pruning applied', {
+      console.error('[AIR] [RESOLVER] Excerpt pruning applied', {
         boundarySizeBefore,
         boundarySizeAfter,
         prunedNodeCount,
@@ -621,7 +621,7 @@ export function serializeSnapshotExcerpt(
     const finalExcerptChars = excerpt.length;
 
     if (isExcerptTelemetryEnabled()) {
-      console.log('[AIR] [RESOLVER] Excerpt telemetry', {
+      console.error('[AIR] [RESOLVER] Excerpt telemetry', {
         mode,
         excerptBuildMs: excerptBuildTotalMs,
         excerptBuildTotalMs,

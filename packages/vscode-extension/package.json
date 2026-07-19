@@ -1,6 +1,6 @@
 {
   "name": "AIRAIInteractionRecorder",
-  "displayName": "AIR (AI Interaction Recorder) — Beta",
+  "displayName": "AIR (AI Intent Runtime)",
   "description": "An intelligent DOM interceptor and semantic data layer providing LLMs with deterministic web automation context.",
   "version": "0.1.4",
   "publisher": "TestMasterHubAI",
@@ -16,7 +16,7 @@
     "testing",
     "playwright"
   ],
-   "categories": [
+  "categories": [
     "Testing",
     "AI",
     "Other",

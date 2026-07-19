@@ -126,6 +126,9 @@ export function generateHierarchicalNavigationShadow(proof) {
       selector: chain,
       engine: SelectorEngines.PLAYWRIGHT_ARIA,
       proof,
+      // F-G10: Surface collapse-dependency as a warningCode so consumers can
+      // alert users that this selector will fail if tree nodes are collapsed at replay.
+      warningCodes: ['collapse-dependent'],
       metadata: {
         shape: 'P-chain',
         reason: 'chained-filter-fallback',

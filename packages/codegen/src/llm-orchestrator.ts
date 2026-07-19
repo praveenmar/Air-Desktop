@@ -198,24 +198,24 @@ export class LlmOrchestrator {
       get: (_nodeId: string, _normalizedUrl?: string, _controlSignature?: string) => null,
       getSource: (_nodeId: string, _normalizedUrl?: string, _controlSignature?: string) => 'unavailable',
     } as SnapshotCache & { snapshotEngineAvailable?: boolean };
-    console.log('[DEBUG] snapshotCache received, engineAvailable:', !!(snapshotCache as any).snapshotEngineAvailable);
+    console.error('[DEBUG] snapshotCache received, engineAvailable:', !!(snapshotCache as any).snapshotEngineAvailable);
     const debugTrace = /^(1|true|yes)$/i.test(process.env.AIR_DEBUG_RESOLVER_TRACE || '');
 
     if (debugTrace) {
-      console.log('--- SESSION STEPS ---');
+      console.error('--- SESSION STEPS ---');
       for (const step of session.steps) {
-        console.log({
+        console.error({
           step: step.step,
           selector: step.selector,
           sourceNodeId: step.sourceNodeId ?? null,
         });
       }
 
-      console.log('--- SNAPSHOT AVAILABILITY ---');
+      console.error('--- SNAPSHOT AVAILABILITY ---');
       for (const step of session.steps) {
         const nodeId = step.sourceNodeId;
         const snapshot = snapshotCache.get(nodeId ?? '', step.normalizedUrl, step.controlSignature);
-        console.log(`Step ${step.step} snapshot:`, snapshot ? 'YES' : 'NO');
+        console.error(`Step ${step.step} snapshot:`, snapshot ? 'YES' : 'NO');
       }
     }
 
@@ -231,7 +231,7 @@ export class LlmOrchestrator {
         )
         : undefined,
     );
-    console.log('[AIR] Resolver summary', {
+    console.error('[AIR] Resolver summary', {
       totalSteps: session.steps.length,
       unresolved: resolverResult.unresolvedStepNumbers.length,
       llmAttempted: resolverResult.llmAttemptedStepNumbers.length,
@@ -246,9 +246,9 @@ export class LlmOrchestrator {
     }
 
     if (debugTrace) {
-      console.log('--- RESOLVER OUTPUT ---');
+      console.error('--- RESOLVER OUTPUT ---');
       for (const resolution of resolverResult.resolutions) {
-        console.log({
+        console.error({
           step: resolution.stepNumber,
           original: resolution.originalSelector,
           resolved: resolution.resolvedSelector,
@@ -276,9 +276,9 @@ export class LlmOrchestrator {
     const generationStepMap = new Map(generationSteps.map(step => [step.step, step]));
 
     if (debugTrace) {
-      console.log('--- FINAL SELECTORS USED ---');
+      console.error('--- FINAL SELECTORS USED ---');
       for (const step of generationSteps) {
-        console.log({
+        console.error({
           step: step.step,
           selectorUsed: step.selector,
         });
@@ -2426,7 +2426,7 @@ ${JSON.stringify(request.steps, null, 2)}
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        console.log('[AIR] Sending session data to Gemini...', {
+        console.error('[AIR] Sending session data to Gemini...', {
           model: modelName,
           attempt,
           maxAttempts,

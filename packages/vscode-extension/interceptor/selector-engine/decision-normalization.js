@@ -114,7 +114,10 @@ function baseProofPacketScore(classId, proof, metadata) {
       if (proof.isGloballyUnique === false) return 40; // Ambiguous ID fallback
       const identityType = proof?.identityType || '';
       if (identityType === 'data-testid') return 97;
-      if (identityType === 'id')          return 92;
+      if (identityType === 'id') {
+        const idVal = proof.value || '';
+        return /\d/.test(idVal) ? 82 : 92;
+      }
       return 88; // name, href, alt, title, value
     }
     case 'semantic-identity':           return 89;
@@ -212,9 +215,13 @@ function isProofBackedReplaySafe(candidate) {
       return proof.isLikelyDynamic !== true && !!proof.identityType;
 
     case 'semantic-identity':
+      // F-S4: Enforce ARIA uniqueness evaluated natively during proof generation.
+      if (proof.uniqueByAriaName === false) return false;
       return !!proof.accessibleName && proof.accessibleNameIsDynamic !== true;
 
     case 'label-bound-identity':
+      // F-S4: Enforce label uniqueness evaluated natively during proof generation.
+      if (typeof proof.duplicateLabelCount === 'number' && proof.duplicateLabelCount > 0) return false;
       return !!proof.fieldLabelText &&
         ['label-for', 'wrapped-label', 'aria-labelledby'].includes(proof.fieldRelation);
 
@@ -225,6 +232,9 @@ function isProofBackedReplaySafe(candidate) {
         return proof.uniqueRowBinding === true && proof.uniqueActionBinding === true;
       if (proof.proofType === 'generic-container')
         return !!proof.containerAnchorText && !!proof.actionName;
+      if (proof.proofType === 'repeated-group-action')
+        return proof.repeatedContainer === true && !!proof.actionName && 
+               (!!proof.cardUniqueText || typeof proof.cardPositionalIndex === 'number');
       return false;
 
     case 'structural-disambiguation':
@@ -240,6 +250,8 @@ function isProofBackedReplaySafe(candidate) {
 
     case 'hierarchical-navigation':
       if (candidate.metadata?.shape === 'P-chain') return false;
+      // F-S4: Enforce tree-node name uniqueness evaluated natively during proof generation.
+      if (proof.uniqueNodeName === false) return false;
       return !!proof.nodeName;
 
     case 'boundary-traversal':
@@ -260,7 +272,8 @@ export function buildSelectorDecision({
   tableRowSelectorProposals = [],
   optionPanelSelectorProposals = [],
   genericContainerProposals = [],
-  proofPacketCandidates = []          // <- NEW
+  proofPacketCandidates = [],
+  weakAppShadowCoverage = null
 }) {
   const bestSelector = selectorPreferenceShadow?.bestSelector;
 
@@ -285,8 +298,46 @@ export function buildSelectorDecision({
     const scoredPacketCandidates = proofPacketCandidates
       .filter(c => c && !c.proof?.isLikelyDynamic && !c.proof?.accessibleNameIsDynamic)
       .map(c => {
-        const scored = scoreProofPacketCandidate(c);
-        return scored ? { ...c, _scored: scored } : null;
+        // Hydrate DOM evaluation metrics from the V0 shadowSummary.
+        // proofPacketCandidates are Object.freeze()'d by createCandidate() so we
+        // MUST spread into a new object — direct property assignment would silently
+        // fail in strict mode / throw in some runtimes.
+        //
+        // Lookup key: exact selector string match against shadowSummary entries.
+        // shadowSummary entries are finalized candidates from finalizeCandidates()
+        // and carry matchCount, visibleMatchCount, and warningCodes from real DOM evaluation.
+        const evalMetrics = Array.isArray(shadowSummary)
+          ? shadowSummary.find(s => s && s.selector === c.selector)
+          : null;
+
+        const hydrated = evalMetrics
+          ? {
+              ...c,
+              matchCount: evalMetrics.matchCount ?? null,
+              visibleMatchCount: evalMetrics.visibleMatchCount ?? null,
+              positionInAllMatches: evalMetrics.positionInAllMatches ?? null,
+              warningCodes: Array.isArray(evalMetrics.warningCodes) ? evalMetrics.warningCodes : (c.warningCodes || []),
+            }
+          : { ...c }; // Use a shallow copy so we can safely mutate it below
+
+        // CSS queryAll can never evaluate Playwright ARIA locator strings (getByRole, getByLabel).
+        // proof-packet candidates go through a separate pipeline and are NEVER CSS-evaluated,
+        // so shadowSummary will have no entry for them (evalMetrics === null) and warningCodes
+        // will always be [] — isTargetMissingFromCSS would always be false.
+        // For playwright-aria we must unconditionally override with native proof metrics
+        // captured during DOM event generation, regardless of CSS evaluation outcome.
+        if (hydrated.engine === 'playwright-aria') {
+          const nativeCount = hydrated.proof?.ariaMatchCount ?? hydrated.proof?.duplicateLabelCount;
+          if (typeof nativeCount === 'number') {
+            hydrated.matchCount = nativeCount;
+            hydrated.positionInAllMatches = hydrated.proof?.ariaMatchIndex ?? hydrated.proof?.targetIndexWithinAmbiguity ?? hydrated.positionInAllMatches;
+            // Also strip any stale CSS-era warning that may have leaked through
+            hydrated.warningCodes = (hydrated.warningCodes || []).filter(w => w !== 'target-not-in-matches');
+          }
+        }
+
+        const scored = scoreProofPacketCandidate(hydrated);
+        return scored ? { ...hydrated, _scored: scored } : null;
       })
       .filter(Boolean)
       .filter(c => c._scored.tier !== 'last-resort' && c._scored.tier !== 'advisory')
@@ -300,7 +351,11 @@ export function buildSelectorDecision({
         confidence: rule0Winner._scored.tier === 'preferred' ? 'high' : 'medium',
         proofSource: rule0Winner.classId,
         selectedReason: `Proof-packet winner. Class: ${rule0Winner.classId}. Score: ${rule0Winner._scored.score}. Reasons: ${(rule0Winner._scored.reasons || []).join(', ')}.`,
-        replaySafe: true,
+        // Derive replaySafe honestly from the gate the candidate already passed,
+        // rather than hard-coding true. For all candidates that reach this branch
+        // isProofBackedReplaySafe(rule0Winner) === true by construction, so the
+        // output is identical — but the field is now semantically correct.
+        replaySafe: isProofBackedReplaySafe(rule0Winner),
       });
       status         = "resolved";
       blockedReason  = null;
@@ -334,6 +389,130 @@ export function buildSelectorDecision({
     status = "resolved";
     blockedReason = null;
     selectedFrom = "legacy-primary";
+  }
+
+  // ---------------------------------------------------------
+  // Rule 2.5: Semantic Nth Injection
+  // ---------------------------------------------------------
+  if (!selected) {
+    const semanticClasses = [
+      'semantic-identity',
+      'label-bound-identity',
+      'direct-identity'
+    ];
+    
+    // We want the best semantic candidate that failed *only* because of multiple matches.
+    const hydratedPacketCandidates = proofPacketCandidates.map(c => {
+      const evalMetrics = Array.isArray(shadowSummary)
+        ? shadowSummary.find(s => s && s.selector === c.selector)
+        : null;
+      return evalMetrics ? {
+        ...c,
+        matchCount: evalMetrics.matchCount ?? null,
+        visibleMatchCount: evalMetrics.visibleMatchCount ?? null,
+        positionInAllMatches: evalMetrics.positionInAllMatches ?? null,
+        warningCodes: Array.isArray(evalMetrics.warningCodes) ? evalMetrics.warningCodes : (c.warningCodes || []),
+      } : c;
+    }).filter(Boolean);
+
+    const eligibleForNth = hydratedPacketCandidates.map(c => {
+      let mc = c.matchCount;
+      let pos = c.positionInAllMatches;
+
+      // playwright-aria candidates are never CSS-evaluated so matchCount is always undefined
+      // here. Unconditionally read from native proof metrics captured at event time.
+      if (c.engine === 'playwright-aria') {
+        const nativeCount = c.proof?.ariaMatchCount ?? c.proof?.duplicateLabelCount;
+        if (typeof nativeCount === 'number') {
+          mc = nativeCount > 0 ? nativeCount : null;
+          pos = c.proof?.ariaMatchIndex ?? c.proof?.targetIndexWithinAmbiguity ?? pos;
+        }
+      } else if ((c.warningCodes || []).includes('target-not-in-matches')) {
+        return null; // Some other engine legitimately failed to find the target
+      }
+
+      if (
+        mc > 1 && 
+        typeof pos === 'number' &&
+        semanticClasses.includes(c.classId) &&
+        !(c.proof?.isLikelyDynamic) &&
+        !(c.proof?.accessibleNameIsDynamic)
+      ) {
+        // Tag onto candidate to avoid recalculating in winner selection
+        return { ...c, _resolvedMatchCount: mc, _resolvedPosition: pos };
+      }
+      return null;
+    }).filter(Boolean);
+
+    if (eligibleForNth.length > 0) {
+      // Score them to pick the best semantic one
+      const scoredForNth = eligibleForNth.map(c => {
+        const scored = scoreProofPacketCandidate(c);
+        return scored ? { ...c, _scored: scored } : null;
+      }).filter(Boolean).sort((a, b) => (b._scored.score || 0) - (a._scored.score || 0));
+
+      const nthWinner = scoredForNth[0];
+      if (nthWinner) {
+        let newSelector = nthWinner.selector;
+        let newEngine = nthWinner.engine;
+        const index = nthWinner._resolvedPosition;
+        
+        if (newEngine === 'playwright-aria' || newEngine === 'playwright-native') {
+          newSelector = `${newSelector}.nth(${index})`;
+        } else if (newEngine === 'css' || newEngine === 'xpath') {
+          newSelector = `${newSelector} >> nth=${index}`;
+        }
+        
+        const modifiedCandidate = {
+          ...nthWinner,
+          selector: newSelector,
+          engine: newEngine,
+          matchCount: 1, 
+          visibleMatchCount: 1,
+          warningCodes: (nthWinner.warningCodes || []).filter(w => w !== 'multiple-matches' && w !== 'multiple-visible-matches' && w !== 'target-not-in-matches')
+        };
+        
+        selected = normalizeSelectorCandidate(modifiedCandidate, "shadow-preference", {
+          confidence: "medium",
+          proofSource: nthWinner.classId,
+          selectedReason: `Semantic selector '${nthWinner.classId}' failed uniqueness. Injected .nth(${index}) natively to force resolution.`
+        });
+        
+        if (!selected.warningCodes.includes('volatile-positional-fallback')) {
+          selected.warningCodes = [...selected.warningCodes, 'volatile-positional-fallback'];
+        }
+        status = "resolved";
+        blockedReason = null;
+        selectedFrom = "semantic-nth-fallback";
+      }
+    }
+  }
+
+  // ---------------------------------------------------------
+  // Rule 3: Volatile Positional Fallback (last-resort)
+  // ---------------------------------------------------------
+  const fallbacks = weakAppShadowCoverage?.fallbacks;
+  if (!selected && Array.isArray(fallbacks)) {
+    // Find the best positional fallback that is uniquely matched in the DOM
+    const fallbackChoice = fallbacks.find(c => 
+      c && (c.usesIndex || c.strategy === 'nth-of-type-child' || c.strategy === 'indexed-dom-xpath')
+      && (c.matchCount === 1 || c.visibleMatchCount === 1)
+    );
+
+    if (fallbackChoice) {
+      selected = normalizeSelectorCandidate(fallbackChoice, "shadow-preference", {
+        confidence: "low",
+        proofSource: "positional-fallback",
+        selectedReason: "All robust selectors failed. Falling back to a volatile positional index."
+      });
+      // Explicitly flag this so the LLM generation layer knows it's brittle
+      if (!selected.warningCodes.includes('volatile-positional-fallback')) {
+        selected.warningCodes = [...selected.warningCodes, 'volatile-positional-fallback'];
+      }
+      status = "resolved";
+      blockedReason = null;
+      selectedFrom = "volatile-fallback";
+    }
   }
 
   // Build alternatives ladder

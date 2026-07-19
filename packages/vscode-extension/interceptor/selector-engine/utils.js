@@ -64,23 +64,67 @@ export function isVisible(element) {
   return element.offsetParent !== null || style.position === 'fixed';
 }
 
+/**
+ * F-S1: Cross-origin iframe SecurityError guard.
+ *
+ * getQueryRoot() traverses the shadow DOM boundary via getRootNode() to find the
+ * closest queryable root. In standard same-origin flows this is safe. However,
+ * when the engine is invoked near a cross-origin iframe boundary — or against an
+ * element reference tainted by cross-origin access — getRootNode() can throw a
+ * SecurityError in strict browser security contexts.
+ *
+ * Fix: wrap both the getRootNode() call and the ownerDocument fallback in
+ * independent try/catch blocks. Absolute last-resort fallback is the global
+ * `document`, always accessible in any same-origin content script.
+ */
 export function getQueryRoot(element) {
   if (!element) return null;
-  const root = typeof element.getRootNode === 'function' ? element.getRootNode() : null;
-  if (root && typeof root.querySelectorAll === 'function') {
-    return root;
+  try {
+    const root = typeof element.getRootNode === 'function' ? element.getRootNode() : null;
+    if (root && typeof root.querySelectorAll === 'function') {
+      return root;
+    }
+  } catch {
+    // SecurityError: cross-origin iframe boundary or detached element.
+    // Fall through to ownerDocument.
   }
-  return element.ownerDocument || document;
+  try {
+    return element.ownerDocument || document;
+  } catch {
+    // Absolute last resort — ownerDocument inaccessible (e.g. detached frame).
+    return document;
+  }
 }
 
 export function queryAll(root, selector) {
   const normalizedSelector = safeTrim(selector);
   if (!root || !normalizedSelector) return [];
-  try {
-    return Array.from(root.querySelectorAll(normalizedSelector));
-  } catch {
-    return [];
+  
+  const matches = [];
+
+  function walk(node) {
+    if (!node) return;
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      if (node.matches && node.matches(normalizedSelector)) {
+        matches.push(node);
+      }
+      if (node.shadowRoot) {
+        walk(node.shadowRoot);
+      }
+    }
+    let child = node.firstChild;
+    while (child) {
+      walk(child);
+      child = child.nextSibling;
+    }
   }
+
+  try {
+    walk(root);
+  } catch {
+    // Catch cross-origin iframe errors or invalid selector syntax
+  }
+  return matches;
 }
 
 export function queryXPathAll(root, expression, contextNode) {

@@ -27,39 +27,82 @@ export function chooseSemanticRowIdentity(targetRow, allRows, target, actionName
   candidates.sort((a, b) => b.score - a.score);
 
   const bestCandidate = candidates[0];
-  const rejected = candidates.slice(1).map(c => ({
-    text: c.text,
-    reason: c.primaryPenalty || 'lower-score'
-  }));
 
-  const identityText = bestCandidate.text;
-  
-  // Uniqueness validation
-  const count = allRows.filter(row => {
-    const texts = rowCellExtractor(row, null, actionName).map(e => e.text);
-    return texts.includes(identityText);
+  // --- Pass 1: Single-column uniqueness (original behaviour, unchanged) ---
+  const singleCount = allRows.filter((row) => {
+    const texts = rowCellExtractor(row, null, actionName).map((e) => e.text);
+    return texts.includes(bestCandidate.text);
   }).length;
 
-  const reasons = [...bestCandidate.reasons];
-  let blockedReason = null;
-  let uniqueRowBinding = false;
-
-  if (count === 1) {
-    uniqueRowBinding = true;
-    reasons.push('unique-within-table');
-  } else {
-    blockedReason = 'table-row-ambiguous-row-identity';
+  if (singleCount === 1) {
+    // Single best column uniquely identifies the row — return immediately.
+    const reasons = [...bestCandidate.reasons, 'unique-within-table'];
+    const rejected = candidates.slice(1).map((c) => ({
+      text: c.text,
+      reason: c.primaryPenalty || 'lower-score',
+    }));
+    return {
+      rowIdentityTexts: [bestCandidate.text],
+      rowIdentityMode: 'single-text',
+      matchingRowIdentityCount: singleCount,
+      uniqueRowBinding: true,
+      rowIdentitySource: 'primary-semantic-column',
+      rowIdentityReasons: reasons,
+      rejectedRowIdentityCandidates: rejected,
+      blockedReason: null,
+    };
   }
 
+  // --- Pass 2: F-G7 Multi-column combination disambiguation ---
+  // The single best cell is not unique (e.g. two rows share the same name).
+  // Try combining the top N high-scoring cells until the tuple is unique.
+  // Cap at MAX_MULTI_COLUMN_TOKENS to keep the generated :has() chain readable.
+  const MAX_MULTI_COLUMN_TOKENS = 3;
+  const eligibleCandidates = candidates.filter((c) => !c.primaryPenalty || c.score >= 50);
+
+  for (let tokenCount = 2; tokenCount <= Math.min(MAX_MULTI_COLUMN_TOKENS, eligibleCandidates.length); tokenCount += 1) {
+    const combo = eligibleCandidates.slice(0, tokenCount);
+    const comboTexts = combo.map((c) => c.text);
+
+    const comboCount = allRows.filter((row) => {
+      const rowCellTexts = rowCellExtractor(row, null, actionName).map((e) => e.text);
+      // All combo texts must be present in the row (AND semantics — mirrors :has() chain).
+      return comboTexts.every((t) => rowCellTexts.includes(t));
+    }).length;
+
+    if (comboCount === 1) {
+      const comboReasons = combo.flatMap((c) => c.reasons);
+      comboReasons.push(`multi-column-${tokenCount}-unique`);
+      return {
+        rowIdentityTexts: comboTexts,
+        rowIdentityMode: `multi-text-${tokenCount}`,
+        matchingRowIdentityCount: comboCount,
+        uniqueRowBinding: true,
+        rowIdentitySource: 'multi-column-disambiguation',
+        rowIdentityReasons: comboReasons,
+        rejectedRowIdentityCandidates: candidates.slice(tokenCount).map((c) => ({
+          text: c.text,
+          reason: c.primaryPenalty || 'not-needed-for-uniqueness',
+        })),
+        blockedReason: null,
+      };
+    }
+  }
+
+  // --- Pass 3: All combinations exhausted — block ---
+  const rejected = candidates.slice(1).map((c) => ({
+    text: c.text,
+    reason: c.primaryPenalty || 'lower-score',
+  }));
   return {
-    rowIdentityTexts: [identityText],
+    rowIdentityTexts: [bestCandidate.text],
     rowIdentityMode: 'single-text',
-    matchingRowIdentityCount: count,
-    uniqueRowBinding,
+    matchingRowIdentityCount: singleCount,
+    uniqueRowBinding: false,
     rowIdentitySource: 'primary-semantic-column',
-    rowIdentityReasons: reasons,
+    rowIdentityReasons: [...bestCandidate.reasons, 'multi-column-exhausted'],
     rejectedRowIdentityCandidates: rejected,
-    blockedReason
+    blockedReason: 'table-row-ambiguous-row-identity',
   };
 }
 

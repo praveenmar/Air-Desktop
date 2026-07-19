@@ -22,13 +22,16 @@ export const SelectorEngines = {
  * Creates an immutable Selector Candidate.
  * Modifiers must return new candidate objects rather than mutating existing ones.
  */
-export function createCandidate({ classId, selector, engine, family, proof, realizationSteps, metadata = {} }) {
+export function createCandidate({ classId, selector, engine, family, proof, realizationSteps, warningCodes, metadata = {} }) {
   const candidate = {
     classId,
     selector,
     engine,
     ...(family ? { family } : {}),
     realizationSteps: realizationSteps ? Object.freeze([...realizationSteps]) : undefined,
+    // F-G10: warningCodes declared by the generator at creation time (e.g. 'collapse-dependent').
+    // Merged with evaluation-time warningCodes in finalizeCandidates().
+    warningCodes: Object.freeze(Array.isArray(warningCodes) ? [...warningCodes] : []),
     appliedModifiers: Object.freeze([]),
     proof: Object.freeze({ ...proof }),
     metadata: Object.freeze({ ...metadata })

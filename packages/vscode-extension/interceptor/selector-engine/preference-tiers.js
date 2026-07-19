@@ -44,7 +44,12 @@ function baseCandidateScore(candidate) {
     case 'name':
       return 86;
     case 'aria-label':
-      return 84;
+      // F-G3: Raw CSS aria-label selector is demoted vs the Playwright-native
+      // getByRole(..., { name }) form that Class 2 (semantic-identity) emits.
+      // Both exist in the shadow packet for ARIA-labeled elements. Without
+      // demotion the CSS form (84) can outscore the semantic form on some paths.
+      // The 8-point gap ensures getByRole always wins when both are present.
+      return 76;
     case 'placeholder':
       return 82;
     case 'href':
@@ -133,8 +138,26 @@ export function classifySelectorCandidatePreference(candidate) {
     reasons.push('indexed-selector');
   }
   if (hasWarning(candidate, 'framework-class')) {
-    score -= 4;
+    // F-G11: Differentiate between framework utility tokens and framework component
+    // root classes (e.g. MuiCard-root, chakra-card). Component roots are reliable
+    // container anchors for repeated card layouts. Apply a mild penalty (-6 vs the
+    // flat -4 previously) but do NOT discard them as scope anchors the way utility
+    // classes should be discarded. The structural generator's class morphology
+    // dictionary controls which classes reach this branch.
+    score -= 6;
     reasons.push('framework-class-risk');
+  }
+  if (hasWarning(candidate, 'no-semantic-anchor')) {
+    // F-G4: No text or ARIA label was available to anchor the selector.
+    // Apply an additional penalty so positional fallbacks rank below any
+    // semantic candidate that may exist in the proof layer.
+    score -= 12;
+    reasons.push('no-semantic-anchor-risk');
+  }
+  if (hasWarning(candidate, 'collapse-dependent')) {
+    // F-G10: Tree node selector that requires ancestor nodes to be expanded.
+    score -= 8;
+    reasons.push('collapse-dependent-risk');
   }
   if (hasWarning(candidate, 'multiple-matches')) {
     score -= 10;
