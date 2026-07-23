@@ -1,6 +1,8 @@
 const { spawn } = require('child_process');
 
-const dbPath = 'C:/Users/praveenmar/AppData/Roaming/air-desktop/air-data.db';
+//const dbPath = 'C:/Users/praveenmar/AppData/Roaming/air-desktop/air-data.db';
+const dbPath = 'C:/Users/praveenmar/.air/air-data.db';
+
 
 console.error('[AIR MCP Wrapper] Booting server via tsx...');
 
