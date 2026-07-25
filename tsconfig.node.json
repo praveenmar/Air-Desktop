@@ -6,7 +6,7 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "composite": true,
-    "types": ["node", "better-sqlite3", "electron"]
+    "types": ["node", "electron"]
   },
   "include": [
     "electron/**/*",

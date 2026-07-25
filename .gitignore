@@ -1,6 +1,3 @@
-# Purpose: Git exclusion rules.
-# Prototype Origin: New file for Electron scaffolding.
-# Changes: Added exclusions for SQLite databases, Vite outputs, and standard Node ignores.
 
 # Logs
 logs
@@ -37,3 +34,35 @@ coverage/
 .env.development.local
 .env.test.local
 .env.production.local
+
+tests/
+
+.air/
+
+.last-run.json
+
+air-*.json 
+AIRAIInteractionRecorder-*.vsix
+tmp/
+interceptor logs.txt
+
+/docs
+after.json
+before.json
+scratch/run-air-orangehrm-selector-debug.js
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/
+
+.air.db
+
+tmp/
+
+test-results/
+scratch/
+e2e/
+build-vsix/

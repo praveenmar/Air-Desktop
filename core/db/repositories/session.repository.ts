@@ -5,8 +5,8 @@
 //      Without this, session.eventCount, session.startedAt, session.lastNodeId etc. all returned
 //      undefined, including the new-session detection log in SessionManager.
 
-import { Database } from 'better-sqlite3';
 import { Session } from '../../types';
+import { AsyncSQLiteDatabase } from '../sqlite-adapter';
 
 // Translates every snake_case SQLite column to its camelCase TypeScript equivalent.
 function mapSessionRow(row: any): Session | null {
@@ -24,13 +24,38 @@ function mapSessionRow(row: any): Session | null {
 }
 
 export class SessionRepository {
-  constructor(private db: Database) {}
+  constructor(private db: AsyncSQLiteDatabase) {}
 
-  public getOrCreate(sessionId: string): Session | null {
+  public async getTabState(sessionId: string, tabId: string): Promise<{ lastNodeId: string | null; lastEventAt: number | null } | null> {
+    const stmt = this.db.prepare(`
+      SELECT last_node_id, last_event_at
+      FROM session_tab_state
+      WHERE session_id = ? AND tab_id = ?
+      LIMIT 1
+    `);
+    const result = await stmt.get(sessionId, tabId) as
+      | { last_node_id: string | null; last_event_at: number | null }
+      | undefined;
+    if (!result) {
+      return null;
+    }
+    return {
+      lastNodeId: result.last_node_id || null,
+      lastEventAt: typeof result.last_event_at === 'number' ? result.last_event_at : null,
+    };
+  }
+
+  public async findById(sessionId: string): Promise<Session | null> {
+    if (!sessionId) return null;
+    const stmt = this.db.prepare('SELECT * FROM sessions WHERE id = ?');
+    return mapSessionRow(await stmt.get(sessionId));
+  }
+
+  public async getOrCreate(sessionId: string): Promise<Session | null> {
     if (!sessionId) return null;
 
     const stmt = this.db.prepare('SELECT * FROM sessions WHERE id = ?');
-    const existing = mapSessionRow(stmt.get(sessionId));
+    const existing = mapSessionRow(await stmt.get(sessionId));
 
     if (existing) return existing;
 
@@ -40,27 +65,69 @@ export class SessionRepository {
     `);
 
     const now = Date.now();
-    insertStmt.run(sessionId, now, now);
+    await insertStmt.run(sessionId, now, now);
 
     // Re-fetch through the mapper so the returned object is correctly shaped
-    return mapSessionRow(stmt.get(sessionId));
+    return mapSessionRow(await stmt.get(sessionId));
   }
 
-  public updatePointer(sessionId: string, nodeId: string): void {
-    const stmt = this.db.prepare(`
-      UPDATE sessions SET last_node_id = ?, last_event_at = ?, event_count = event_count + 1 WHERE id = ?
+  public async updatePointerForTab(
+    sessionId: string,
+    tabId: string,
+    nodeId: string,
+    eventTimestamp: number
+  ): Promise<void> {
+    const safeEventTimestamp = Number.isFinite(eventTimestamp) ? eventTimestamp : Date.now();
+    const tabStateStmt = this.db.prepare(`
+      INSERT INTO session_tab_state (session_id, tab_id, last_node_id, last_event_at, event_count)
+      VALUES (?, ?, ?, ?, 1)
+      ON CONFLICT(session_id, tab_id) DO UPDATE SET
+        event_count = session_tab_state.event_count + 1,
+        last_node_id = CASE
+          WHEN session_tab_state.last_event_at IS NULL OR session_tab_state.last_event_at <= excluded.last_event_at
+          THEN excluded.last_node_id
+          ELSE session_tab_state.last_node_id
+        END,
+        last_event_at = CASE
+          WHEN session_tab_state.last_event_at IS NULL OR session_tab_state.last_event_at <= excluded.last_event_at
+          THEN excluded.last_event_at
+          ELSE session_tab_state.last_event_at
+        END
     `);
-    stmt.run(nodeId, Date.now(), sessionId);
+    await tabStateStmt.run(sessionId, tabId, nodeId, safeEventTimestamp);
+
+    const sessionStmt = this.db.prepare(`
+      UPDATE sessions
+      SET
+        last_event_at = CASE
+          WHEN last_event_at IS NULL OR last_event_at <= ?
+          THEN ?
+          ELSE last_event_at
+        END,
+        event_count = event_count + 1
+      WHERE id = ?
+    `);
+    // Note: sessions.last_node_id is legacy/observability only and must not be used
+    // as GraphBuilder source of truth in tab-aware flow.
+    await sessionStmt.run(safeEventTimestamp, safeEventTimestamp, sessionId);
   }
 
-  public getLastNode(sessionId: string): string | null {
-    const stmt = this.db.prepare('SELECT last_node_id FROM sessions WHERE id = ?');
-    const result = stmt.get(sessionId) as { last_node_id: string } | undefined;
-    return result?.last_node_id || null;
+  public async getLastNodeForTab(sessionId: string, tabId: string): Promise<string | null> {
+    const state = await this.getTabState(sessionId, tabId);
+    return state?.lastNodeId || null;
   }
 
-  public getAll(limit: number = 20): Session[] {
+  public async getAll(limit: number = 20): Promise<Session[]> {
     const stmt = this.db.prepare('SELECT * FROM sessions ORDER BY last_event_at DESC LIMIT ?');
-    return (stmt.all(limit) as any[]).map(mapSessionRow) as Session[];
+    return ((await stmt.all(limit)) as any[]).map(mapSessionRow) as Session[];
+  }
+
+  public async markEnded(sessionId: string): Promise<void> {
+    const stmt = this.db.prepare(`
+      UPDATE sessions
+      SET status = 'ended', last_event_at = ?
+      WHERE id = ?
+    `);
+    await stmt.run(Date.now(), sessionId);
   }
 }

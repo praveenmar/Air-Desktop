@@ -1,0 +1,41 @@
+export const SelectorClassIds = {
+  DIRECT_IDENTITY: 'direct-identity',
+  SEMANTIC_IDENTITY: 'semantic-identity',
+  LABEL_BOUND_IDENTITY: 'label-bound-identity',
+  SEMANTIC_CONTEXT_FILTERING: 'semantic-context-filtering',
+  STRUCTURAL_ADJACENCY: 'structural-adjacency',        // TOMBSTONE - Class 5 retired, merged into Class 4
+  NATIVE_DOM_NORMALIZATION: 'native-dom-normalization',
+  STRUCTURAL_DISAMBIGUATION: 'structural-disambiguation',
+  STATEFUL_LIFECYCLE_LINKAGE: 'stateful-lifecycle-linkage',
+  COLLECTION_MEMBERSHIP: 'collection-membership',
+  HIERARCHICAL_NAVIGATION: 'hierarchical-navigation',
+  PRAGMATIC_CSS_FALLBACK: 'pragmatic-css-fallback'
+};
+
+export const SelectorEngines = {
+  PLAYWRIGHT_CSS: 'playwright-css',
+  PLAYWRIGHT_ARIA: 'playwright-aria',
+  PLAYWRIGHT_NATIVE: 'playwright-native'
+};
+
+/**
+ * Creates an immutable Selector Candidate.
+ * Modifiers must return new candidate objects rather than mutating existing ones.
+ */
+export function createCandidate({ classId, selector, engine, family, proof, realizationSteps, warningCodes, metadata = {} }) {
+  const candidate = {
+    classId,
+    selector,
+    engine,
+    ...(family ? { family } : {}),
+    realizationSteps: realizationSteps ? Object.freeze([...realizationSteps]) : undefined,
+    // F-G10: warningCodes declared by the generator at creation time (e.g. 'collapse-dependent').
+    // Merged with evaluation-time warningCodes in finalizeCandidates().
+    warningCodes: Object.freeze(Array.isArray(warningCodes) ? [...warningCodes] : []),
+    appliedModifiers: Object.freeze([]),
+    proof: Object.freeze({ ...proof }),
+    metadata: Object.freeze({ ...metadata })
+  };
+
+  return Object.freeze(candidate);
+}

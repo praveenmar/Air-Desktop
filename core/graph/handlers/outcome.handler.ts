@@ -1,39 +1,19 @@
-// Purpose: Handles "Branch B" logic (Outcomes) and Explicit Edge creation.
-// Prototype Origin: graph-builder.js (Branch B block, createExplicitEdge, updateOutcomeProbability)
-// Changes: Coordinates via Repositories.
+﻿// Purpose: Handles Branch B logic (Outcomes) and explicit edge creation.
 
 import crypto from 'crypto';
+import { z } from 'zod';
+import { normalizeUrl } from '@air/shared';
 import { EdgeRepository } from '../../db/repositories/edge.repository';
 import { OutcomeRepository } from '../../db/repositories/outcome.repository';
 import { EventRepository } from '../../db/repositories/event.repository';
 import { PendingActionRepository } from '../../db/repositories/pending-action.repository';
 import { DebugLogger } from '../../logger/debug-logger';
 import { OutcomeEventSchema, PendingAction, OutcomeType } from '../../types';
-import { z } from 'zod';
 
 type OutcomeEvent = z.infer<typeof OutcomeEventSchema>;
-
-/**
- * Normalises a URL for comparison by stripping hash fragments, query strings,
- * and trailing slashes. Prevents false navigation detections caused by:
- *   - Analytics params:  /page?utm_source=email  → /page
- *   - Hash anchors:      /page#section           → /page
- *   - Trailing slashes:  /dashboard/             → /dashboard
- *
- * Returns null for null/undefined input so callers can guard against missing URLs.
- */
-function normalizeUrl(url: string | undefined | null): string | null {
-  if (!url) return null;
-  try {
-    const parsed = new URL(url);
-    // Keep only origin + pathname, strip trailing slash (except root /)
-    const pathname = parsed.pathname.replace(/\/$/, '') || '/';
-    return parsed.origin + pathname;
-  } catch {
-    // Unparseable URL — compare as-is to avoid silently swallowing errors
-    return url;
-  }
-}
+const BASELINE_TRACE_PREFIX = 'baseline-';
+const FALLBACK_PENDING_LOOKBACK_MS = 15_000;
+const FALLBACK_PENDING_MAX_CANDIDATES = 2;
 
 export class OutcomeHandler {
   constructor(
@@ -44,122 +24,324 @@ export class OutcomeHandler {
     private logger: DebugLogger
   ) {}
 
-  public handleOutcome(event: OutcomeEvent, traceId: string, currentNodeId: string): void {
-    const pending = this.pendingRepo.find(traceId);
-
-    if (pending) {
-      this.logger.log('OutcomeHandler', 'decision', 'Found PENDING ACTION for outcome', { 
-        traceId, 
-        fromNode: pending.fromNodeId, 
-        toNode: currentNodeId 
-      });
-
-      // Create EXPLICIT Edge
-      this.createExplicitEdge(pending.fromNodeId, currentNodeId, pending, event);
-
-      // Mark pending as resolved
-      this.pendingRepo.resolve(traceId);
-    } else {
-      // Fix (Bug #5): Baseline outcomes naturally have no preceding pending action —
-      // captureBaseline() fires on every session init with traceId: 'baseline-<uuid>'.
-      // Logging a warning for these polluted logs and obscured real orphan problems.
-      // Silently return for baseline, warn only for genuinely unexpected orphans.
-      if (traceId.startsWith('baseline-')) {
-        return;
-      }
-      this.logger.log('OutcomeHandler', 'warn', 'Orphaned OUTCOME event — No pending action found', { traceId });
-    }
+  private async logWithContext(
+    level: 'debug' | 'info' | 'warn' | 'error' | 'decision',
+    message: string,
+    data: Record<string, unknown> = {},
+    sessionId: string | null = null,
+    traceId: string | null = null
+  ): Promise<void> {
+    const resolvedSessionId = sessionId ?? null;
+    const resolvedTraceId = traceId ?? null;
+    await this.logger.log(
+      'OutcomeHandler',
+      level,
+      message,
+      {
+        ...data,
+        sessionId: resolvedSessionId,
+        traceId: resolvedTraceId,
+      },
+      resolvedSessionId,
+      resolvedTraceId
+    );
   }
 
-  public createExplicitEdge(fromNodeId: string, toNodeId: string, pendingAction: PendingAction, outcomeEvent: OutcomeEvent): void {
-    // ── outcomeType determination — three-tier priority chain ────────────────
-    //
-    // Tier 1: Trust the interceptor's explicit settleType signal first.
-    //   checkPendingOutcome() and _monitorSPARoutes() both set settleType='navigation'
-    //   only when they are certain a real navigation occurred. This is the most
-    //   reliable signal and must take priority over URL comparison.
-    //
-    // Tier 2: If no explicit signal, compare normalised URLs from the trigger event.
-    //   normalizeUrl strips hash/query/trailing-slash so minor URL differences
-    //   (analytics params, hash anchors) don't produce false navigation detections.
-    //
-    // Tier 3: If trigger event missing AND no explicit signal, default to state_refresh.
-    //   This is the safe fallback — avoids false 'navigation' labels on SPA modals
-    //   or drawers where nodes differ but URL did not change. A false navigation label
-    //   would cause the Playwright code generator to emit waitForURL() that never fires.
-    //
-    let outcomeType: OutcomeType = 'state_refresh';
+  public async handleOutcome(event: OutcomeEvent, traceId: string, currentNodeId: string, tabId: string): Promise<void> {
+    const sessionId = event.sessionId ?? null;
+    if (!sessionId) {
+      await this.logWithContext('warn', 'Orphaned OUTCOME event - missing session for scoped lookup', {
+        tabId,
+      }, null, traceId ?? null);
+      return;
+    }
 
-    // Fetch the original trigger event for URL comparison (Tier 2)
-    const triggerEventRow = this.eventRepo.findById(pendingAction.triggerEventId);
+    await this.logWithContext('debug', 'PENDING_ACTION_EXACT_SCOPED_LOOKUP', {
+      tabId,
+      lookupScope: 'session_tab_trace',
+    }, sessionId, traceId ?? null);
+
+    const pending = await this.pendingRepo.findByTraceSessionAndTab(traceId, sessionId, tabId);
+
+    if (pending) {
+      await this.logWithContext('decision', 'Found PENDING ACTION for outcome', {
+        fromNode: pending.fromNodeId,
+        toNode: currentNodeId,
+        tabId,
+      }, pending.sessionId ?? event.sessionId ?? null, traceId ?? null);
+
+      await this.createExplicitEdge(pending.fromNodeId, currentNodeId, pending, event);
+      const resolvedCount = await this.pendingRepo.resolve(traceId, sessionId, tabId);
+      await this.logWithContext('debug', 'PENDING_ACTION_SCOPED_RESOLVED', {
+        tabId,
+        resolvedCount,
+        resolveScope: 'session_tab_trace',
+      }, sessionId, traceId ?? null);
+      return;
+    }
+
+    await this.logWithContext('debug', 'PENDING_ACTION_EXACT_SCOPE_MISS', {
+      tabId,
+      reason: 'no_pending_action_for_trace_session_and_tab',
+      lookupScope: 'session_tab_trace',
+    }, sessionId, traceId ?? null);
+
+    const crossTabRecovered = await this.tryResolveExplicitCrossTabRecovery(event, traceId, currentNodeId, tabId);
+    if (crossTabRecovered) {
+      return;
+    }
+
+    const recovered = await this.tryRecoverPendingForCrossContextOutcome(event, traceId, currentNodeId, tabId);
+    if (recovered) {
+      return;
+    }
+
+    // Baseline outcomes naturally may have no pending action.
+    if (traceId.startsWith(BASELINE_TRACE_PREFIX)) {
+      return;
+    }
+
+    await this.logWithContext('warn', 'Orphaned OUTCOME event - no pending action found', {}, event.sessionId ?? null, traceId ?? null);
+  }
+
+  private getOutcomeUrl(event: OutcomeEvent): string | null {
+    return event.normalizedUrl || event.meta?.urlAfter || event.pageUrl || null;
+  }
+
+  private isExplicitNavigationOutcome(event: OutcomeEvent): boolean {
+    const settleType = event.meta?.settleType;
+    return typeof settleType === 'string' && settleType.toLowerCase() === 'navigation';
+  }
+
+  private isExplicitCrossTabRecovery(event: OutcomeEvent): boolean {
+    return event.meta?.isCrossTabRecovery === true;
+  }
+
+  private doesCrossTabTargetUrlMatch(event: OutcomeEvent): boolean {
+    const targetNormalizedUrl = typeof event.meta?.crossTabTargetNormalizedUrl === 'string'
+      ? event.meta.crossTabTargetNormalizedUrl
+      : null;
+    if (!targetNormalizedUrl) {
+      return false;
+    }
+
+    const outcomeUrl = this.getOutcomeUrl(event);
+    const normalizedOutcomeUrl = outcomeUrl ? normalizeUrl(outcomeUrl) : null;
+    return normalizedOutcomeUrl === targetNormalizedUrl;
+  }
+
+  private async tryResolveExplicitCrossTabRecovery(
+    event: OutcomeEvent,
+    traceId: string,
+    currentNodeId: string,
+    tabId: string
+  ): Promise<boolean> {
+    const sessionId = event.sessionId ?? null;
+    if (!sessionId || !this.isExplicitCrossTabRecovery(event)) {
+      return false;
+    }
+
+    if (!this.doesCrossTabTargetUrlMatch(event)) {
+      await this.logWithContext('warn', 'Skipped explicit cross-tab recovery due to target URL mismatch', {
+        tabId,
+        crossTabTargetNormalizedUrl: event.meta?.crossTabTargetNormalizedUrl ?? null,
+        normalizedOutcomeUrl: this.getOutcomeUrl(event),
+      }, sessionId, traceId ?? null);
+      return false;
+    }
+
+    const pending = await this.pendingRepo.findByTraceAndSessionAnyTab(traceId, sessionId);
+    if (!pending) {
+      await this.logWithContext('debug', 'Explicit cross-tab recovery found no pending action', {
+        tabId,
+        lookupScope: 'session_any_tab_trace',
+      }, sessionId, traceId ?? null);
+      return false;
+    }
+
+    await this.logWithContext('decision', 'PENDING_ACTION_CROSS_TAB_RECOVERED', {
+      fromNode: pending.fromNodeId,
+      toNode: currentNodeId,
+      sourceTabId: pending.tabId ?? 'tab-legacy',
+      destinationTabId: tabId,
+      traceId,
+      crossTabTargetNormalizedUrl: event.meta?.crossTabTargetNormalizedUrl ?? null,
+      crossTabSourceNormalizedUrl: event.meta?.crossTabSourceNormalizedUrl ?? null,
+    }, sessionId, traceId ?? null);
+
+    await this.createExplicitEdge(pending.fromNodeId, currentNodeId, pending, event);
+    const resolveTabId = pending.tabId ?? 'tab-legacy';
+    const resolvedCount = await this.pendingRepo.resolve(traceId, sessionId, resolveTabId);
+    await this.logWithContext('debug', 'PENDING_ACTION_SCOPED_RESOLVED', {
+      tabId: resolveTabId,
+      resolvedCount,
+      resolveScope: 'session_source_tab_trace',
+      destinationTabId: tabId,
+    }, sessionId, traceId ?? null);
+    return true;
+  }
+
+  private async tryRecoverPendingForCrossContextOutcome(
+    event: OutcomeEvent,
+    traceId: string,
+    currentNodeId: string,
+    tabId: string
+  ): Promise<boolean> {
+    const sessionId = event.sessionId ?? null;
+    if (!sessionId) return false;
+
+    const eventTimestamp = Number.isFinite(event.timestamp) ? event.timestamp : Date.now();
+    const createdAfterMs = eventTimestamp - FALLBACK_PENDING_LOOKBACK_MS;
+    const recentPending = await this.pendingRepo.findRecentPendingForSessionAndTab(
+      sessionId,
+      tabId,
+      createdAfterMs,
+      FALLBACK_PENDING_MAX_CANDIDATES
+    );
+
+    if (recentPending.length === 0) {
+      return false;
+    }
+
+    if (recentPending.length > 1) {
+      await this.logWithContext('warn', 'Skipped fallback pending recovery due to ambiguity', {
+        candidates: recentPending.map(candidate => candidate.traceId),
+        tabId,
+      }, sessionId, traceId ?? null);
+      return false;
+    }
+
+    const candidate = recentPending[0];
+    const triggerEventRow = await this.eventRepo.findById(candidate.triggerEventId);
+    const triggerUrl = triggerEventRow?.page_url || null;
+    const outcomeUrl = this.getOutcomeUrl(event);
+    const normalizedTriggerUrl = triggerUrl ? normalizeUrl(triggerUrl) : null;
+    const normalizedOutcomeUrl = outcomeUrl ? normalizeUrl(outcomeUrl) : null;
+    const explicitNavigation = this.isExplicitNavigationOutcome(event);
+    const urlChanged = !!(
+      normalizedTriggerUrl &&
+      normalizedOutcomeUrl &&
+      normalizedTriggerUrl !== normalizedOutcomeUrl
+    );
+
+    if (!explicitNavigation && !urlChanged) {
+      await this.logWithContext('debug', 'Skipped fallback pending recovery - not a cross-context outcome', {
+        candidateTraceId: candidate.traceId,
+        normalizedTriggerUrl,
+        normalizedOutcomeUrl,
+        tabId,
+      }, sessionId, traceId ?? null);
+      return false;
+    }
+
+    await this.logWithContext('decision', 'PENDING_ACTION_TAB_SCOPED_RECOVERED', {
+      fallbackTraceId: candidate.traceId,
+      fromNode: candidate.fromNodeId,
+      toNode: currentNodeId,
+      normalizedTriggerUrl,
+      normalizedOutcomeUrl,
+      explicitNavigation,
+      urlChanged,
+      tabId,
+    }, sessionId, traceId ?? null);
+
+    await this.createExplicitEdge(candidate.fromNodeId, currentNodeId, candidate, event);
+    const resolvedCount = await this.pendingRepo.resolve(candidate.traceId, sessionId, tabId);
+    await this.logWithContext('debug', 'PENDING_ACTION_SCOPED_RESOLVED', {
+      tabId,
+      resolvedCount,
+      resolveScope: 'session_tab_trace',
+      fallbackTraceId: candidate.traceId,
+    }, sessionId, traceId ?? null);
+    return true;
+  }
+
+  public async createExplicitEdge(
+    fromNodeId: string,
+    toNodeId: string,
+    pendingAction: PendingAction,
+    outcomeEvent: OutcomeEvent
+  ): Promise<void> {
+    let outcomeType: OutcomeType = 'state_refresh';
+    let outcomeReason = 'state refresh (URL unchanged while node changed)';
+
+    const triggerEventRow = await this.eventRepo.findById(pendingAction.triggerEventId);
+    const triggerUrl = triggerEventRow?.page_url || null;
+    const outcomeUrl = outcomeEvent.normalizedUrl || outcomeEvent.meta?.urlAfter || outcomeEvent.pageUrl || null;
+    const normalizedTriggerUrl = triggerUrl ? normalizeUrl(triggerUrl) : null;
+    const normalizedOutcomeUrl = outcomeUrl ? normalizeUrl(outcomeUrl) : null;
 
     if (outcomeEvent.meta?.settleType === 'navigation') {
-      // Tier 1: Explicit navigation signal from interceptor — trust it unconditionally
+      // Tier 1: explicit signal from interceptor.
       outcomeType = 'navigation';
+      outcomeReason = 'explicit navigation settleType from interceptor';
     } else if (triggerEventRow) {
-      // Tier 2: Calculate from normalised URL comparison
-      const normalizedTriggerUrl = normalizeUrl(triggerEventRow.page_url);
-      const normalizedOutcomeUrl = normalizeUrl(outcomeEvent.meta?.urlAfter);
-
+      // Tier 2: normalized URL comparison.
       if (normalizedOutcomeUrl && normalizedTriggerUrl !== normalizedOutcomeUrl) {
         outcomeType = 'navigation';
+        outcomeReason = 'normalized URL changed between trigger and outcome';
       } else if (fromNodeId === toNodeId) {
         outcomeType = 'no_change';
+        outcomeReason = 'resolved to same node and same URL';
       }
-      // else: URLs match, nodes differ (modal/drawer/SPA state change) → state_refresh
     } else {
-      // Tier 3: No trigger event AND no explicit signal — safe default
-      this.logger.log('OutcomeHandler', 'warn',
-        'Trigger event missing and no explicit settleType — defaulting to state_refresh to prevent false Playwright navigation waits',
-        { traceId: pendingAction.traceId }
+      // Tier 3: conservative fallback.
+      outcomeReason = 'trigger event missing; defaulting to state_refresh';
+      await this.logWithContext(
+        'warn',
+        'Trigger event missing and no explicit settleType - defaulting to state_refresh',
+        {},
+        pendingAction.sessionId ?? outcomeEvent.sessionId ?? null,
+        pendingAction.traceId ?? null
       );
     }
 
-    // This guarantees fpHash is a strict string, never null
     const fpHash = pendingAction.fingerprintHash || 'unknown';
-
-    // Check existing explicit edge
-    const existingEdge = this.edgeRepo.findByFingerprint(fromNodeId, toNodeId, fpHash);
+    const existingEdge = await this.edgeRepo.findByFingerprint(fromNodeId, toNodeId, fpHash);
 
     if (existingEdge) {
-      // Stamp the resolved outcomeType — does NOT touch sample_size or decayed_count
-      this.edgeRepo.resolveOutcome(existingEdge.id, outcomeType);
-      this.logger.log('OutcomeHandler', 'decision', 'Resolved existing edge outcome', { edgeId: existingEdge.id, fpHash });
+      await this.edgeRepo.resolveOutcome(existingEdge.id, outcomeType);
+      await this.logWithContext('decision', `Resolved existing edge outcome: ${outcomeType} - ${outcomeReason}`, {
+        edgeId: existingEdge.id,
+        fpHash,
+        from: fromNodeId,
+        to: toNodeId,
+        normalizedTriggerUrl,
+        normalizedOutcomeUrl,
+      }, pendingAction.sessionId ?? outcomeEvent.sessionId ?? null, pendingAction.traceId ?? null);
       return;
     }
 
     const edgeId = crypto.randomUUID();
     try {
-      this.edgeRepo.insert({
+      await this.edgeRepo.insert({
         id: edgeId,
         fromNodeId,
         toNodeId,
         triggerEventId: pendingAction.triggerEventId,
         fingerprintHash: fpHash,
         outcomeType,
-        lastUpdated: Date.now()
+        lastUpdated: Date.now(),
       });
 
       const outcomeId = crypto.randomUUID();
-      this.outcomeRepo.insert(outcomeId, edgeId, toNodeId, Date.now());
+      await this.outcomeRepo.insert(outcomeId, edgeId, toNodeId, Date.now());
 
-      // FIX (Bug #10c — OutcomeHandler path): Do NOT call updateProbability() here.
-      // insert() already sets decayed_count = 1.0 and probability = 1.0 for a brand-new
-      // edge. Calling updateProbability() immediately after increments decayed_count to
-      // 2.0 before any real second observation has occurred. This corrupts the Laplace
-      // smoothing denominator for the entire lifetime of the edge:
-      //   - On re-observation (K=1): looks like 3 total observations instead of 2
-      //   - On multi-outcome edges (K>1): inflates the denominator, skewing all path
-      //     probabilities upward — the AI sees falsely high confidence on navigation steps.
-      // updateProbability() is reserved for genuine re-observations on the existing-edge
-      // path in ActionHandler.createEdge(), which is the only correct call site.
-      this.logger.log('OutcomeHandler', 'decision', 'Created new EXPLICIT edge', { edgeId, outcomeType, fpHash, from: fromNodeId, to: toNodeId });
+      await this.logWithContext('decision', `Edge created: ${outcomeType} - ${outcomeReason}`, {
+        edgeId,
+        fpHash,
+        from: fromNodeId,
+        to: toNodeId,
+        normalizedTriggerUrl,
+        normalizedOutcomeUrl,
+      }, pendingAction.sessionId ?? outcomeEvent.sessionId ?? null, pendingAction.traceId ?? null);
     } catch (e) {
-      this.logger.log('OutcomeHandler', 'error', 'Failed to create explicit edge', { error: (e as Error).message });
+      await this.logWithContext('error', 'Failed to create explicit edge', { error: (e as Error).message }, pendingAction.sessionId ?? outcomeEvent.sessionId ?? null, pendingAction.traceId ?? null);
+      throw e;
     }
   }
 
-  public updateOutcomeProbability(edgeId: string, targetNodeId: string): void {
-    this.outcomeRepo.updateProbability(edgeId, targetNodeId);
+  public async updateOutcomeProbability(edgeId: string, targetNodeId: string): Promise<void> {
+    await this.outcomeRepo.updateProbability(edgeId, targetNodeId);
   }
 }

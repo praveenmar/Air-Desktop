@@ -1,0 +1,46 @@
+{
+  "name": "air-mcp-server",
+  "version": "0.1.0",
+  "description": "AIR MCP Server",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "license": "MIT",
+  "keywords": [
+    "air",
+    "mcp",
+    "test-automation",
+    "playwright",
+    "recording"
+  ],
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "bin": {
+    "air-mcp-server": "./bin/air-mcp.js",
+    "air-mcp": "./bin/air-mcp.js",
+    "air-mcp-http": "./bin/air-mcp-http.js"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --watch",
+    "start": "node dist/index.js",
+    "start:http": "node dist/http.js",
+    "start:dev:stdio": "tsx src/index.ts",
+    "start:dev:http": "tsx src/http.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.1",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@air/codegen": "0.1.0",
+    "@air/core": "*",
+    "@air/shared": "0.1.0",
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "5.6.3"
+  }
+}

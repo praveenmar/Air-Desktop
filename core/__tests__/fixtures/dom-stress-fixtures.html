@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AIR AST Stress Fixtures</title>
+</head>
+<body>
+
+<div id="category-happy">
+    <button data-testid="login-submit">Login</button>
+    
+    <label for="username-input">Username</label>
+    <input type="text" id="username-input" />
+    
+    <label>
+        Subscribe to newsletter
+        <input type="checkbox" id="subscribe-chk" />
+    </label>
+</div>
+
+
+<div id="category-volatile">
+    <button id="btn-cart">Checkout (4 items) - $142.99</button>
+    
+    <div role="status" id="status-update">Last synced at 14:32:05 GMT</div>
+    
+    <a href="/tos" id="link-long">
+        By clicking this link you agree to the exhaustive terms and conditions 
+        which dictate that you surrender all rights to complain about the DOM.
+    </a>
+</div>
+
+
+<div id="category-a11y-nightmares">
+    <span id="txt-delete">Delete</span>
+    <span id="txt-user" style="display:none;">John Doe</span>
+    <button id="btn-complex-aria" aria-labelledby="txt-delete txt-user"></button>
+
+    <button id="btn-empty-aria" aria-label="   "></button>
+
+    <div role="button" tabindex="0" id="div-btn">Save Changes</div>
+
+    <input type="search" placeholder="Search products..." id="input-placeholder-only" />
+
+    <label for="does-not-exist">Phantom Label</label>
+    <input type="text" id="input-orphan" aria-label="Fallback Label" />
+</div>
+
+
+<div id="category-duplicates">
+    <ul id="product-list">
+        <li>Laptop <button class="buy-btn">Buy</button></li>
+        <li>Mouse <button class="buy-btn">Buy</button></li>
+        <li>Keyboard <button class="buy-btn">Buy</button></li>
+    </ul>
+</div>
+
+
+<div id="category-garbage">
+    <div id="garbage-div" class="flex items-center justify-center bg-blue-500 p-4 rounded-md shadow-lg hover:bg-blue-600 transition-all cursor-pointer" onclick="submit()">
+        <span class="icon-arrow-right"></span>
+    </div>
+
+    <input type="hidden" name="csrf-token" value="123456" id="hidden-input" />
+
+    <button id="btn-wrapper">
+        <span class="text-bold" id="inner-span">Click</span>
+    </button>
+</div>
+
+</body>
+</html>

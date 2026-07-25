@@ -1,0 +1,25 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "bundler",   // Modern, non-deprecated, and matches esbuild behavior
+    "target": "ES2022",
+    "outDir": "dist",
+    "noEmit": false,
+    "allowImportingTsExtensions": false,
+    
+    // encompass the entire scope of the project and its dependencies
+    "rootDir": "../..",              
+    
+    "paths": {
+      "@air/core": ["../../core/src/index"],
+      "@air/core/*": ["../../core/src/*"]
+    }
+  },
+  "include": [
+    "src", 
+    "launcher-server.ts",
+    "../../core/src"                 // Explicitly include the brain's source
+  ],
+  "exclude": ["node_modules", "dist"]
+}

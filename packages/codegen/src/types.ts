@@ -16,6 +16,12 @@
  *     enabling the future self-healing loop without schema changes
  */
 
+import { z } from 'zod';
+import { SelectorResolutionSchema } from './runtime-schemas';
+
+export type SelectorResolutionV1 = z.infer<typeof SelectorResolutionSchema>;
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // STEP — one user interaction in the recorded flow
 // ─────────────────────────────────────────────────────────────────────────────
@@ -24,7 +30,9 @@ export type ActionType =
   | 'click'
   | 'input'
   | 'submit'
+  | 'custom-control-open'
   | 'custom-select'
+  | 'custom-menu-select'
   | 'hover'
   | 'scroll'
   | 'navigate';
@@ -43,11 +51,717 @@ export type SelectorPriority =
   | 'path'
   | 'text'
   | 'xpath'
+  | 'other'
+  | 'chained'
   | 'unknown';
+
+export type SelectorEngine =
+  | 'css'
+  | 'xpath'
+  | 'text'
+  | 'testid'
+  | 'role'
+  | 'label'
+  | 'scoped'
+  | 'label-context'
+  | 'trigger-context'
+  | 'bounded-field'
+  | 'placeholder'
+  | 'playwright';
+
+export type SelectorSource =
+  | 'interceptor'
+  | 'resolver'
+  | 'llm'
+  | 'manual'
+  | 'codegen'
+  | 'smoke-repair';
+
+export type SelectorProofLevel =
+  | 'recorded'
+  | 'snapshot_validated'
+  | 'semantic_validated'
+  | 'live_smoke_validated'
+  | 'proven_equivalent'
+  | 'inferred_unproven'
+  | 'weak_but_usable'
+  | 'blocked'
+  | 'unvalidated';
+
+export type LabelContextRenderStatus =
+  | 'clean-direct-selector'
+  | 'clean-scoped-locator'
+  | 'proven-structural-fallback'
+  | 'proof-only-no-clean-render'
+  | 'blocked-unsafe-render';
+
+export interface LabelContextSelectorSpec {
+  source: 'snapshot-label-context';
+  labelText: string;
+  targetTag: 'input' | 'textarea' | 'select';
+  association: 'label-for' | 'wrapped-label' | 'aria-labelledby' | 'bounded-field';
+  targetId?: string;
+  ariaLabelledBy?: string;
+  containerSelector?: string;
+  boundedContainerSummary?: string;
+  snapshotSource?: ResolverSnapshotSource | null;
+  labelStructureEvidenceReason?: string | null;
+  recoveredFromSelector?: string;
+  renderStatus?: LabelContextRenderStatus;
+  renderReason?: string | null;
+  cleanParentSelector?: string;
+  cleanChildSelector?: string;
+  structuralFallbackLocator?: string;
+  warningCodes?: string[];
+}
+
+export interface TriggerContextSelectorSpec {
+  source: 'snapshot-trigger-context';
+  labelText: string;
+  controlFamily?: string;
+  association: 'bounded-field';
+  triggerSelector: string;
+  containerSelector?: string;
+  labelElementTag?: string;
+  boundedContainerSummary?: string;
+  snapshotSource?: ResolverSnapshotSource | null;
+  recoveredFromSelector?: string;
+  renderStatus?: LabelContextRenderStatus;
+  renderReason?: string | null;
+  cleanParentSelector?: string;
+  cleanChildSelector?: string;
+  structuralFallbackLocator?: string;
+  warningCodes?: string[];
+}
+
+export type BoundedFieldControlKind =
+  | 'input'
+  | 'textarea'
+  | 'select'
+  | 'custom-trigger'
+  | 'combobox'
+  | 'searchbox'
+  | 'contenteditable'
+  | 'unknown';
+
+export type BoundedFieldRelation =
+  | 'label-for'
+  | 'wrapped-label'
+  | 'aria-labelledby'
+  | 'sibling-label'
+  | 'bounded-container';
+
+export interface BoundedFieldSelectorSpec {
+  source: 'snapshot-bounded-field' | 'recorded-bounded-field' | 'live-dom-repair';
+  labelText: string;
+  target: SelectorSpec;
+  controlKind: BoundedFieldControlKind;
+  relation: BoundedFieldRelation;
+  originalSelector?: string;
+  containerSelector?: string;
+  labelElementTag?: string;
+  boundedContainerSummary?: string;
+  snapshotSource?: ResolverSnapshotSource | null;
+  renderStatus?: LabelContextRenderStatus;
+  renderReason?: string | null;
+  cleanParentSelector?: string;
+  cleanChildSelector?: string;
+  structuralFallbackLocator?: string;
+  warningCodes?: string[];
+  rejectReason?: string | null;
+  visibleControlCountInContainer?: number | null;
+  targetIndexWithinContainer?: number | null;
+  competingControlCount?: number | null;
+  duplicateLabelCount?: number | null;
+  recordedValidity?: boolean;
+  recordedBlockedReason?: string | null;
+}
+
+export type FlatSelectorEngine =
+  | 'css'
+  | 'xpath'
+  | 'text'
+  | 'testid'
+  | 'role'
+  | 'label'
+  | 'placeholder'
+  | 'playwright'
+  | 'label-context'
+  | 'trigger-context';
+
+export type ScopedSelectorRelation =
+  | 'parent-child'
+  | 'bounded-field'
+  | 'component-boundary';
+
+interface SelectorSpecBase {
+  selector: string;
+  source: SelectorSource;
+  proofLevel: SelectorProofLevel;
+  rank?: number;
+  confidence?: number;
+  rejectReason?: string;
+  warningCodes?: string[];
+}
+
+export interface FlatSelectorSpec extends SelectorSpecBase {
+  engine: FlatSelectorEngine;
+  labelContext?: LabelContextSelectorSpec;
+  triggerContext?: TriggerContextSelectorSpec;
+}
+
+export interface ScopedSelectorSpec extends SelectorSpecBase {
+  engine: 'scoped';
+  scope: SelectorSpec;
+  target: SelectorSpec;
+  relation?: ScopedSelectorRelation;
+}
+
+export interface BoundedFieldStructuredSelectorSpec extends SelectorSpecBase {
+  engine: 'bounded-field';
+  boundedField: BoundedFieldSelectorSpec;
+}
+
+export type PlaywrightLocatorKind =
+  | 'locator'
+  | 'getByRole'
+  | 'getByLabel'
+  | 'getByPlaceholder'
+  | 'getByText'
+  | 'getByTestId';
+
+export interface RegexLiteralSpec {
+  source: string;
+  flags?: string;
+}
+
+export interface PlaywrightLocatorOptions {
+  name?: string | RegexLiteralSpec;
+  exact?: boolean;
+  hasText?: string | RegexLiteralSpec;
+}
+
+export interface PlaywrightLocatorNode {
+  kind: PlaywrightLocatorKind;
+
+  /**
+   * For:
+   * - locator: CSS/XPath/text selector string
+   * - getByRole: role name
+   * - getByLabel: label text
+   * - getByPlaceholder: placeholder text
+   * - getByText: visible text
+   * - getByTestId: test id value
+   */
+  value: string;
+
+  options?: PlaywrightLocatorOptions;
+
+  /**
+   * Optional metadata for audit only.
+   * Do not use for compiler behavior unless explicitly needed.
+   */
+  proofSource?: string;
+  warningCodes?: string[];
+}
+
+export interface PlaywrightLocatorSpec extends SelectorSpecBase {
+  engine: 'playwright-locator';
+  chain: PlaywrightLocatorNode[];
+  debugSelector?: string;
+  warnings?: string[];
+}
+
+export interface PlaywrightNativeCandidate {
+  spec: PlaywrightLocatorSpec;
+  reason: string;
+  sourceEvidence: 'accessibilityEvidence' | 'attributes' | 'context';
+  proofLevel: 'unvalidated';
+  warningCodes: string[];
+}
+
+export interface EvaluatedPlaywrightNativeCandidate {
+  candidate: PlaywrightNativeCandidate;
+  status: 'valid' | 'blocked' | 'approximate';
+  matchCount: number;
+  visibleMatchCount: number;
+  isUnique: boolean;
+  isAmbiguous: boolean;
+  isGloballyAmbiguous: boolean;
+  rejectReason?: string;
+  warningCodes: string[];
+  validationSource: 'snapshot-approximation';
+}
+
+export interface PlaywrightNativeCandidateReportEntry {
+  locator: string;
+  engine: 'playwright-locator';
+  status: 'valid' | 'blocked' | 'approximate';
+  proofLevel: 'unvalidated';
+  validationSource: 'snapshot-approximation';
+  reason: string;
+  sourceEvidence: 'accessibilityEvidence' | 'attributes' | 'context';
+  matchCount: number;
+  visibleMatchCount: number;
+  isUnique: boolean;
+  isAmbiguous: boolean;
+  isGloballyAmbiguous: boolean;
+  warningCodes: string[];
+  rejectReason?: string;
+}
+
+export type SelectorSpec = 
+  | FlatSelectorSpec 
+  | ScopedSelectorSpec 
+  | BoundedFieldStructuredSelectorSpec;
+
+export type SelectorCategory =
+  | 'testid'
+  | 'data-cy'
+  | 'data-qa'
+  | 'id'
+  | 'name'
+  | 'href'
+  | 'placeholder'
+  | 'aria-label'
+  | 'role-attr'
+  | 'text'
+  | 'bounded-field'
+  | 'label-context'
+  | 'class'
+  | 'semantic-css'
+  | 'parent-scoped'
+  | 'structural'
+  | 'xpath'
+  | 'llm'
+  | 'unknown';
+
+export type SelectorProofSource =
+  | 'snapshot'
+  | 'fingerprint'
+  | 'semantic'
+  | 'llm-validator'
+  | 'recorded'
+  | 'smoke'
+  | 'none';
+
+export type EquivalentRenderingEngine =
+  | 'testid'
+  | 'placeholder'
+  | 'text'
+  | 'role'
+  | 'label'
+  | 'playwright';
+
+export type EquivalentRenderingProofLevel =
+  | 'proven_equivalent'
+  | 'live_smoke_validated'
+  | 'recorded';
+
+export type EquivalentRenderingProofSource =
+  | 'attribute-equivalence'
+  | 'text-equivalence'
+  | 'accessibility-recorded'
+  | 'smoke'
+  | 'manual';
+
+export interface EquivalentRendering {
+  engine: EquivalentRenderingEngine;
+  locator: string;
+  proofLevel: EquivalentRenderingProofLevel;
+  proofSource: EquivalentRenderingProofSource;
+  sourceSelector: string;
+  sourceEngine: SelectorEngine;
+  warningCodes?: string[];
+}
+
+export interface SelectorEvaluation {
+  selectorSpec: SelectorSpec;
+  category: SelectorCategory;
+  validation: {
+    valid: boolean;
+    matchCount?: number;
+    visibleMatchCount?: number;
+    uniqueVisible?: boolean;
+    invalidReason?: string;
+  };
+  proof: {
+    proofLevel: SelectorProofLevel;
+    proofSource: SelectorProofSource;
+    snapshotTargetEvidence?: boolean;
+  };
+  scoring: {
+    proofScore: number;
+    stabilityScore: number;
+    semanticScore: number;
+    brittlenessPenalty: number;
+    entropyPenalty: number;
+    finalScore: number;
+  };
+  reasons: string[];
+  warningCodes: string[];
+  rejectReason?: string;
+  preferredRenderings?: EquivalentRendering[];
+}
+
+export type ResolverResolvedBy =
+  | 'kept-original'
+  | 'deterministic-override'
+  | 'blocked-semantic-mismatch'
+  | 'blocked-snapshot-target-missing'
+  | 'blocked-unsafe-override'
+  | 'llm-accepted'
+  | 'unresolved';
+
+export interface RejectedCandidateTrace {
+  selector: string;
+  reason: string;
+}
+
+export type ShadowEvaluationStatus =
+  | 'computed'
+  | 'skipped-no-candidates'
+  | 'skipped-no-snapshot'
+  | 'failed';
+
+export interface ShadowEvaluationWinner {
+  selector: string;
+  source: string;
+  engine?: FlatSelectorEngine | 'bounded-field';
+  rank: number;
+  score: number;
+  family?: string;
+  strength?: string;
+  matchCount?: number | null;
+  visibleMatchCount?: number | null;
+  sameTargetEvidence?: boolean;
+  warningCodes?: string[];
+}
+
+export interface ShadowEvaluationReport {
+  status: ShadowEvaluationStatus;
+  candidateCount: number;
+  convertedCandidateCount: number;
+  uniqueCandidateCount: number;
+  semanticallySafeCandidateCount: number;
+  winner?: ShadowEvaluationWinner;
+  rejectedCandidates?: RejectedCandidateTrace[];
+  skippedReason?: string | null;
+  failureReason?: string | null;
+}
+
+export interface CapturedCandidatePromotionDecision {
+  attempted: boolean;
+  promoted: boolean;
+  previousSelector: string;
+  selectedSelector?: string | null;
+  selectedFamily?: CapturedSelectorCandidateFamily | null;
+  reason?: string | null;
+  blockedReason?: string | null;
+}
+
+export type LlmResponseFormat =
+  | 'legacy-selector'
+  | 'legacy-selectors'
+  | 'candidates-v2';
+
+export interface LlmRejectedCandidateTrace {
+  selector: string;
+  rejectReason: string;
+}
+
+export type TemporalClass =
+  | 'pre_action'
+  | 'action_local'
+  | 'post_action'
+  | 'outcome_state'
+  | 'unknown';
+
+export type ResolverSnapshotSource =
+  | 'event-local-pageState'
+  | 'event-local-pageSnapshot'
+  | 'source-node-snapshot'
+  | 'interaction-context-exact'
+  | 'interaction-context-stable-by-url'
+  | 'interaction-context-any-by-url'
+  | 'outcome-event-snapshot'
+  | 'destination-node-snapshot'
+  | 'url-event-fallback'
+  | 'latest'
+  | 'latest-stable'
+  | 'unavailable';
+
+export interface NestedContextData {
+  isShadowDom?: boolean;
+  shadowHostTag?: string | null;
+  isIframe?: boolean;
+  iframeSrc?: string | null;
+  iframeName?: string | null;
+  iframeSameOrigin?: boolean | null;
+  degraded?: boolean;
+  degradedReason?: string | null;
+}
+
+export interface SnapshotSelectionProvenance {
+  source: ResolverSnapshotSource;
+  temporalClass: TemporalClass;
+  reason: string;
+  eventId?: string;
+  sourceNodeId?: string;
+  timestamp?: number;
+  confidenceScore?: number;
+  snapshotTargetEvidence?: boolean;
+  snapshotTargetEvidenceReason?: string | null;
+  labelStructureEvidence?: boolean;
+  labelStructureEvidenceReason?: string | null;
+  labelContextSnapshotSource?: ResolverSnapshotSource | null;
+  labelContextBlockedReason?: string | null;
+}
+
+export interface SnapshotCandidateTraceEntry {
+  source: ResolverSnapshotSource;
+  temporalClass: TemporalClass;
+  selected: boolean;
+  reason?: string;
+  skipReason?: string;
+  eventId?: string;
+  sourceNodeId?: string;
+  timestamp?: number;
+  confidenceScore?: number;
+  targetPresent?: boolean;
+  snapshotTargetEvidenceReason?: string | null;
+  shadowDegraded?: boolean;
+  labelStructureEvidence?: boolean;
+  labelStructureEvidenceReason?: string | null;
+}
+
+export interface ResolverMetadata {
+  resolvedSelector: string;
+  resolvedBy: ResolverResolvedBy;
+  bestScore: number;
+  effectiveMatchCount: number;
+  matchCount?: number;
+  confidenceScore?: number;
+  ambiguityReason?: string | null;
+  snapshotSource: ResolverSnapshotSource;
+  validationMethod: string;
+  llmAttempted: boolean;
+  llmAccepted: boolean;
+  llmAlternative: string | null;
+  llmCandidatesReturned?: string[];
+  llmCandidatesTried?: string[];
+  llmAcceptedRank?: number | null;
+  llmRejectedCandidates?: LlmRejectedCandidateTrace[];
+  llmResponseFormat?: LlmResponseFormat;
+  llmRetryTriggered?: boolean;
+  llmRetrySelector?: string | null;
+  llmRetryRejectReason?: string | null;
+  llmRetryAccepted?: boolean;
+  llmRetryTimeoutMs?: number;
+  llmRetryStatus?:
+    | 'not-eligible'
+    | 'triggered'
+    | 'accepted'
+    | 'rejected'
+    | 'skipped-provider-error'
+    | 'skipped-timeout'
+    | 'skipped-empty-response';
+  rejectReason: string | null;
+  semanticRejectReason?: string | null;
+  rejectedCandidates?: RejectedCandidateTrace[];
+  semanticCompatibilityScore?: number;
+  semanticCompatibilityReasons?: string[];
+  idEntropyScore?: number;
+  idPenaltyReason?: string[];
+  classEntropyScore?: number;
+  classPenaltyReason?: string[];
+  selectorEvaluation?: SelectorEvaluation;
+  preferredRenderings?: EquivalentRendering[];
+  triggerResolvedSelector?: string;
+  triggerResolvedSelectorSpec?: SelectorSpec;
+  triggerContextLabel?: string | null;
+  triggerContextRenderStatus?: LabelContextRenderStatus;
+  triggerContextRenderReason?: string | null;
+  triggerBoundedContainerSummary?: string | null;
+  triggerStructuralFallbackLocator?: string | null;
+  triggerWarningCodes?: string[];
+  warningCodes: string[];
+  resolverVersion: 1;
+  temporalClass?: TemporalClass;
+  selectionReason?: string | null;
+  snapshotSelection?: SnapshotSelectionProvenance;
+  evaluatedCandidates?: SnapshotCandidateTraceEntry[];
+  snapshotTargetEvidence?: boolean;
+  snapshotTargetEvidenceReason?: string | null;
+  shadowEvaluation?: ShadowEvaluationReport;
+  capturedCandidatePromotion?: CapturedCandidatePromotionDecision;
+  excerptBuildTotalMs?: number;
+  pruneMs?: number;
+  redactMs?: number;
+  finalExcerptChars?: number;
+}
+
+export interface FingerprintAttributes {
+  [key: string]: string | undefined;
+  id?: string;
+  name?: string;
+  role?: string;
+  ariaLabel?: string;
+  'aria-label'?: string;
+  placeholder?: string;
+  type?: string;
+  href?: string;
+  title?: string;
+  alt?: string;
+  value?: string;
+  dataTestId?: string;
+  'data-testid'?: string;
+  dataCy?: string;
+  'data-cy'?: string;
+  dataQa?: string;
+  'data-qa'?: string;
+  class?: string;
+  classList?: string;
+}
+
+export interface FingerprintSelectorAmbiguity {
+  originalSelector: string;
+  originalPriority?: string;
+  matchCount: number;
+  visibleMatchCount: number;
+  positionInMatches?: number | null;
+  isUnique: boolean;
+  isAmbiguous: boolean;
+}
+
+export type CapturedSelectorCandidateEngine = 'css' | 'text' | 'xpath';
+
+export type CapturedSelectorCandidateFamily =
+  | 'primary'
+  | 'test-id'
+  | 'id'
+  | 'name'
+  | 'placeholder'
+  | 'aria-label'
+  | 'href'
+  | 'role-attr'
+  | 'text'
+  | 'class'
+  | 'parent-scoped-css'
+  | 'tight-container-css';
+
+export type CapturedSelectorCandidateStrength = 'strong' | 'medium' | 'weak';
+
+export interface CapturedSelectorCandidate {
+  selector: string;
+  engine: CapturedSelectorCandidateEngine;
+  family: CapturedSelectorCandidateFamily;
+  strength: CapturedSelectorCandidateStrength;
+  source: 'capture';
+  isPrimary?: boolean;
+  matchCount?: number | null;
+  visibleMatchCount?: number | null;
+  positionInAllMatches?: number | null;
+  positionInVisibleMatches?: number | null;
+  usesDynamicClass?: boolean;
+  usesIndex?: boolean;
+  warningCodes?: string[];
+}
+
+export interface FingerprintBoundedContainerSelectorCandidate {
+  selector: string;
+  kind: string;
+  isClean?: boolean;
+}
+
+export interface FingerprintBoundedFieldContext {
+  fieldLabelText?: string | null;
+  fieldRelation?: BoundedFieldRelation | null;
+  targetControlKind?: BoundedFieldControlKind | null;
+  visibleControlCountInContainer?: number | null;
+  targetIndexWithinContainer?: number | null;
+  boundedContainerSummary?: string | null;
+  boundedContainerSelectorCandidates?: FingerprintBoundedContainerSelectorCandidate[];
+  cleanParentSelector?: string | null;
+  cleanChildSelector?: string | null;
+  containerSelector?: string | null;
+  competingControlCount?: number | null;
+  duplicateLabelCount?: number | null;
+  isValid?: boolean;
+  blockedReason?: string | null;
+  recordedBlockedReason?: string | null;
+}
+
+export interface AccessibilityEvidence {
+  role?: string | null;
+  accessibleName?: string | null;
+  accessibleNameSource?:
+    | 'aria-label'
+    | 'aria-labelledby'
+    | 'label-for'
+    | 'wrapped-label'
+    | 'button-text'
+    | 'link-text'
+    | 'placeholder'
+    | 'title'
+    | 'role-text'
+    | 'none';
+  labelText?: string | null;
+  labelledByIds?: string[];
+  isNativeLabelAssociation?: boolean;
+}
+
+export type TargetIdentitySource =
+  | 'pageState'
+  | 'pageSnapshot'
+  | 'interactionContext';
+
+export type TargetIdentityStatus =
+  | 'emitted'
+  | 'target-not-element'
+  | 'target-detached'
+  | 'target-not-in-snapshot'
+  | 'shadow-not-serialized'
+  | 'cross-origin-frame'
+  | 'unsupported';
+
+export interface FingerprintData {
+  selector?: string;
+  selectorPriority?: string;
+  selectorRank?: number;
+  tagName?: string;
+  parentSelector?: string | null;
+  textExcerpt?: string | null;
+  context?: {
+    parentTag?: string | null;
+    nearestContainerTag?: string | null;
+  };
+  attributes?: FingerprintAttributes;
+  selectorCandidates?: CapturedSelectorCandidate[];
+  selectorAmbiguity?: FingerprintSelectorAmbiguity;
+  boundedFieldContext?: FingerprintBoundedFieldContext;
+  accessibilityEvidence?: AccessibilityEvidence;
+  attributesHash?: string;
+  targetNodeId?: string;
+  targetIdentitySource?: TargetIdentitySource;
+  targetIdentityStatus?: TargetIdentityStatus;
+}
 
 export interface CodegenStep {
   /** 1-based step index — used as the @air-step breadcrumb in generated code */
   step: number;
+
+  /** Raw AIR event identity for exact event-local snapshot selection. */
+  eventId?: string;
+
+  /** Raw AIR trace identity for provenance and outcome correlation. */
+  traceId?: string;
+
+  /** Original event timestamp used for state-window selection and provenance. */
+  timestamp?: number;
+
+  /** Additive per-step tab identity for state-bounded selection when available. */
+  tabId?: string | null;
 
   /**
    * Semantic intent — the "why" behind this action.
@@ -63,11 +777,57 @@ export interface CodegenStep {
   /** The CSS selector or XPath to target the element */
   selector: string;
 
+  /** Additive first-class selector contract for the originally captured selector. */
+  selectorSpec?: SelectorSpec;
+
+  /**
+   * Node ID of the DOM snapshot before this step executes.
+   * Additive-only field used by D3.5 selector resolution for generation.
+   */
+  sourceNodeId?: string;
+
   /**
    * How the selector was derived — drives selector strategy in generated code.
    * data-testid → getByTestId(), aria-label → getByRole(), etc.
    */
   selectorPriority: SelectorPriority;
+
+  /** Optional selector quality rank (1 = most stable, 10 = most fragile). */
+  selectorRank?: number;
+
+  /** Original captured fingerprint payload for resolver diagnostics and candidate hints. */
+  fingerprint?: FingerprintData;
+
+  /** Optional snapshot-backed target identity for future same-node comparison. */
+  targetNodeId?: string;
+
+  /** Additive nested-context metadata for shadow DOM / iframe handling. */
+  nestedContext?: NestedContextData;
+
+  /** Optional control signature tied to the captured UI state for IC snapshot lookup. */
+  controlSignature?: string;
+
+  /** Additive custom-control family for semantic open/select modeling. */
+  controlFamily?: string;
+
+  /** Additive trigger evidence preserved for compressed custom-control select steps. */
+  triggerSelector?: string;
+  triggerSelectorPriority?: SelectorPriority;
+  triggerFingerprint?: FingerprintData;
+  triggerResolvedSelector?: string;
+  triggerSelectorSpec?: SelectorSpec;
+
+  /** Additive option evidence preserved for compressed custom-control select steps. */
+  optionSelector?: string;
+  optionText?: string;
+  optionValue?: string;
+  optionResolvedSelector?: string;
+  optionSelectorSpec?: SelectorSpec;
+
+  /** Additive provenance for compressed custom-control open+select pairs. */
+  absorbedOpenEventId?: string;
+  absorbedOpenTraceId?: string;
+  compressedFromEvents?: string[];
 
   /**
    * Input value for 'input' and 'custom-select' actions.
@@ -85,6 +845,9 @@ export interface CodegenStep {
    * Used by the code generator to emit waitForURL() assertions.
    */
   navigatesTo?: string;
+
+  /** Destination node used for outcome-state snapshot fallback when available. */
+  destinationNodeId?: string;
 
   /**
    * Assertions to verify AFTER this specific step completes.
@@ -118,6 +881,26 @@ export interface CodegenStep {
    * Enables the code generator to emit page.goto() when URL changes mid-flow.
    */
   pageUrl: string;
+
+  /**
+   * Normalized URL (origin + pathname) used for grouping/comparison.
+   * Additive field; raw pageUrl remains unchanged for debugging/display.
+   */
+  normalizedUrl?: string;
+
+  /**
+   * Additive selector used only for generated output. Does not mutate
+   * recorded graph/session truth.
+   */
+  resolvedSelector?: string;
+
+  /** Additive resolved selector contract used only for generation output. */
+  resolvedSelectorSpec?: SelectorSpec;
+
+  /**
+   * Additive D3.5 resolver diagnostics for sidecar and observability.
+   */
+  resolverMetadata?: ResolverMetadata;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -156,6 +939,15 @@ export interface CodegenAssertion {
    * anchor-derived assertions from high-sample nodes score higher.
    */
   confidence: number;
+
+  /**
+   * Additive 2.2A observability for destination-state assertion routing.
+   * Populated only for DOM-backed assertions resolved against outcome-mode
+   * snapshot selection. URL/title assertions do not use this path.
+   */
+  assertionSnapshotSelection?: SnapshotSelectionProvenance;
+  assertionCandidateTrace?: SnapshotCandidateTraceEntry[];
+  assertionTemporalClass?: TemporalClass;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -249,4 +1041,42 @@ export interface CodegenServiceOptions {
    * Default: false — hovers are rarely needed in Playwright tests.
    */
   includeHoverSteps?: boolean;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 3B — Lightweight generation metadata
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type GenerationEventMetadata = {
+  id: string;
+  selectorResolution?: SelectorResolutionV1;
+  frameContext?: { frameSelector: string; isSameOrigin: true };
+  fallbackHints?: {
+    legacySelector?: string;
+    elementText?: string;
+    tagName?: string;
+  };
+};
+
+export interface RecordedSessionSummary {
+  sessionId: string;
+  recordedAt?: number;
+  lastEventAt?: number;
+  eventCount?: number;
+  status?: string;
+  title?: string;
+  url?: string;
+}
+
+export interface ListRecordedSessionsOptions {
+  limit?: number;
+  offset?: number;
+  recentDays?: number;
+}
+
+export interface ListRecordedSessionsResult {
+  sessions: RecordedSessionSummary[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }

@@ -1,0 +1,40 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "AIR Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "runtimeExecutable": "${execPath}",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/packages/vscode-extension",
+        "--user-data-dir=${env:TEMP}/air-vscode-userdata",
+        "--extensions-dir=${env:TEMP}/air-vscode-extensions"
+      ],
+      "env": {
+        "AIR_DB_PATH": "C:\\Users\\praveenmar\\AppData\\Roaming\\air-desktop\\air-data.db"
+      },
+      "outFiles": [
+        "${workspaceFolder}/packages/vscode-extension/dist/**/*.js"
+      ]
+    },
+    {
+      "name": "AIR Extension (Parity)",
+      "type": "extensionHost",
+      "request": "launch",
+      "runtimeExecutable": "${execPath}",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/packages/vscode-extension",
+        "--user-data-dir=${env:TEMP}/air-vscode-userdata",
+        "--extensions-dir=${env:TEMP}/air-vscode-extensions"
+      ],
+      "env": {
+        "AIR_DB_PATH": "C:\\Users\\praveenmar\\AppData\\Roaming\\air-desktop\\air-data.db",
+        "AIR_ENABLE_MODULAR_DIRECT_CANDIDATE_PARITY": "1"
+      },
+      "outFiles": [
+        "${workspaceFolder}/packages/vscode-extension/dist/**/*.js"
+      ]
+    }
+  ]
+}

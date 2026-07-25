@@ -1,0 +1,14 @@
+[mcp_servers.air]
+command = "node"
+args = ["E:/Air Desktop/scripts/air-mcp.cjs"]
+startup_timeout_sec = 20
+tool_timeout_sec = 60
+enabled_tools = [
+  "list_recorded_sessions",
+  "get_session_flow_review",
+  "get_session_generation_context",
+]
+default_tools_approval_mode = "auto"
+
+[mcp_servers.air.env]
+AIR_MCP_DB_PATH = "C:/Users/praveenmar/AppData/Roaming/air-desktop/air-data.db"

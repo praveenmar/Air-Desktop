@@ -40,7 +40,9 @@ const ACTION_GLYPH: Record<string, string> = {
   click:          '->',
   input:          '~>',
   submit:         '=>',
+  'custom-control-open':'o>',
   'custom-select':'v>',
+  'custom-menu-select':'v>',
   scroll:         '^v',
   hover:          '..',
   navigate:       '>>',
@@ -61,7 +63,7 @@ export class FlowReviewFormatter {
    *
    * @example
    * const review = FlowReviewService.build(session);
-   * console.log(FlowReviewFormatter.formatForConsole(review));
+   * console.error(FlowReviewFormatter.formatForConsole(review));
    */
   static formatForConsole(review: FlowReview): string {
     const lines: string[] = [];

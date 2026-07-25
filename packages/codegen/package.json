@@ -5,24 +5,27 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "air": "dist/bin/air-review.js"
+    "air": "bin/air.cjs",
+    "air-trace": "bin/air-trace.cjs",
+    "air-smoke": "bin/air-smoke.cjs",
+    "air-smoke-summary": "bin/air-smoke-summary.cjs"
   },
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch",
-    "review": "ts-node bin/air-review.ts",
-    "review:list": "ts-node bin/air-review.ts --list"
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsc -p tsconfig.build.json --watch",
+    "review": "node bin/run-ts-cli.cjs air-review.ts",
+    "review:list": "node bin/run-ts-cli.cjs air-review.ts --list",
+    "trace": "node bin/run-ts-cli.cjs air-trace.ts",
+    "trace:list": "node bin/run-ts-cli.cjs air-trace.ts --list",
+    "smoke": "node bin/run-ts-cli.cjs air-smoke.ts",
+    "smoke:summary": "node bin/run-ts-cli.cjs air-smoke-summary.ts"
   },
   "dependencies": {
-    "better-sqlite3": "^11.7.0"
+    "@air/shared": "0.1.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^20.0.0",
     "ts-node": "^10.9.0",
     "typescript": "^5.6.3"
-  },
-  "peerDependencies": {
-    "better-sqlite3": ">=9.0.0"
   }
 }

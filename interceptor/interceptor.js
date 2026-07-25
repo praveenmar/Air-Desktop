@@ -70,58 +70,10 @@ class QuiescenceEngine {
   monitor() {
     if (this.isMonitoring) return;
     this.isMonitoring = true;
-    this.log('Monitoring started (Network hooked)');
-  }
-
-  startNetworkObserver() {
-    const self = this;
-
-    // 1. Hook Fetch
-    const originalFetch = window.fetch;
-    window.fetch = async (...args) => {
-      const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
-      if (self.shouldIgnoreUrl(url)) {
-        self.log('Ignoring background fetch:', url);
-        return originalFetch(...args);
-      }
-
-      const requestId = Math.random().toString(36).substring(7);
-      self.pendingRequests.add(requestId);
-      self.log(`Fetch started. Active requests: ${self.pendingRequests.size}`);
-      try {
-        return await originalFetch(...args);
-      } finally {
-        self.pendingRequests.delete(requestId);
-        self.log(`Fetch finished. Active requests: ${self.pendingRequests.size}`);
-      }
-    };
-
-    // 2. Hook XHR
-    const originalOpen = XMLHttpRequest.prototype.open;
-    const originalSend = XMLHttpRequest.prototype.send;
-
-    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-      this.__airUrl = url;
-      return originalOpen.apply(this, [method, url, ...rest]);
-    };
-
-    XMLHttpRequest.prototype.send = function(...args) {
-      const url = this.__airUrl || '';
-      if (self.shouldIgnoreUrl(url)) {
-        self.log('Ignoring background XHR:', url);
-        return originalSend.apply(this, args);
-      }
-
-      const requestId = Math.random().toString(36).substring(7);
-      self.pendingRequests.add(requestId);
-      self.log(`XHR started. Active requests: ${self.pendingRequests.size}`);
-      
-      this.addEventListener('loadend', () => {
-        self.pendingRequests.delete(requestId);
-        self.log(`XHR finished. Active requests: ${self.pendingRequests.size}`);
-      });
-      return originalSend.apply(this, args);
-    };
+    if (!this.onNetworkStart || !this.onNetworkEnd) {
+      this.log('⚠️ Network callbacks not wired – quiescence may stall');
+    }
+    this.log('Monitoring started (DOM observer + network callbacks from AIRInterceptor)');
   }
 
   shouldIgnoreUrl(url) {
@@ -138,6 +90,10 @@ class QuiescenceEngine {
       // Hard Ceiling Timeout
       const hardTimeout = setTimeout(() => {
         this.stopDomObserver();
+        if (this.activeNetworkCount > 0) {
+          this.log(`⚠️ Network counter stuck at ${this.activeNetworkCount}; forcing reset after timeout`);
+          this.activeNetworkCount = 0;
+        }
         this.log('TIMEOUT REACHED (Forced Settle)');
         resolve({ stable: false, reason: 'timeout', waitedMs: Date.now() - startTime });
       }, maxWait);
@@ -210,6 +166,36 @@ const AIR_CFG = {
   debugMode: true
 };
 
+const SELECTOR_RANK_MAP = {
+  'data-testid': 1,
+  id: 2,
+  attribute: 3,
+  class: 7,
+  text: 8,
+  path: 10,
+  xpath: 10,
+  other: 10,
+  chained: 10,
+};
+
+function escapeCssString(value) {
+  return String(value)
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\A ')
+    .replace(/\r/g, '\\D ')
+    .replace(/\t/g, '\\9 ');
+}
+
+function rankForPriority(priority) {
+  return SELECTOR_RANK_MAP[priority] ?? 10;
+}
+
+// Safe CSS escape - matches @air/shared/src/selectors.ts
+const safeCssEscape = (typeof CSS !== 'undefined' && CSS.escape)
+  ? CSS.escape
+  : (str) => String(str).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+
 // Cache for DOM indexing
 const _rootIndexCache = new WeakMap();
 
@@ -265,20 +251,37 @@ function isUniqueCandidate(candidate, element, root) {
 class AIRInterceptor {
   constructor(config = {}) {
     // ------------------------------------------------------------
-    // 1. SESSION PERSISTENCE (The New Fix)
+    // 1. SESSION PERSISTENCE (Hardened strict-mode flow)
     // ------------------------------------------------------------
+    this.disabled = false;
+    this._storageAvailable = true;
+    this._storageFailureLogged = false;
     let currentSessionId = config.sessionId;
+    let strictMode = false;
+    let configServerUrl = null;
 
-    // Check storage if not provided
-    if (!currentSessionId && typeof sessionStorage !== "undefined") {
-      try {
-        currentSessionId = sessionStorage.getItem("AIR_SESSION_ID");
-      } catch (e) {}
+    // Read injected runtime config first (set by main process).
+    if (typeof window !== "undefined" && window.__AIR_CONFIG__) {
+      const cfg = window.__AIR_CONFIG__;
+      currentSessionId = cfg.sessionId || currentSessionId;
+      strictMode = cfg.strictMode === true;
+      configServerUrl = cfg.serverUrl || null;
     }
 
-    // Generate & Save if strictly new
+    // Non-strict only: allow sessionStorage fallback.
+    if (!currentSessionId && !strictMode) {
+      const storedSessionId = this._safeGetStorage("session", "AIR_SESSION_ID");
+      if (storedSessionId) currentSessionId = storedSessionId;
+    }
+
+    if (strictMode && !currentSessionId) {
+      console.error("[AIR] Session ID required in strict mode - disabling interceptor");
+      this.disabled = true;
+      return;
+    }
+
+    // Generate and persist only for non-strict fallback mode.
     if (!currentSessionId) {
-      // Browser-safe UUID v4
       currentSessionId = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(
         /[xy]/g,
         (c) => {
@@ -287,17 +290,11 @@ class AIRInterceptor {
         },
       );
 
-      if (typeof sessionStorage !== "undefined") {
-        try {
-          sessionStorage.setItem("AIR_SESSION_ID", currentSessionId);
-          console.log(
-            "[AIR] 💾 New Session Created & Saved:",
-            currentSessionId,
-          );
-        } catch (e) {}
+      if (!strictMode) {
+        this._safeSetStorage("session", "AIR_SESSION_ID", currentSessionId);
       }
-    } else {
-      console.log("[AIR] 🔄 Session Recovered:", currentSessionId);
+    } else if (!strictMode) {
+      this._safeSetStorage("session", "AIR_SESSION_ID", currentSessionId);
     }
 
     // ------------------------------------------------------------
@@ -314,7 +311,7 @@ class AIRInterceptor {
       snapshotCaptureReactAttrs: config.snapshotCaptureReactAttrs ?? true,
       snapshotWaitForSPA: config.snapshotWaitForSPA ?? true,
       debugEnabled: config.debugMode || false,
-      serverUrl: config.serverUrl || "http://localhost:3000",
+      serverUrl: configServerUrl || config.serverUrl || "http://localhost:3000",
       sessionId: currentSessionId, // <--- CRITICAL: Use the resolved ID
       projectId: config.projectId || "default",
       maxTextLength: config.maxTextLength || 50,
@@ -459,9 +456,60 @@ class AIRInterceptor {
     this.init();
   }
 
+  _markStorageUnavailable(error) {
+    if (this._storageAvailable === false) return;
+    this._storageAvailable = false;
+
+    if (!this._storageFailureLogged) {
+      this._storageFailureLogged = true;
+      const reason = error && error.message ? error.message : String(error);
+      console.debug("[AIR] Storage unavailable; disabling persistence for this page.", reason);
+    }
+  }
+
+  _safeGetStorage(type, key) {
+    if (this._storageAvailable === false) return null;
+    try {
+      const storage = type === "local" ? window.localStorage : window.sessionStorage;
+      return storage.getItem(key);
+    } catch (error) {
+      this._markStorageUnavailable(error);
+      return null;
+    }
+  }
+
+  _safeSetStorage(type, key, value) {
+    if (this._storageAvailable === false) return false;
+    try {
+      const storage = type === "local" ? window.localStorage : window.sessionStorage;
+      storage.setItem(key, value);
+      return true;
+    } catch (error) {
+      this._markStorageUnavailable(error);
+      return false;
+    }
+  }
+
+  _safeRemoveStorage(type, key) {
+    if (this._storageAvailable === false) return false;
+    try {
+      const storage = type === "local" ? window.localStorage : window.sessionStorage;
+      storage.removeItem(key);
+      return true;
+    } catch (error) {
+      this._markStorageUnavailable(error);
+      return false;
+    }
+  }
+
   init() {
+    if (this.disabled) return;
     this.log("🚀 AIR Interceptor initializing...", {
       sessionId: this.config.sessionId,
+    });
+    console.log('[AIR_INTERCEPTOR] Initialized', {
+      sessionId: window.__AIR_CONFIG__?.sessionId,
+      serverUrl: window.__AIR_CONFIG__?.serverUrl,
     });
     this.monitorNetwork();
     this.attachEventListeners();
@@ -496,17 +544,14 @@ class AIRInterceptor {
         this.log("💾 Saving pending action to storage before unload", {
           traceId: this.pendingTraceId,
         });
-        try {
-          sessionStorage.setItem(
-            "air_pending_trace",
-            JSON.stringify({
-              traceId: this.pendingTraceId,
-              timestamp: Date.now(),
-            }),
-          );
-        } catch (e) {
-          // Storage quota full or disabled
-        }
+        this._safeSetStorage(
+          "session",
+          "air_pending_trace",
+          JSON.stringify({
+            traceId: this.pendingTraceId,
+            timestamp: Date.now(),
+          }),
+        );
       }
     });
 
@@ -539,6 +584,77 @@ class AIRInterceptor {
     return { hasVue, hasReact, isEmptyRoot, app };
   }
 
+  // IMPORTANT: Must stay identical to @air/shared/src/anchor-utils.ts
+  // Keep in sync until interceptor can import shared package
+  normalizeAnchor(text) {
+    if (!text) return "";
+    return String(text)
+      .replace(/\(\s*\d+\s*\)/g, "") // "Inbox (5)" -> "Inbox"
+      .replace(/\b\d+\s*(new|items?|results?|unread)\b/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  // MUST stay in sync with packages/shared/src/url-utils.ts::normalizeUrl
+  normalizeUrl(url) {
+    try {
+      const u = new URL(url, window.location.href);
+      const path = u.pathname.replace(/\/$/, "") || "/";
+      return `${u.origin}${path}`;
+    } catch {
+      return url;
+    }
+  }
+
+  getPrimaryHeading(root = document) {
+    const h1 = root.querySelector?.("h1");
+    if (!h1) return null;
+    const text = this.normalizeAnchor(h1.textContent || "").slice(0, 50);
+    return text || null;
+  }
+
+  computeControlSignature(root = document) {
+    const scope = root && root.querySelectorAll ? root : document;
+    const forms = scope.querySelectorAll("form").length;
+
+    const inputs = new Set();
+    scope.querySelectorAll("input, select, textarea").forEach((el) => {
+      const name =
+        el.getAttribute("name") ||
+        el.getAttribute("aria-label") ||
+        el.getAttribute("placeholder") ||
+        el.getAttribute("type") ||
+        "unnamed";
+      const normalized = this.normalizeAnchor(name).toLowerCase();
+      if (normalized) inputs.add(normalized);
+    });
+
+    const buttons = new Set();
+    scope
+      .querySelectorAll("button, [role='button'], input[type='submit'], input[type='button']")
+      .forEach((el) => {
+        const label =
+          (el.textContent || "").trim() ||
+          el.getAttribute("aria-label") ||
+          el.getAttribute("value") ||
+          "unlabeled";
+        const normalized = this.normalizeAnchor(label).toLowerCase().slice(0, 40);
+        if (normalized) buttons.add(normalized);
+      });
+
+    const links = new Set();
+    scope.querySelectorAll("a[href]").forEach((el) => {
+      const label = this.normalizeAnchor((el.textContent || "").trim()).toLowerCase().slice(0, 40);
+      if (label) links.add(label);
+    });
+    const topLinks = [...links].sort().slice(0, 10);
+
+    const raw = `forms:${forms}|inputs:${[...inputs].sort().join(",")}|buttons:${[...buttons].sort().join(",")}|links:${topLinks.join(",")}`;
+    return raw.length > 0 ? this.simpleHash(raw) : null;
+  }
+
+  // IMPORTANT: Must stay identical to @air/shared/src/anchor-utils.ts
+  // Keep in sync until interceptor can import shared package
   scanPageAnchors() {
     const anchors = [];
     // 1. URL Path (Strongest Anchor)
@@ -558,21 +674,26 @@ class AIRInterceptor {
       // Prioritize Stable Attributes
       // Logic: ID > Name > TestID > Role > Text (if short)
       if (el.getAttribute("data-testid")) {
-        anchors.push(`${tag}:testid=${el.getAttribute("data-testid")}`);
+        const normalizedTestId = this.normalizeAnchor(el.getAttribute("data-testid"));
+        if (normalizedTestId.length > 1) anchors.push(`${tag}:testid=${normalizedTestId}`);
       } else if (el.id && !/\d{5,}/.test(el.id)) {
         // Ignore IDs with long numbers
-        anchors.push(`${tag}:id=${el.id}`);
+        const normalizedId = this.normalizeAnchor(el.id);
+        if (normalizedId.length > 1) anchors.push(`${tag}:id=${normalizedId}`);
       } else if (el.name) {
-        anchors.push(`${tag}:name=${el.name}`);
+        const normalizedName = this.normalizeAnchor(el.name);
+        if (normalizedName.length > 1) anchors.push(`${tag}:name=${normalizedName}`);
       } else if (el.getAttribute("role")) {
-        anchors.push(`${tag}:role=${el.getAttribute("role")}`);
+        const normalizedRole = this.normalizeAnchor(el.getAttribute("role"));
+        if (normalizedRole.length > 1) anchors.push(`${tag}:role=${normalizedRole}`);
       } else if (tag === "BUTTON" || tag === "H1" || tag === "H2") {
-        const text = (el.innerText || "").trim();
+        const text = this.normalizeAnchor(el.textContent || "");
         if (text.length > 2 && text.length < 30) {
           anchors.push(`${tag}:text=${text}`);
         }
       } else if (tag === "INPUT") {
-        anchors.push(`${tag}:type=${el.type || "text"}`);
+        const inputType = this.normalizeAnchor(el.type || "text").toLowerCase();
+        if (inputType.length > 1) anchors.push(`${tag}:type=${inputType}`);
       }
     });
 
@@ -784,15 +905,20 @@ class AIRInterceptor {
 
               // 🌟 NEW: Calculate Anchors along with snapshot
               const anchors = this.scanPageAnchors();
+              const controlSignature = this.computeControlSignature(document);
+              const pageUrl = window.location.href;
+              const normalizedUrl = this.normalizeUrl(pageUrl);
 
               return {
                 html: result.html || "",
                 anchors: anchors, // <--- Added Anchors
+                controlSignature,
+                normalizedUrl,
                 viewport: {
                   width: window.innerWidth,
                   height: window.innerHeight,
                 },
-                url: window.location.href,
+                url: pageUrl,
                 timestamp: Date.now(),
                 metrics: {
                   ...result.metrics,
@@ -812,12 +938,17 @@ class AIRInterceptor {
         }
 
         const anchors = this.scanPageAnchors();
+        const controlSignature = this.computeControlSignature(document);
+        const pageUrl = window.location.href;
+        const normalizedUrl = this.normalizeUrl(pageUrl);
 
         return Promise.resolve({
           html: result?.html || "",
           anchors: anchors, // <--- Added Anchors
+          controlSignature,
+          normalizedUrl,
           viewport: { width: window.innerWidth, height: window.innerHeight },
-          url: window.location.href,
+          url: pageUrl,
           timestamp: Date.now(),
           metrics: {
             ...(result?.metrics || {}),
@@ -842,6 +973,138 @@ class AIRInterceptor {
     return runCapture();
   }
 
+  _captureSubtreeSnapshot(element, maxChars = 50000) {
+    if (!element) return null;
+
+    // Try to get a meaningful container first
+    let container = element.closest('form, section, article, div') || element.parentElement;
+    let bestHtml = element.outerHTML;
+
+    if (container && container.outerHTML && container.outerHTML.length <= maxChars) {
+      bestHtml = container.outerHTML;
+    }
+
+    // If element/container is small enough, return it
+    if (bestHtml.length <= maxChars) return bestHtml;
+
+    // Try to expand to parent (up to 2 levels) for more context
+    let depth = 0;
+    let current = element.parentElement;
+    while (current && depth < 2) {
+      const parentHtml = current.outerHTML;
+      if (parentHtml.length <= maxChars) {
+        bestHtml = parentHtml;
+      } else {
+        break;
+      }
+      current = current.parentElement;
+      depth++;
+    }
+
+    // If still too large, truncate
+    if (bestHtml.length > maxChars) {
+      bestHtml = bestHtml.slice(0, maxChars) + '<!-- truncated -->';
+    }
+
+    let anchors = [];
+    let controlSignature = null;
+
+    try {
+      anchors = this.scanPageAnchors();
+    } catch (_) {}
+
+    try {
+      controlSignature = this.computeControlSignature(document);
+    } catch (_) {}
+
+    const pageUrl = window.location.href;
+    const normalizedUrl = this.normalizeUrl(pageUrl);
+
+    return {
+      html: bestHtml,
+      anchors,
+      controlSignature,
+      normalizedUrl,
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      url: pageUrl,
+      timestamp: Date.now(),
+      metrics: { subtree: true, maxChars },
+    };
+  }
+
+  _normalizeSnapshotForTransport(snapshotValue, maxChars = 30000) {
+    if (snapshotValue === undefined) return undefined;
+    if (snapshotValue === null) return null;
+
+    let snapshotObject = null;
+    if (typeof snapshotValue === "string") {
+      snapshotObject = {
+        html: snapshotValue,
+        metrics: { coercedFromString: true },
+      };
+    } else if (typeof snapshotValue === "object") {
+      snapshotObject = { ...snapshotValue };
+    } else {
+      return null;
+    }
+
+    const html = typeof snapshotObject.html === "string" ? snapshotObject.html : "";
+    let reducedHtml = html;
+    if (new Blob([reducedHtml]).size > maxChars) {
+      reducedHtml = reducedHtml.slice(0, maxChars) + '<!-- reduced -->';
+    }
+
+    // Build a schema-compatible snapshot shape.
+    const normalizedSnapshot = {
+      html: reducedHtml,
+      url: typeof snapshotObject.url === "string" ? snapshotObject.url : window.location.href,
+      normalizedUrl:
+        typeof snapshotObject.normalizedUrl === "string"
+          ? snapshotObject.normalizedUrl
+          : this.normalizeUrl(window.location.href),
+      viewport:
+        snapshotObject.viewport &&
+        typeof snapshotObject.viewport === "object" &&
+        typeof snapshotObject.viewport.width === "number" &&
+        typeof snapshotObject.viewport.height === "number"
+          ? {
+              width: snapshotObject.viewport.width,
+              height: snapshotObject.viewport.height,
+            }
+          : { width: window.innerWidth, height: window.innerHeight },
+      timestamp:
+        typeof snapshotObject.timestamp === "number"
+          ? snapshotObject.timestamp
+          : Date.now(),
+      metrics: {
+        ...(
+          snapshotObject.metrics &&
+          typeof snapshotObject.metrics === "object" &&
+          !Array.isArray(snapshotObject.metrics)
+            ? snapshotObject.metrics
+            : {}
+        ),
+        reducedForTransport: true,
+        maxChars,
+      },
+    };
+
+    if (Array.isArray(snapshotObject.anchors)) {
+      normalizedSnapshot.anchors = snapshotObject.anchors.filter(
+        (anchor) => typeof anchor === "string"
+      );
+    }
+
+    if (
+      snapshotObject.controlSignature === null ||
+      typeof snapshotObject.controlSignature === "string"
+    ) {
+      normalizedSnapshot.controlSignature = snapshotObject.controlSignature;
+    }
+
+    return normalizedSnapshot;
+  }
+
   // ============================================================
   // NETWORK MONITORING — Unified (fetch + XHR)
   // FIX (BUG): Single entry point. Old code had two separate wrappers
@@ -852,6 +1115,7 @@ class AIRInterceptor {
   // ============================================================
 
   monitorNetwork() {
+    if (this.disabled) return;
     this._patchFetch();
     this._patchXHR();
   }
@@ -981,11 +1245,14 @@ class AIRInterceptor {
 
     this.log('🌐 Network captured', info);
 
+    const pageUrl = window.location.href;
+    const normalizedUrl = this.normalizeUrl(pageUrl);
     this.queueEvent({
       id:            this.generateUUID(),
       type:          'network',
       timestamp:     Date.now(),
-      pageUrl:       window.location.href,
+      pageUrl,
+      normalizedUrl,
       sessionId:     this.config.sessionId,
       schemaVersion: 'air:v2',
       traceId:       this.pendingTraceId || undefined,
@@ -1016,6 +1283,7 @@ class AIRInterceptor {
   // ============================================================
 
   attachEventListeners() {
+    if (this.disabled) return;
     // --- Explicit bound references stored on instance so they can be removed ---
     this._boundHandleClick  = this.handleClick.bind(this);
     this._boundHandleInput  = this.handleInput.bind(this);
@@ -1091,11 +1359,14 @@ class AIRInterceptor {
       if (!significant) return;
 
       this.log('🖱️ Hover triggered DOM change', { tag, hoverKey });
+      const pageUrl = window.location.href;
+      const normalizedUrl = this.normalizeUrl(pageUrl);
       this.queueEvent({
         id:            this.generateUUID(),
         type:          'hover',
         timestamp:     Date.now(),
-        pageUrl:       window.location.href,
+        pageUrl,
+        normalizedUrl,
         pageTitle:     document.title,
         sessionId:     this.config.sessionId,
         schemaVersion: 'air:v2',
@@ -1163,11 +1434,11 @@ class AIRInterceptor {
     // navigations). Filters expired events individually using each event's own
     // timestamp — prevents stale snapshots from being sent after TTL.
     let stashSuccess = false;
-    try {
-      // Read existing stash for this session (may have events from prior navigation)
-      let existingEvents = [];
-      const raw = localStorage.getItem(stashKey);
-      if (raw) {
+    // Read existing stash for this session (may have events from prior navigation)
+    let existingEvents = [];
+    const raw = this._safeGetStorage("local", stashKey);
+    if (raw) {
+      try {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed.events)) {
           // Filter out individually expired events — per-event TTL check
@@ -1175,23 +1446,23 @@ class AIRInterceptor {
             ev => ev.timestamp && (now - ev.timestamp) < STASH_TTL_MS
           );
         }
+      } catch (e) {
+        this.log("⚠️ localStorage stash parse failed — ignoring previous stash", e.message);
       }
+    }
 
-      // Merge: existing non-expired events + current queue events
-      const mergedEvents = [...existingEvents, ...this.eventQueue];
+    // Merge: existing non-expired events + current queue events
+    const mergedEvents = [...existingEvents, ...this.eventQueue];
 
-      localStorage.setItem(stashKey, JSON.stringify({
+    const stored = this._safeSetStorage("local", stashKey, JSON.stringify({
         events:    mergedEvents,
         sessionId: this.config.sessionId,
         // No stash-level timestamp — per-event timestamps used for TTL
       }));
 
+    if (stored) {
       stashSuccess = true;
       this.log(`📦 Stashed ${this.eventQueue.length} events to localStorage (total in stash: ${mergedEvents.length})`);
-    } catch (e) {
-      // localStorage unavailable (Private Browsing, quota exceeded, security policy)
-      // Beacon fallback below is the only delivery path in this case.
-      this.log("⚠️ localStorage stash failed — beacon is sole delivery path", e.message);
     }
 
     // ── STEP 3: Always fire stripped beacon (Belt and Suspenders) ─────────────
@@ -1252,12 +1523,12 @@ class AIRInterceptor {
 
     let recovered = 0;
     try {
-      const raw = localStorage.getItem(stashKey);
+      const raw = this._safeGetStorage("local", stashKey);
       if (!raw) return 0; // Nothing stashed for this session
 
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed.events) || parsed.events.length === 0) {
-        localStorage.removeItem(stashKey);
+        this._safeRemoveStorage("local", stashKey);
         return 0;
       }
 
@@ -1272,7 +1543,7 @@ class AIRInterceptor {
       }
 
       if (validEvents.length === 0) {
-        localStorage.removeItem(stashKey);
+        this._safeRemoveStorage("local", stashKey);
         this.log('🧹 Stash cleared — all events expired');
         return 0;
       }
@@ -1286,7 +1557,7 @@ class AIRInterceptor {
       // Clear stash immediately — events are now in queue and will be sent
       // via normal flushQueue on stable network. If page unloads again before
       // they flush, _beaconFlushAll will re-stash them.
-      localStorage.removeItem(stashKey);
+      this._safeRemoveStorage("local", stashKey);
 
       this.log(`📬 Recovered ${recovered} stashed event(s) — prepended to queue`, {
         sessionId: this.config.sessionId,
@@ -1307,6 +1578,7 @@ class AIRInterceptor {
   // FOCUS — opens an input session when a user enters a field
   // ============================================================
   handleFocus(e) {
+    if (this.disabled) return;
     // Item 2.5: composedPath()[0] pierces Shadow DOM — e.target stops at the shadow host.
     const target = (e.composedPath && e.composedPath()[0]) || e.target;
     if (!target || !["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
@@ -1327,6 +1599,7 @@ class AIRInterceptor {
   // BLUR — commits the final field value as a single event
   // ============================================================
   handleBlur(e) {
+    if (this.disabled) return;
     const target = (e.composedPath && e.composedPath()[0]) || e.target;
     if (!target || !["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
 
@@ -1360,6 +1633,7 @@ class AIRInterceptor {
   // We do NOT call handleInput here to avoid duplicate events.
   // ============================================================
   handleChange(e) {
+    if (this.disabled) return;
     const target = (e.composedPath && e.composedPath()[0]) || e.target;
     if (!target) return;
 
@@ -1381,6 +1655,7 @@ class AIRInterceptor {
   // handleBlur will emit the single authoritative event on exit.
   // ============================================================
   handleInput(e) {
+    if (this.disabled) return;
     const target = (e.composedPath && e.composedPath()[0]) || e.target;
     if (!target || !["INPUT", "TEXTAREA"].includes(target.tagName)) return;
 
@@ -1454,12 +1729,19 @@ class AIRInterceptor {
       selectedLabel = target.options[target.selectedIndex]?.text || undefined;
     }
 
+    const pageUrl = window.location.href;
+    const normalizedUrl = this.normalizeUrl(pageUrl);
+    const subtreeSnapshot = target
+      ? this._captureSubtreeSnapshot(target)
+      : null;
+
     this.queueEvent({
       id:            this.generateUUID(),
       type:          "input",
       trigger,                          // blur | change | input:progress
       timestamp:     Date.now(),
-      pageUrl:       window.location.href,
+      pageUrl,
+      normalizedUrl,
       pageTitle:     document.title,
       viewport:      { width: window.innerWidth, height: window.innerHeight },
       fingerprint,
@@ -1469,6 +1751,8 @@ class AIRInterceptor {
       traceId:       traceId || undefined,
       sessionId:     this.config.sessionId,
       schemaVersion: "air:v2",
+      pageSnapshot: subtreeSnapshot || undefined,
+      pageState: subtreeSnapshot || undefined,
     });
   }
   // ═══════════════════════════════════════════════════════════════════
@@ -1799,13 +2083,16 @@ class AIRInterceptor {
     const durationMs       = session ? Date.now() - session.openTimestamp : null;
     const optionFingerprint = this.generateFingerprint(el);
 
+    const pageUrl = window.location.href;
+    const normalizedUrl = this.normalizeUrl(pageUrl);
     this.queueEvent({
       id:            this.generateUUID(),
       type:          "custom-select",          // distinct from native "input" / "change"
       trigger:       "option-click",
       timestamp:     Date.now(),
       traceId,
-      pageUrl:       window.location.href,
+      pageUrl,
+      normalizedUrl,
       pageTitle:     document.title,
       viewport:      { width: window.innerWidth, height: window.innerHeight },
       sessionId:     this.config.sessionId,
@@ -1850,6 +2137,7 @@ class AIRInterceptor {
   // CLICK HANDLER
   // ─────────────────────────────────────────────────────────────
   async handleClick(e) {
+    if (this.disabled) return;
     // Item 2.5: Resolve the TRUE click target through Shadow DOM boundaries.
     // e.target is retargeted to the shadow host; composedPath()[0] is the real element.
     const clickTarget = (e.composedPath && e.composedPath()[0]) || e.target;
@@ -1928,22 +2216,26 @@ class AIRInterceptor {
     let initialSnapshot = undefined;
     if (this.config.capturePageSnapshot) {
       try {
-        initialSnapshot = await this.capturePageSnapshot(
-          this.config.snapshotDepth,
-          true,
-        );
+        initialSnapshot = target
+          ? this._captureSubtreeSnapshot(target)
+          : await this.capturePageSnapshot(
+              this.config.snapshotDepth,
+              true,
+            );
       } catch (err) {
         this.log("Failed to capture initial snapshot", err);
       }
     }
 
     // 4. Send ACTION Event (Immediate User Intent)
+    const actionNormalizedUrl = this.normalizeUrl(startUrl);
     const actionEvent = {
       id: this.generateUUID(),
       type: EventType.CLICK,
       timestamp: Date.now(),
       traceId: traceId, // <--- SHARED ID
       pageUrl: startUrl,
+      normalizedUrl: actionNormalizedUrl,
       pageTitle: document.title,
       viewport: { width: window.innerWidth, height: window.innerHeight },
       fingerprint,
@@ -2008,27 +2300,36 @@ class AIRInterceptor {
       let finalSnapshot = undefined;
       if (this.config.capturePageSnapshot) {
         try {
-          finalSnapshot = await this.capturePageSnapshot(
-            this.config.snapshotDepth,
-            true,
-          );
+          finalSnapshot = target
+            ? this._captureSubtreeSnapshot(target)
+            : await this.capturePageSnapshot(
+                this.config.snapshotDepth,
+                true,
+              );
         } catch (err) {
           this.log("Failed to capture final snapshot", err);
         }
       }
 
     // 7. Build OUTCOME Event (The Result)
+    const controlSignature = this.computeControlSignature(document);
+    const primaryHeading   = this.getPrimaryHeading(document);
+    const outcomePageUrl = window.location.href;
+    const outcomeNormalizedUrl = this.normalizeUrl(outcomePageUrl);
     const outcomeEvent = {
       id: this.generateUUID(),
       type: "outcome",
       traceId: traceId,
       timestamp: Date.now(),
       sessionId: this.config.sessionId,
-      pageUrl: window.location.href,
+      pageUrl: outcomePageUrl,
+      normalizedUrl: outcomeNormalizedUrl,
       meta: {
         settleType: settleResult,
-        urlAfter: window.location.href,
+        urlAfter: outcomePageUrl,
         titleAfter: document.title,
+        controlSignature,
+        primaryHeading,
       },
       pageSnapshot: finalSnapshot, // State B
       pageState: finalSnapshot,    // Used by DB to identify "To Node"
@@ -2153,6 +2454,8 @@ class AIRInterceptor {
       const addedAnchors   = newAnchors.filter(a => !lastAnchors.includes(a));
       const removedAnchors = lastAnchors.filter(a => !newAnchors.includes(a));
       const domChanged     = addedAnchors.length > 0 || removedAnchors.length > 0;
+      const controlSignature = self.computeControlSignature(document);
+      const primaryHeading   = self.getPrimaryHeading(document);
 
       self.log(`🗺️ SPA route change [${changeType}]`, { from: lastUrl, to: newUrl, domChanged });
 
@@ -2160,12 +2463,14 @@ class AIRInterceptor {
         ? await self.capturePageSnapshot(self.config.snapshotDepth, true).catch(() => null)
         : null;
 
+      const normalizedUrl = self.normalizeUrl(newUrl);
       self.queueEvent({
         id:            self.generateUUID(),
         type:          'spa-route-change',
         changeType,                        // pushState | replaceState | popstate | hashchange
         timestamp:     Date.now(),
         pageUrl:       newUrl,
+        normalizedUrl,
         pageTitle:     document.title,
         sessionId:     self.config.sessionId,
         schemaVersion: 'air:v2',
@@ -2173,7 +2478,13 @@ class AIRInterceptor {
         navigation: {
           from:    lastUrl,
           to:      newUrl,
-          domDiff: { added: addedAnchors, removed: removedAnchors, changed: domChanged },
+          domDiff: {
+            added: addedAnchors,
+            removed: removedAnchors,
+            changed: domChanged,
+            controlSignature,
+            primaryHeading,
+          },
         },
         pageSnapshot: snapshot,
         pageState:    snapshot,
@@ -2236,6 +2547,7 @@ class AIRInterceptor {
    *   - Debounce: 250 ms per target (fast enough to not miss intent).
    */
   handleScroll(e) {
+    if (this.disabled) return;
     // Resolve the scrolling element and its current position
     const scrollTarget = (e.target === document || e.target === window)
       ? window
@@ -2286,19 +2598,24 @@ class AIRInterceptor {
         const containerInfo = scrollTarget === window
           ? { tag: "window", selector: "window" }
           : {
-              tag:      scrollTarget.tagName?.toLowerCase() || "unknown",
+              tag: scrollTarget.tagName?.toLowerCase() || "unknown",
               selector: scrollTarget.id
-                ? `#${scrollTarget.id}`
+                ? `#${safeCssEscape(scrollTarget.id)}`
                 : (scrollTarget.getAttribute("data-testid")
-                    ? `[data-testid="${scrollTarget.getAttribute("data-testid")}"]`
-                    : scrollTarget.className?.split(" ")[0] || "unknown"),
+                    ? `[data-testid="${escapeCssString(scrollTarget.getAttribute("data-testid"))}"]`
+                    : scrollTarget.className?.split(" ")[0] 
+                        ? `.${safeCssEscape(scrollTarget.className.split(" ")[0])}`
+                        : "unknown"),
             };
 
+        const pageUrl = window.location.href;
+        const normalizedUrl = this.normalizeUrl(pageUrl);
         this.queueEvent({
           id:        this.generateUUID(),
           type:      "scroll",
           timestamp: Date.now(),
-          pageUrl:   window.location.href,
+          pageUrl,
+          normalizedUrl,
           viewport:  { width: window.innerWidth, height: window.innerHeight },
           scroll: {
             x:           currentX,
@@ -2330,18 +2647,22 @@ class AIRInterceptor {
   }
 
   handleSubmit(e) {
+    if (this.disabled) return;
 
     const fingerprint = this.generateFingerprint(e.target);
     const traceId = this.generateUUID(); 
     // FIX: Assign it to the class property so beforeunload can grab it
     this.pendingTraceId = traceId;
 
+    const pageUrl = window.location.href;
+    const normalizedUrl = this.normalizeUrl(pageUrl);
     const baseEvent = {
       id: this.generateUUID(),
       type: "submit",
       timestamp: Date.now(),
       traceId: traceId,
-      pageUrl: window.location.href,
+      pageUrl,
+      normalizedUrl,
       pageTitle: document.title,
       viewport: { width: window.innerWidth, height: window.innerHeight },
       fingerprint,
@@ -2353,6 +2674,19 @@ class AIRInterceptor {
       this.queueEvent({ ...baseEvent });
       return;
     }
+    const subtreeSnapshot = e.target
+      ? this._captureSubtreeSnapshot(e.target)
+      : null;
+
+    if (subtreeSnapshot) {
+      this.queueEvent({
+        ...baseEvent,
+        pageSnapshot: subtreeSnapshot,
+        pageState: subtreeSnapshot,
+      });
+      return;
+    }
+
     this.capturePageSnapshot(this.config.snapshotDepth, true)
       .then((pageSnapshot) => {
         const snapshot = pageSnapshot || undefined;
@@ -2399,6 +2733,7 @@ class AIRInterceptor {
     return {
       selector: selectorResult.selector,
       selectorPriority: selectorResult.priority,
+      selectorRank: selectorResult.rank,
       textExcerpt,
       context,
       attributes,
@@ -2407,12 +2742,15 @@ class AIRInterceptor {
   }
 
   generateOptimalSelector(element) {
+    const tagName = element.tagName.toLowerCase();
+
     // Priority 1: data-testid (most stable)
     if (element.hasAttribute("data-testid")) {
       const testId = element.getAttribute("data-testid");
       return {
-        selector: `[data-testid="${testId}"]`,
+        selector: `[data-testid="${escapeCssString(testId)}"]`,
         priority: "data-testid",
+        rank: rankForPriority("data-testid"),
       };
     }
 
@@ -2435,66 +2773,68 @@ class AIRInterceptor {
         /^(?:css|sc)-[a-zA-Z0-9]+$/.test(id)        // CSS-in-JS hash
       );
       if (!isDynamic) {
-        return { selector: `#${CSS.escape(id)}`, priority: "id" };
+        return {
+          selector: `#${safeCssEscape(id)}`,
+          priority: "id",
+          rank: rankForPriority("id"),
+        };
       }
     }
 
     // Priority 3: name attribute
     if (element.name) {
       return {
-        selector: `${element.tagName.toLowerCase()}[name="${element.name}"]`,
+        selector: `${tagName}[name="${escapeCssString(element.name)}"]`,
         priority: "attribute",
+        rank: rankForPriority("attribute"),
       };
     }
 
     // Priority 4: aria-label (very stable for buttons/links)
     if (element.getAttribute("aria-label")) {
       return {
-        selector: `${element.tagName.toLowerCase()}[aria-label="${element.getAttribute("aria-label")}"]`,
+        selector: `${tagName}[aria-label="${escapeCssString(element.getAttribute("aria-label"))}"]`,
         priority: "attribute",
+        rank: rankForPriority("attribute"),
       };
     }
 
     // Priority 5: role attribute
     if (element.getAttribute("role")) {
       return {
-        selector: `[role="${element.getAttribute("role")}"]`,
+        selector: `[role="${escapeCssString(element.getAttribute("role"))}"]`,
         priority: "attribute",
+        rank: rankForPriority("attribute"),
       };
     }
 
     // Priority 6: type attribute (for inputs/buttons)
-    if (element.type && ["submit", "button", "reset"].includes(element.type)) {
-      const text = this.extractText(element);
-      if (text && text.length > 0 && text.length < 30) {
-        // Use text content for buttons if unique
-        return {
-          selector: `${element.tagName.toLowerCase()}[type="${element.type}"]:has-text("${text}")`,
-          priority: "attribute",
-          fallback: `${element.tagName.toLowerCase()}[type="${element.type}"]`,
-        };
-      }
+    if (element.type && ["submit", "button", "reset", "checkbox", "radio"].includes(element.type)) {
       return {
-        selector: `${element.tagName.toLowerCase()}[type="${element.type}"]`,
+        selector: `${tagName}[type="${escapeCssString(element.type)}"]`,
         priority: "attribute",
+        rank: rankForPriority("attribute"),
       };
     }
 
     // Priority 7: Stable class
     const stableClass = this.findStableClass(element);
     if (stableClass) {
-      return { selector: `.${CSS.escape(stableClass)}`, priority: "class" };
+      return {
+        selector: `.${safeCssEscape(stableClass)}`,
+        priority: "class",
+        rank: rankForPriority("class"),
+      };
     }
 
     // Priority 8: Compound selector (tag + text for buttons/links)
-    const tagName = element.tagName.toLowerCase();
     if (["button", "a", "submit"].includes(tagName)) {
       const text = this.extractText(element);
       if (text && text.length > 0 && text.length < 50) {
         return {
-          selector: `${tagName}:has-text("${text}")`,
-          priority: "attribute",
-          text: text,
+          selector: `${tagName}:has-text("${escapeCssString(text)}")`,
+          priority: "text",
+          rank: rankForPriority("text"),
         };
       }
     }
@@ -2504,19 +2844,17 @@ class AIRInterceptor {
     // a highly specific but still resilient selector. This covers the common
     // case where generated IDs are unstable but name+type+placeholder are stable.
     {
-      const tagName = element.tagName.toLowerCase();
-      const parts   = [];
-      if (element.name)                           parts.push(`[name="${element.name}"]`);
-      if (element.getAttribute("aria-label"))     parts.push(`[aria-label="${element.getAttribute("aria-label")}"]`);
-      if (element.type && !["text", "button"].includes(element.type))
-                                                  parts.push(`[type="${element.type}"]`);
-      if (element.placeholder)                    parts.push(`[placeholder="${element.placeholder}"]`);
-      if (element.getAttribute("data-cy"))        parts.push(`[data-cy="${element.getAttribute("data-cy")}"]`);
+      const parts = [];
+      if (element.name) parts.push(`[name="${escapeCssString(element.name)}"]`);
+      if (element.getAttribute("aria-label")) parts.push(`[aria-label="${escapeCssString(element.getAttribute("aria-label"))}"]`);
+      if (element.type && !["text", "button"].includes(element.type)) parts.push(`[type="${escapeCssString(element.type)}"]`);
+      if (element.placeholder) parts.push(`[placeholder="${escapeCssString(element.placeholder)}"]`);
 
       if (parts.length >= 2) {
         return {
           selector: `${tagName}${parts.join("")}`,
-          priority: "multi-attribute",
+          priority: "attribute",
+          rank: rankForPriority("attribute"),
         };
       }
     }
@@ -2529,19 +2867,24 @@ class AIRInterceptor {
       );
       if (siblings.length > 0) {
         const index = siblings.indexOf(element);
-        const parentSelector = parent.id
-          ? `#${CSS.escape(parent.id)}`
+        const parentSelector = parent.id && !/^\d/.test(parent.id)
+          ? `#${safeCssEscape(parent.id)}`
           : parent.tagName.toLowerCase();
 
         return {
           selector: `${parentSelector} > ${tagName}:nth-of-type(${index + 1})`,
           priority: "path",
+          rank: rankForPriority("path"),
         };
       }
     }
 
     // Priority 10: XPath (last resort)
-    return { selector: this.generateXPath(element), priority: "path" };
+    return {
+      selector: this.generateXPath(element),
+      priority: "xpath",
+      rank: rankForPriority("xpath"),
+    };
   }
 
   findStableClass(element) {
@@ -2738,7 +3081,19 @@ class AIRInterceptor {
   // ============================================================
 
   queueEvent(event) {
+    if (this.disabled) return;
     this.eventQueue.push(event);
+
+    if (["click", "input", "submit"].includes(event.type)) {
+      const snapshotText = typeof event.pageSnapshot === "string"
+        ? event.pageSnapshot
+        : (event.pageSnapshot ? JSON.stringify(event.pageSnapshot) : "");
+      console.log("[AIR_SNAPSHOT_SIZE]", {
+        type: event.type,
+        id: event.id,
+        snapshotChars: snapshotText.length,
+      });
+    }
 
     const debugInfo = {
       type: event.type,
@@ -2755,6 +3110,7 @@ class AIRInterceptor {
   }
 
   startBatchProcessor() {
+    if (this.disabled) return;
     this.batchTimer = setInterval(() => {
       if (this.eventQueue.length > 0) {
         this.flushQueue();
@@ -2763,9 +3119,9 @@ class AIRInterceptor {
   }
 
   async flushQueue(options = {}) {
-    // ── Concurrency guard ─────────────────────────────────────────────────
-    // Prevents the batchInterval timer, the batchSize trigger, and the
-    // fast-forward setTimeout from all racing to send the same head event.
+    if (this.disabled) return;
+    // Concurrency guard:
+    // Prevents timer, batch-size trigger, and fast-forward retries from racing the same head event.
     if (this._isFlushing) return;
     if (this.eventQueue.length === 0) return;
 
@@ -2773,128 +3129,159 @@ class AIRInterceptor {
 
     try {
       const currentEvent = this.eventQueue[0];
+      let payloadEvent = currentEvent;
+      let payload = JSON.stringify(payloadEvent);
+      const traceLabel =
+        currentEvent.traceId && typeof currentEvent.traceId === "string"
+          ? `trace:${currentEvent.traceId.slice(0, 8)}`
+          : "trace:none";
 
-      // Navigation-resilience path (FIX: GM beacon instead of sendBeacon)
-      // Outcome events before a page load need fire-and-forget delivery.
-      // sendBeacon is intercepted by ad blockers; __air_gmBeacon is not.
+      // Navigation-resilience path: fire-and-forget for pre-navigation outcome events.
       const isNavigation =
         options.navigation === true ||
         (currentEvent.type === "outcome" &&
           currentEvent.meta?.settleType === "navigation" &&
-          !currentEvent.meta?.isRecovery); // 🚀 NEW: Skip beacon-stripping for recovery
+          !currentEvent.meta?.isRecovery);
 
       if (isNavigation) {
         const lightEvent = { ...currentEvent, pageSnapshot: null, pageState: null };
         const navPayload = JSON.stringify(lightEvent);
 
         // Priority 1: GM beacon (extension context, ad-blocker immune)
-        if (typeof window.__air_gmBeacon === 'function') {
+        if (typeof window.__air_gmBeacon === "function") {
           const accepted = window.__air_gmBeacon(this.apiEndpoint, navPayload);
           if (accepted) {
             this._retryState.delete(currentEvent.id);
             this.eventQueue.shift();
-            this.log("GM beacon: navigation event dispatched");
+            this.log(`[NAV] Dispatched via GM beacon (${traceLabel})`);
             if (this.eventQueue.length > 0) setTimeout(() => this.flushQueue(), 10);
             return;
           }
+          this.log(`[NAV] GM beacon rejected event; falling back to sendBeacon (${traceLabel})`);
+        } else {
+          this.log(`[NAV] GM beacon unavailable; trying native sendBeacon (${traceLabel})`);
         }
 
-        // Priority 2: native sendBeacon (non-TM fallback)
-        const blob = new Blob([navPayload], { type: "application/json" });
+        // Priority 2: native sendBeacon (fallback)
+        const blob = new Blob([payload], { type: "application/json" });
         const sent = navigator.sendBeacon(this.apiEndpoint, blob);
         if (sent) {
           this._retryState.delete(currentEvent.id);
           this.eventQueue.shift();
-          this.log("sendBeacon: navigation event dispatched");
+          this.log(`[NAV] Dispatched via sendBeacon (${traceLabel})`);
           if (this.eventQueue.length > 0) setTimeout(() => this.flushQueue(), 10);
           return;
         }
-        this.log("sendBeacon declined (payload too large) - falling back to fetch");
+        this.log(`[NAV] sendBeacon rejected event (likely payload/capacity); falling back to fetch (${traceLabel})`);
       }
-      // ─────────────────────────────────────────────────────────────────
 
-      let payload = JSON.stringify(currentEvent);
-
-      // Size guard — browser keepalive cap is ~64 KB
+      // Size guard: browser keepalive cap is ~64KB
       const payloadSize = new Blob([payload]).size;
-      // 🚀 NEW: Bypass size guard for recovery events (page is stable, no size limits)
+
+      // Recovery events must keep snapshot
       if (payloadSize > 60_000 && currentEvent.pageSnapshot && !currentEvent.meta?.isRecovery) {
-        this.log(
-          `⚠️ Payload too big (${payloadSize} bytes). Stripping snapshot to ensure delivery.`,
+        this.log(`[FLUSH] Payload too big (${payloadSize}). Reducing snapshot.`);
+        const reducedPageSnapshot = this._normalizeSnapshotForTransport(
+          currentEvent.pageSnapshot,
+          30000
         );
-        currentEvent.pageSnapshot = null;
-        currentEvent.pageState = null;
-        payload = JSON.stringify(currentEvent);
+        const reducedPageState = this._normalizeSnapshotForTransport(
+          currentEvent.pageState,
+          30000
+        );
+
+        // Clone the payload event and keep queue event immutable for retries/debugging.
+        const reducedEvent = {
+          ...currentEvent,
+          pageSnapshot: reducedPageSnapshot,
+          pageState: reducedPageState,
+        };
+
+        payload = JSON.stringify(reducedEvent);
       }
 
       this.log(
-        `📤 Sending event: ${currentEvent.type} (${new Blob([payload]).size} bytes)`,
+        `[FLUSH] Sending ${currentEvent.type} via ${this._gmSend ? "GM transport" : "fetch"} (${new Blob([payload]).size} bytes) - ${traceLabel}`,
       );
+      console.log('[AIR_SEND]', {
+        type: currentEvent.type,
+        id: currentEvent.id,
+        size: payload.length,
+      });
 
-        // ── Send via GM transport (no CORS) or _rawFetch ──────────────────────────
-      // Priority 1: _gmSend uses GM_xmlhttpRequest (extension context).
-      //   • Runs outside the page’s CORS policy entirely.
-      //   • No preflight, no Access-Control-Allow-Headers checks.
-      //   • Not intercepted by any page-level fetch wrapper.
-      //
-      // Priority 2: _rawFetch (pre-captured native fetch).
-      //   • Does NOT increment quiescence.networkCount (no waitForSettle race).
-      //   • Does NOT increment activeRequests (checkQuiescence stays accurate).
-      //   • Symbol sentinel [_AIR_INTERNAL] is non-enumerable + non-serializable.
+      // Send via GM transport (no CORS) or native raw fetch.
       let response;
       try {
         if (this._gmSend) {
-          // GM transport path — Tampermonkey extension context, zero CORS friction
           response = await this._gmSend(this.apiEndpoint, payload);
         } else {
-          // Raw fetch path — direct <script> injection without Tampermonkey
           response = await this._rawFetch(this.apiEndpoint, {
-            method:    "POST",
-            headers:   { "Content-Type": "application/json" },
-            body:      payload,
-            mode:      "cors",
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: payload,
+            mode: "cors",
             keepalive: !currentEvent.meta?.isRecovery,
-            [_AIR_INTERNAL]: true,   // Symbol — non-enumerable, stripped before native fetch
+            [_AIR_INTERNAL]: true,
           });
         }
       } catch (networkErr) {
-        // TypeError: Failed to fetch — network abort, navigation, or server unreachable.
+        this.log(`[FLUSH] Transport failure (${traceLabel}) - scheduling retry`, {
+          type: currentEvent.type,
+          id: currentEvent.id,
+          error: networkErr?.message || String(networkErr),
+        });
+        this.eventQueue.shift(); // 🔥 VERY IMPORTANT
         this._scheduleRetry(currentEvent, networkErr, "network");
         return;
       }
 
-      // ── HTTP-level error handling ──────────────────────────────────────
+      // HTTP-level error handling.
       if (!response.ok) {
+        let rejectionReason = response.statusText || "";
+        if (!rejectionReason && typeof response.text === "function") {
+          try {
+            const responseText = await response.clone().text(); 
+            if (responseText) rejectionReason = responseText.slice(0, 240);
+          } catch (_) {}
+        } else if (!rejectionReason && response.body !== undefined) {
+          try {
+            const bodyText = typeof response.body === "string"
+              ? response.body
+              : JSON.stringify(response.body);
+            if (bodyText) rejectionReason = bodyText.slice(0, 240);
+          } catch (_) {}
+        }
+        if (!rejectionReason) rejectionReason = "No response body";
+
         if (response.status >= 500) {
-          // Server-side fault — transient, retry with backoff
+          this.log(
+            `[FLUSH] Server rejected ${currentEvent.type} (HTTP ${response.status}) - ${rejectionReason}. Retrying (${traceLabel})`,
+            { type: currentEvent.type, id: currentEvent.id, status: response.status },
+          );
           this._scheduleRetry(
             currentEvent,
-            new Error(`HTTP ${response.status}`),
+            new Error(`HTTP ${response.status}: ${rejectionReason}`),
             "server",
           );
         } else {
-          // 4xx — client/payload error, permanent. Drop the event so it
-          // doesn't block the queue forever, but log clearly.
           this.log(
-            `🚫 Event dropped (HTTP ${response.status} — permanent error)`,
-            { type: currentEvent.type, id: currentEvent.id },
+            `[FLUSH] Event dropped (HTTP ${response.status} - permanent rejection: ${rejectionReason}) (${traceLabel})`,
+            { type: currentEvent.type, id: currentEvent.id, status: response.status },
           );
           this._retryState.delete(currentEvent.id);
           this.eventQueue.shift();
-          if (this.eventQueue.length > 0)
-            setTimeout(() => this.flushQueue(), 10);
+          if (this.eventQueue.length > 0) setTimeout(() => this.flushQueue(), 10);
         }
         return;
       }
 
-      // ── Success ────────────────────────────────────────────────────────
       this._retryState.delete(currentEvent.id);
       this.eventQueue.shift();
-      this.log(`✅ Event sent successfully`);
+      this.log(`[FLUSH] Event sent successfully (${traceLabel})`);
 
       if (this.eventQueue.length > 0) setTimeout(() => this.flushQueue(), 10);
     } finally {
-      // Always release the lock, even if an unexpected exception escapes
+      // Always release the lock, even if an unexpected exception escapes.
       this._isFlushing = false;
     }
   }
@@ -2949,6 +3336,9 @@ class AIRInterceptor {
   // ============================================================
 
   getStatus() {
+    if (this.disabled) {
+      return { disabled: true, eventsQueued: 0 };
+    }
     return {
       sessionId: this.config.sessionId,
       eventsQueued: this.eventQueue.length,
@@ -2963,6 +3353,7 @@ class AIRInterceptor {
 
   // Simple backend health check for real-site testing
   async checkBackendHealth() {
+    if (this.disabled) return { ok: false, error: "Interceptor disabled" };
     const healthUrl = this.apiEndpoint.replace(/\/api\/events$/, "/api/health");
     try {
       this.log("🩺 Checking backend health at", healthUrl);
@@ -2989,6 +3380,10 @@ class AIRInterceptor {
   }
 
   generateUUID() {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
     return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
       const r = (Math.random() * 16) | 0;
       return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
@@ -2996,78 +3391,122 @@ class AIRInterceptor {
   }
 
   dispatchEvent(name, detail) {
+    if (this.disabled) return;
     window.dispatchEvent(new CustomEvent(name, { detail }));
   }
 
-  checkPendingOutcome() {
-    const pending = sessionStorage.getItem("air_pending_trace");
-    if (pending) {
-      const data = JSON.parse(pending);
-      sessionStorage.removeItem("air_pending_trace");
-      this.log("🔄 Recovering pending outcome from navigation", {
-        traceId: data.traceId,
-      });
+ checkPendingOutcome() {
+  if (this.disabled) return false;
 
-      // We just loaded a new page. This IS the outcome!
-      // Send the 'outcome' event immediately for the previous action.
-      this.capturePageSnapshot(this.config.snapshotDepth, false).then(
-        (snapshot) => {
-          this.queueEvent({
-            id: this.generateUUID(),
-            type: "outcome",
-            traceId: data.traceId,
-            timestamp: Date.now(),
-            sessionId: this.config.sessionId,
-            meta: { 
-              settleType: "navigation",
-              urlAfter: window.location.href,
-              isRecovery: true // 🚀 NEW: Tells flushQueue NOT to strip this snapshot
-            },
-            pageSnapshot: snapshot,
-            pageState: snapshot,
-            pageUrl: window.location.href,
-          });
-        },
-      );
-      return true;
+  const pending = this._safeGetStorage("session", "air_pending_trace");
+  if (!pending) return false;
+
+  try {
+    const data = JSON.parse(pending);
+    if (!data || typeof data.traceId !== "string") {
+      this._safeRemoveStorage("session", "air_pending_trace");
+      return false;
     }
+
+    this._safeRemoveStorage("session", "air_pending_trace");
+    this.log("🔄 Recovering pending outcome from navigation", { traceId: data.traceId });
+
+    this.capturePageSnapshot(this.config.snapshotDepth, false).then((snapshot) => {
+      const controlSignature = this.computeControlSignature(document);
+      const primaryHeading = this.getPrimaryHeading(document);
+      const pageUrl = window.location.href;
+      const normalizedUrl = this.normalizeUrl(pageUrl);
+
+      this.queueEvent({
+        id: this.generateUUID(),
+        type: "outcome",
+        traceId: data.traceId,
+        timestamp: Date.now(),
+        sessionId: this.config.sessionId,
+        meta: {
+          settleType: "navigation",
+          urlAfter: window.location.href,
+          controlSignature,
+          primaryHeading,
+          isRecovery: true,
+        },
+        pageSnapshot: snapshot,
+        pageState: snapshot,
+        pageUrl,
+        normalizedUrl,
+      });
+    });
+
+    return true;
+  } catch (err) {
+    this.log("⚠️ Corrupted pending trace; clearing it", err?.message || err);
+    this._safeRemoveStorage("session", "air_pending_trace");
     return false;
   }
+}
+
+async flushPending() {
+  this._beaconFlushAll();
+  await this.flushQueue();
+}
 
   captureBaseline() {
+    if (this.disabled) return;
     // ✅ NEW: Fresh start? Capture the page so we have a node to anchor input events to.
     this.capturePageSnapshot(this.config.snapshotDepth, false).then(
       (snapshot) => {
+        const controlSignature = this.computeControlSignature(document);
+        const primaryHeading   = this.getPrimaryHeading(document);
+        const pageUrl = window.location.href;
+        const normalizedUrl = this.normalizeUrl(pageUrl);
         this.queueEvent({
           id: this.generateUUID(),
           type: "outcome",
           traceId: "baseline-" + this.generateUUID(),
           timestamp: Date.now(),
           sessionId: this.config.sessionId,
-          meta: { settleType: "baseline" },
+          meta: { settleType: "baseline", controlSignature, primaryHeading },
           pageSnapshot: snapshot,
           pageState: snapshot,
-          pageUrl: window.location.href,
+          pageUrl,
+          normalizedUrl,
         });
       },
     );
   }
 
   log(...args) {
+    if (this.disabled || !this.config) return;
     if (this.config.debugMode) {
       console.log("[AIR]", ...args);
     }
   }
 
-  destroy() {
-    clearInterval(this.batchTimer);
-    this.flushQueue();
-    // FIX: Clean up QuiescenceWatcher resources
-    if (this.quiescence) {
-      this.quiescence.timers.forEach((t) => clearTimeout(t));
-      this.quiescence.observer.disconnect();
-    }
+  async destroy() {
+  if (this.disabled) return;
+  clearInterval(this.batchTimer);
+
+  try {
+    await this.flushPending();
+  } catch (err) {
+    this.log("⚠️ Flush during destroy failed", err);
   }
+
+  if (this.quiescence) {
+    this.quiescence.timers.forEach((t) => clearTimeout(t));
+    this.quiescence.observer.disconnect();
+  }
+}
+}
+
+// Node/Vitest test access (no effect in browser injection runtime)
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    AIRInterceptor,
+    SELECTOR_RANK_MAP,
+    escapeCssString,
+    rankForPriority,
+  };
 }
 
 // Auto-initialize if not in module context
@@ -3085,3 +3524,5 @@ if (typeof window !== "undefined" && !window._airInterceptor) {
   window.AIR_checkBackend = () => window._airInterceptor.checkBackendHealth();
   console.log("🎯 AIR Interceptor loaded and active");
 }
+
+

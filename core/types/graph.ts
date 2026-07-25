@@ -12,11 +12,13 @@ export const GraphNodeSchema = z.object({
   projectId: z.string().default('default'),
   canonicalHash: z.string(),
   pageUrl: z.string().nullable(),
+  normalizedUrl: z.string().nullable().optional(),
   pageTitle: z.string().nullable(),
   snapshotHtml: z.string().nullable(),
   contextTokens: z.string().nullable(), // JSON string array
   anchors: z.string().nullable(),       // JSON string array
   stateSource: z.string().nullable(),
+  controlSignature: z.string().nullable().optional(),
   viewportWidth: z.number().nullable(),
   viewportHeight: z.number().nullable(),
   createdAt: z.number(),
@@ -69,6 +71,7 @@ export type Session = z.infer<typeof SessionSchema>;
 export const PendingActionSchema = z.object({
   traceId: z.string(),
   sessionId: z.string(),
+  tabId: z.string().nullable().optional(),
   fromNodeId: z.string(),
   triggerEventId: z.string(),
   actionType: z.string(),

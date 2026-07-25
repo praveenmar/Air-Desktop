@@ -1,0 +1,34 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../..", 
+    "outDir": "./dist",
+
+    "emitDeclarationOnly": true,
+    "noEmit": false, 
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "declaration": true,
+    "declarationMap": true,
+
+    "types": ["node", "vitest"],
+
+    "paths": {
+      "@air/shared": ["../shared/src/index.ts"],
+      "@air/shared/*": ["../shared/src/*"]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "bin/**/*.ts",
+    "__tests__/**/*.ts",
+    "test-codegen.ts",
+    "../shared/src/**/*.ts",
+    "../../core/types/**/*.ts",
+    "index.ts"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules"
+  ]
+}

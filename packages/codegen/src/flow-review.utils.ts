@@ -181,7 +181,9 @@ export function normalizeActionVerb(action: string): string {
     click:          'Click',
     input:          'Type',
     submit:         'Submit',
+    'custom-control-open': 'Open',
     'custom-select':'Select',
+    'custom-menu-select': 'Select',
     scroll:         'Scroll',
     hover:          'Hover',
     navigate:       'Navigate',
@@ -207,7 +209,9 @@ export function getSelectorQuality(priority: string): SelectorQuality {
     case 'text':        return 'good';
     case 'class':
     case 'path':
-    case 'xpath':       return 'fragile';
+    case 'xpath':
+    case 'other':
+    case 'chained':     return 'fragile';
     default:            return 'unknown';
   }
 }

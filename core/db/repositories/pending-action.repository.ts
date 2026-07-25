@@ -1,5 +1,5 @@
-import { Database } from 'better-sqlite3';
 import { PendingAction } from '../../types';
+import { AsyncSQLiteDatabase } from '../sqlite-adapter';
 
 // The Magic Fix: Translates SQLite snake_case to TypeScript camelCase
 function mapPendingActionRow(row: any): PendingAction | null {
@@ -7,6 +7,7 @@ function mapPendingActionRow(row: any): PendingAction | null {
   return {
     traceId: row.trace_id,
     sessionId: row.session_id,
+    tabId: row.tab_id ?? 'tab-legacy',
     fromNodeId: row.from_node_id,
     triggerEventId: row.trigger_event_id, // Translates to exact camelCase TS expects
     actionType: row.action_type,
@@ -18,31 +19,102 @@ function mapPendingActionRow(row: any): PendingAction | null {
 }
 
 export class PendingActionRepository {
-  constructor(private db: Database) {}
+  private readonly indexReady: Promise<void>;
 
-  public register(traceId: string, sessionId: string, fromNodeId: string, triggerEventId: string, actionType: string, fingerprintHash: string): void {
-    const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO pending_actions 
-      (trace_id, session_id, from_node_id, trigger_event_id, action_type, fingerprint_hash, created_at, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
-    `);
-    stmt.run(traceId, sessionId, fromNodeId, triggerEventId, actionType, fingerprintHash, Date.now());
+  constructor(private db: AsyncSQLiteDatabase) {
+    this.indexReady = this.ensureIndexes();
   }
 
-  public find(traceId: string): PendingAction | null {
-    const stmt = this.db.prepare('SELECT * FROM pending_actions WHERE trace_id = ? AND status = ?');
-    const row = stmt.get(traceId, 'pending');
+  private async ensureIndexes(): Promise<void> {
+    await this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_pending_session_tab_trace
+      ON pending_actions(session_id, tab_id, trace_id)
+    `);
+  }
+
+  private async ensureReady(): Promise<void> {
+    await this.indexReady;
+  }
+
+  public async register(traceId: string, sessionId: string, tabId: string, fromNodeId: string, triggerEventId: string, actionType: string, fingerprintHash: string): Promise<void> {
+    await this.ensureReady();
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO pending_actions 
+      (trace_id, session_id, tab_id, from_node_id, trigger_event_id, action_type, fingerprint_hash, created_at, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+    `);
+    await stmt.run(traceId, sessionId, tabId, fromNodeId, triggerEventId, actionType, fingerprintHash, Date.now());
+  }
+
+  public async findByTraceSessionAndTab(traceId: string, sessionId: string, tabId: string): Promise<PendingAction | null> {
+    await this.ensureReady();
+    const stmt = this.db.prepare(`
+      SELECT *
+      FROM pending_actions
+      WHERE trace_id = ?
+        AND session_id = ?
+        AND status = ?
+        AND (tab_id = ? OR (tab_id IS NULL AND ? = 'tab-legacy'))
+    `);
+    const row = await stmt.get(traceId, sessionId, 'pending', tabId, tabId);
     return mapPendingActionRow(row); // Run the row through the mapper before returning
   }
 
-  public resolve(traceId: string): void {
-    const stmt = this.db.prepare('UPDATE pending_actions SET status = ?, resolved_at = ? WHERE trace_id = ?');
-    stmt.run('resolved', Date.now(), traceId);
+  public async findByTraceAndSessionAnyTab(traceId: string, sessionId: string): Promise<PendingAction | null> {
+    await this.ensureReady();
+    const stmt = this.db.prepare(`
+      SELECT *
+      FROM pending_actions
+      WHERE trace_id = ?
+        AND session_id = ?
+        AND status = 'pending'
+      LIMIT 1
+    `);
+    const row = await stmt.get(traceId, sessionId);
+    return mapPendingActionRow(row);
   }
 
-  public cleanupStale(cutoffMs: number): number {
+  public async findRecentPendingForSessionAndTab(
+    sessionId: string,
+    tabId: string,
+    createdAfterMs: number,
+    limit: number = 2
+  ): Promise<PendingAction[]> {
+    await this.ensureReady();
+    const safeLimit = Math.max(1, Math.floor(limit));
+    const stmt = this.db.prepare(`
+      SELECT * FROM pending_actions
+      WHERE session_id = ?
+        AND (tab_id = ? OR (tab_id IS NULL AND ? = 'tab-legacy'))
+        AND status = 'pending'
+        AND created_at >= ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `);
+    const rows = await stmt.all(sessionId, tabId, tabId, createdAfterMs, safeLimit);
+    return rows
+      .map(row => mapPendingActionRow(row))
+      .filter((row): row is PendingAction => !!row);
+  }
+
+  public async resolve(traceId: string, sessionId: string, tabId: string): Promise<number> {
+    await this.ensureReady();
+    const stmt = this.db.prepare(`
+      UPDATE pending_actions
+      SET status = ?, resolved_at = ?
+      WHERE trace_id = ?
+        AND session_id = ?
+        AND status = 'pending'
+        AND (tab_id = ? OR (tab_id IS NULL AND ? = 'tab-legacy'))
+    `);
+    const result = await stmt.run('resolved', Date.now(), traceId, sessionId, tabId, tabId);
+    return result.changes;
+  }
+
+  public async cleanupStale(cutoffMs: number): Promise<number> {
+    await this.ensureReady();
     const stmt = this.db.prepare(`DELETE FROM pending_actions WHERE status = 'pending' AND created_at < ?`);
-    const result = stmt.run(cutoffMs);
+    const result = await stmt.run(cutoffMs);
     return result.changes;
   }
 }

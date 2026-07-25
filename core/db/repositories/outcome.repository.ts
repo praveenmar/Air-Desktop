@@ -6,8 +6,8 @@
 //      undefined. The Laplace smoothing internal query already used explicit snake_case column
 //      aliases so it was unaffected, but findByEdge() returned broken Outcome objects.
 
-import { Database } from 'better-sqlite3';
 import { Outcome } from '../../types';
+import { AsyncSQLiteDatabase } from '../sqlite-adapter';
 
 // Translates every snake_case SQLite column to its camelCase TypeScript equivalent.
 function mapOutcomeRow(row: any): Outcome | null {
@@ -23,27 +23,48 @@ function mapOutcomeRow(row: any): Outcome | null {
 }
 
 export class OutcomeRepository {
-  constructor(private db: Database) {}
+  constructor(private db: AsyncSQLiteDatabase) {}
 
-  public insert(id: string, edgeId: string, targetNodeId: string, timestamp: number): void {
+  public async insert(
+    id: string,
+    edgeId: string,
+    targetNodeId: string,
+    timestamp: number,
+  ): Promise<{ inserted: boolean; touched: boolean }> {
     const stmt = this.db.prepare(`
-      INSERT INTO outcomes (id, edge_id, target_node_id, probability, decayed_count, last_observed) 
+      INSERT OR IGNORE INTO outcomes (id, edge_id, target_node_id, probability, decayed_count, last_observed) 
       VALUES (?, ?, ?, 1.0, 1.0, ?)
     `);
-    stmt.run(id, edgeId, targetNodeId, timestamp);
+    const result = await stmt.run(id, edgeId, targetNodeId, timestamp);
+
+    if ((result?.changes ?? 0) > 0) {
+      return { inserted: true, touched: false };
+    }
+
+    const updateStmt = this.db.prepare(`
+      UPDATE outcomes
+      SET last_observed = CASE
+        WHEN last_observed IS NULL OR last_observed < ?
+        THEN ?
+        ELSE last_observed
+      END
+      WHERE edge_id = ? AND target_node_id = ?
+    `);
+    await updateStmt.run(timestamp, timestamp, edgeId, targetNodeId);
+    return { inserted: false, touched: true };
   }
 
-  public findByEdge(edgeId: string): Outcome[] {
+  public async findByEdge(edgeId: string): Promise<Outcome[]> {
     const stmt = this.db.prepare('SELECT * FROM outcomes WHERE edge_id = ?');
-    return (stmt.all(edgeId) as any[]).map(mapOutcomeRow) as Outcome[];
+    return ((await stmt.all(edgeId)) as any[]).map(mapOutcomeRow) as Outcome[];
   }
 
   /** Ported directly from prototype: Laplace Smoothing probability recalculation */
-  public updateProbability(edgeId: string, targetNodeId: string): void {
+  public async updateProbability(edgeId: string, targetNodeId: string): Promise<void> {
     const now = Date.now();
 
     // 1. Increment observation count for the specific outcome
-    this.db.prepare(`
+    await this.db.prepare(`
       UPDATE outcomes SET decayed_count = decayed_count + 1, last_observed = ? 
       WHERE edge_id = ? AND target_node_id = ?
     `).run(now, edgeId, targetNodeId);
@@ -51,7 +72,7 @@ export class OutcomeRepository {
     // 2. Fetch all outcomes for this edge to recalculate probabilities
     // NOTE: These columns are fetched with explicit aliases so the Laplace math
     // below accesses them safely without needing the row mapper.
-    const outcomes = this.db.prepare(`
+    const outcomes = await this.db.prepare(`
       SELECT id, decayed_count, target_node_id FROM outcomes WHERE edge_id = ?
     `).all(edgeId) as { id: string, decayed_count: number, target_node_id: string }[];
 
@@ -61,12 +82,12 @@ export class OutcomeRepository {
     const updateStmt = this.db.prepare(`UPDATE outcomes SET probability = ? WHERE id = ?`);
 
     // 3. Recalculate and update each outcome with Laplace smoothing
-    outcomes.forEach((outcome) => {
+    for (const outcome of outcomes) {
       const numerator   = outcome.decayed_count + 1;
       const denominator = totalObservations + K;
       const probability = numerator / denominator;
 
-      updateStmt.run(probability, outcome.id);
-    });
+      await updateStmt.run(probability, outcome.id);
+    }
   }
 }

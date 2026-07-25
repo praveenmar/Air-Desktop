@@ -12,26 +12,124 @@ export class SessionManager {
     private logger: DebugLogger
   ) {}
 
-  public getOrCreateSession(sessionId: string | null | undefined): Session | null {
+  private async logWithContext(
+    level: 'debug' | 'info' | 'warn' | 'error' | 'decision',
+    message: string,
+    data: Record<string, unknown> = {},
+    sessionId: string | null = null,
+    traceId: string | null = null
+  ): Promise<void> {
+    const resolvedSessionId = sessionId ?? null;
+    const resolvedTraceId = traceId ?? null;
+    await this.logger.log(
+      'SessionManager',
+      level,
+      message,
+      {
+        ...data,
+        sessionId: resolvedSessionId,
+        traceId: resolvedTraceId,
+      },
+      resolvedSessionId,
+      resolvedTraceId
+    );
+  }
+
+  public async getOrCreateSession(sessionId: string | null | undefined): Promise<Session | null> {
     if (!sessionId) return null;
 
-    const session = this.sessionRepo.getOrCreate(sessionId);
-    
-    // If it was just created (event_count === 0), log it.
-    if (session && session.eventCount === 0) {
-      this.logger.log('SessionManager', 'info', 'Created new session', { sessionId });
+    const existing = await this.sessionRepo.findById(sessionId);
+    if (existing) {
+      await this.logWithContext('debug', 'Session already active - reusing existing session pointer', {}, sessionId, null);
+      return existing;
     }
-    
-    return session;
+
+    const created = await this.sessionRepo.getOrCreate(sessionId);
+    if (created) {
+      await this.logWithContext('info', 'Session created (first event observed for this recording flow)', {}, sessionId, null);
+    }
+
+    return created;
   }
 
-  public updatePointer(sessionId: string | null | undefined, nodeId: string): void {
-    if (!sessionId) return;
-    this.sessionRepo.updatePointer(sessionId, nodeId);
+  public async updatePointer(
+    sessionId: string | null | undefined,
+    tabId: string | null | undefined,
+    nodeId: string,
+    eventTimestamp: number | null | undefined
+  ): Promise<void> {
+    if (!sessionId || !tabId) return;
+    const safeEventTimestamp = typeof eventTimestamp === 'number' && Number.isFinite(eventTimestamp)
+      ? eventTimestamp
+      : Date.now();
+    if (tabId === 'tab-legacy') {
+      await this.logWithContext('info', 'TAB_LEGACY_FALLBACK_USED', {
+        reason: 'missing_tab_id_on_event',
+        tabId,
+        nodeId,
+        eventTimestamp: safeEventTimestamp,
+      }, sessionId, null);
+    }
+    await this.sessionRepo.updatePointerForTab(sessionId, tabId, nodeId, safeEventTimestamp);
+    await this.logWithContext('info', 'TAB_NODE_POINTER_UPDATED', {
+      tabId,
+      nodeId,
+      source: 'session_tab_state',
+      eventTimestamp: safeEventTimestamp,
+    }, sessionId, null);
   }
 
-  public getLastNode(sessionId: string | null | undefined): string | null {
-    if (!sessionId) return null;
-    return this.sessionRepo.getLastNode(sessionId);
+  public async getLastNode(sessionId: string | null | undefined, tabId: string | null | undefined): Promise<string | null> {
+    if (!sessionId || !tabId) return null;
+    if (tabId === 'tab-legacy') {
+      await this.logWithContext('info', 'TAB_LEGACY_FALLBACK_USED', {
+        reason: 'missing_tab_id_on_event',
+        tabId,
+      }, sessionId, null);
+    }
+    const nodeId = await this.sessionRepo.getLastNodeForTab(sessionId, tabId);
+    if (nodeId) {
+      await this.logWithContext('debug', 'TAB_NODE_POINTER_READ', {
+        tabId,
+        nodeId,
+        source: 'session_tab_state',
+      }, sessionId, null);
+      return nodeId;
+    }
+    await this.logWithContext('debug', 'TAB_NODE_POINTER_MISSING', {
+      tabId,
+      source: 'session_tab_state',
+    }, sessionId, null);
+    return null;
+  }
+
+  public async getTabState(
+    sessionId: string | null | undefined,
+    tabId: string | null | undefined
+  ): Promise<{ lastNodeId: string | null; lastEventAt: number | null } | null> {
+    if (!sessionId || !tabId) return null;
+    if (tabId === 'tab-legacy') {
+      await this.logWithContext('info', 'TAB_LEGACY_FALLBACK_USED', {
+        reason: 'missing_tab_id_on_event',
+        tabId,
+      }, sessionId, null);
+    }
+
+    const tabState = await this.sessionRepo.getTabState(sessionId, tabId);
+    if (tabState) {
+      await this.logWithContext('debug', 'TAB_STATE_READ', {
+        tabId,
+        nodeId: tabState.lastNodeId,
+        lastEventAt: tabState.lastEventAt,
+        source: 'session_tab_state',
+      }, sessionId, null);
+      return tabState;
+    }
+
+    await this.logWithContext('debug', 'TAB_STATE_MISSING', {
+      tabId,
+      source: 'session_tab_state',
+    }, sessionId, null);
+    return null;
   }
 }

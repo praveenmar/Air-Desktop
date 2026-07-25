@@ -1,0 +1,102 @@
+{
+  "name": "AIRAIInteractionRecorder",
+  "displayName": "AIR (AI Intent Runtime)",
+  "description": "Playwright test generator for AI coding agents (Cline, Roo Code, Cursor). Captures runtime DOM intent to prevent hallucinations.",
+  "version": "0.1.6",
+  "publisher": "TestMasterHubAI",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "icon": "icon.png",
+"keywords": [
+  "air",
+  "ai",
+  "playwright",
+  "playwright ai",
+  "ai playwright",
+  "ai test generator",
+  "test automation",
+  "browser automation",
+  "e2e testing",
+  "mcp",
+  "codegen",
+  "selenium",
+  "cypress"
+],
+  "categories": [
+    "Testing",
+    "AI",
+    "Other",
+    "Programming Languages"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "air.startRecording",
+        "title": "AIR: Start Recording",
+        "category": "AIR"
+      },
+      {
+        "command": "air.stopRecording",
+        "title": "AIR: Stop Recording",
+        "category": "AIR"
+      },
+      {
+        "command": "air.listSessions",
+        "title": "AIR: List Sessions",
+        "category": "AIR"
+      },
+      {
+        "command": "air.exportSession",
+        "title": "AIR: Export Session",
+        "category": "AIR"
+      },
+      {
+        "command": "air.deleteSession",
+        "title": "AIR: Delete Session",
+        "category": "AIR"
+      },
+      {
+        "command": "air.debugEvents",
+        "title": "AIR: Debug Recent Events",
+        "category": "AIR"
+      },
+      {
+        "command": "air.inspectSession",
+        "title": "AIR: Inspect Session",
+        "category": "AIR"
+      },
+      {
+        "command": "air.showLogs",
+        "title": "AIR: Show Logs",
+        "category": "AIR"
+      },
+      {
+        "command": "air.copyMcpConfig",
+        "title": "AIR: Copy MCP Configuration",
+        "category": "AIR"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "npm run build && vsce package --no-dependencies --allow-unused-files-pattern"
+  },
+  "dependencies": {
+    "playwright": "^1.58.2",
+    "playwright-core": "^1.58.2"
+  },
+  "devDependencies": {
+    "archiver": "^8.0.0",
+    "@air/core": "file:../../core",
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.0.0"
+  }
+}

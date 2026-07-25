@@ -1,38 +1,40 @@
-// Purpose: Core Database service initialization and connection management.
+﻿// Purpose: Core Database service initialization and connection management.
 // Prototype Origin: db.js (initialization logic)
 // Changes: Converted to a class-based service, injected configuration, strict typing.
 
-import SQLiteDatabase, { Database } from 'better-sqlite3';
 import { runMigrations } from '../db/migrations';
+import { AsyncSQLiteDatabase, openAsyncDatabase } from './sqlite-adapter';
 
 export class DatabaseService {
-  private db: Database;
+  private constructor(private db: AsyncSQLiteDatabase) {}
 
-  constructor(dbPath: string) {
+  public static async create(dbPath: string): Promise<DatabaseService> {
     try {
-      console.log(`🔌 Initializing database at ${dbPath}...`);
-      this.db = new SQLiteDatabase(dbPath);
-      
-      // Enforce strict SQLite pragmas for performance and integrity
-      this.db.pragma('journal_mode = WAL');
-      this.db.pragma('foreign_keys = ON');
+      console.log('[AIR-DB] Initialization started', { dbPath });
+      const db = await openAsyncDatabase(dbPath);
 
-      // Run schema initialization and migrations
-      runMigrations(this.db);
-      
-      console.log('✅ Database initialized successfully');
+      // Enforce strict SQLite pragmas for performance and integrity.
+      await db.pragma('journal_mode = WAL');
+      await db.pragma('foreign_keys = ON');
+
+      console.log('[AIR-DB] Migration started');
+      await runMigrations(db);
+      console.log('[AIR-DB] Migration finished');
+      console.log('[AIR-DB] Database initialized');
+
+      return new DatabaseService(db);
     } catch (error) {
-      console.error('❌ Database initialization failed:', error);
+      console.error('[AIR-DB] Database initialization failed', error);
       throw error;
     }
   }
 
   /** Exposes the underlying database instance to the repositories */
-  public getInstance(): Database {
+  public getInstance(): AsyncSQLiteDatabase {
     return this.db;
   }
 
-  public close(): void {
-    this.db.close();
+  public async close(): Promise<void> {
+    await this.db.close();
   }
 }

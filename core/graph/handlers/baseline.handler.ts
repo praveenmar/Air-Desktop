@@ -8,6 +8,7 @@ import { StateEngine } from '../state-engine';
 import { AIREvent, ElementFingerprint, PageSnapshot } from '../../types';
 import { IntentDetector } from '../intent-detector';
 import { NodeRepository, NodeUpdate } from '../../db/repositories/node.repository';
+import { normalizeUrl } from '@air/shared';
 
 export class BaselineHandler {
   constructor(
@@ -16,7 +17,30 @@ export class BaselineHandler {
     private stateEngine: typeof StateEngine
   ) {}
 
-  public upsertNode(event: AIREvent): string | null {
+  private async logWithContext(
+    level: 'debug' | 'info' | 'warn' | 'error' | 'decision',
+    message: string,
+    data: Record<string, unknown> = {},
+    sessionId: string | null = null,
+    traceId: string | null = null
+  ): Promise<void> {
+    const resolvedSessionId = sessionId ?? null;
+    const resolvedTraceId = traceId ?? null;
+    await this.logger.log(
+      'BaselineHandler',
+      level,
+      message,
+      {
+        ...data,
+        sessionId: resolvedSessionId,
+        traceId: resolvedTraceId,
+      },
+      resolvedSessionId,
+      resolvedTraceId
+    );
+  }
+
+  public async upsertNode(event: AIREvent): Promise<string | null> {
     // 1. Get the Snapshot Object
     let snapshot: PageSnapshot | undefined;
     if ('pageState' in event && event.pageState) {
@@ -34,7 +58,7 @@ export class BaselineHandler {
     return this.upsertFallbackNode(event);
   }
 
-  private upsertStateNode(event: AIREvent, snapshot: PageSnapshot): string | null {
+  private async upsertStateNode(event: AIREvent, snapshot: PageSnapshot): Promise<string | null> {
     try {
       const canonicalHash = this.stateEngine.generateStateSignature(snapshot);
       
@@ -55,34 +79,68 @@ export class BaselineHandler {
       }
 
       const resolvedUrl = event.pageUrl || snapshot.url || 'unknown';
+      const normalizedUrl =
+        event.normalizedUrl ||
+        snapshot.normalizedUrl ||
+        normalizeUrl(resolvedUrl);
       
       const metadata = {
         stateSource: anchors ? 'anchor' : 'html',
         lastInteraction: fingerprint ? { selector: fingerprint.selector, intent: IntentDetector.detectIntent(event) } : null,
       };
 
-      const existing = this.nodeRepo.findByHash('default', canonicalHash);
+      // Phase 1 minimal identity pass: exact match on control signature + normalized URL.
+      if (snapshot.controlSignature && normalizedUrl) {
+        const matchedByControlSig = await this.nodeRepo.findByControlSigAndUrl(snapshot.controlSignature, normalizedUrl);
+        if (matchedByControlSig) {
+          await this.nodeRepo.updateObservation(matchedByControlSig.id, {
+            lastObservedAt: event.timestamp
+          });
+          await this.logWithContext('info', 'Reused node via controlSignature (exact controls + normalized URL match)', {
+            nodeId: matchedByControlSig.id,
+            controlSignature: snapshot.controlSignature,
+            url: normalizedUrl
+          }, event.sessionId ?? null, event.traceId ?? null);
+          return matchedByControlSig.id;
+        }
+      }
 
-     if (existing) {
+      const existing = await this.nodeRepo.findByHash('default', canonicalHash);
+
+      if (existing) {
         const updates: NodeUpdate = {
           lastObservedAt: event.timestamp,
           metadata: JSON.stringify(metadata),
           stateSource: anchors ? 'anchor' : 'html',
           anchors: anchors,
           pageUrl: resolvedUrl,
+          normalizedUrl,
+          controlSignature: snapshot.controlSignature || null,
         };
         if (viewportWidth !== null) updates.viewportWidth = viewportWidth;
         if (viewportHeight !== null) updates.viewportHeight = viewportHeight;
-        this.nodeRepo.updateObservation(existing.id, updates);
+        await this.nodeRepo.updateObservation(existing.id, updates);
+        await this.logWithContext('info', 'Reused node via canonical hash (anchor/html fingerprint fallback)', {
+          nodeId: existing.id,
+          hash: canonicalHash.substring(0, 8),
+          url: normalizedUrl,
+        }, event.sessionId ?? null, event.traceId ?? null);
         return existing.id;
       }
 
+      await this.logWithContext('info', 'New node - no control-signature or canonical-hash match found', {
+        controlSignature: snapshot.controlSignature || null,
+        hash: canonicalHash.substring(0, 8),
+        url: normalizedUrl,
+      }, event.sessionId ?? null, event.traceId ?? null);
+
       const nodeId = crypto.randomUUID();
-      this.nodeRepo.upsert({
+      await this.nodeRepo.upsert({
         id: nodeId,
         projectId: 'default',
         canonicalHash,
         pageUrl: resolvedUrl,
+        normalizedUrl,
         pageTitle: 'pageTitle' in event ? event.pageTitle : null,
         contextTokens: JSON.stringify(contextTokens),
         snapshotHtml: htmlContent.slice(0, 500000),
@@ -91,24 +149,25 @@ export class BaselineHandler {
         createdAt: event.timestamp,
         lastObservedAt: event.timestamp,
         stateSource: anchors ? 'anchor' : 'html',
+        controlSignature: snapshot.controlSignature || null,
         viewportWidth,
         viewportHeight
       });
       
-      this.logger.log('BaselineHandler', 'info', 'Created state node', { 
+      await this.logWithContext('info', 'Created state node', {
         nodeId, 
         hash: canonicalHash.substring(0, 8) + '...', 
         strategy: anchors ? 'Anchor' : 'HTML' 
-      });
+      }, event.sessionId ?? null, event.traceId ?? null);
       
       return nodeId;
     } catch (error) {
-      this.logger.log('BaselineHandler', 'error', 'Failed to upsert state node', { error: (error as Error).message });
+      await this.logWithContext('error', 'Failed to upsert state node', { error: (error as Error).message }, event.sessionId ?? null, event.traceId ?? null);
       return null;
     }
   }
 
-  private upsertFallbackNode(event: AIREvent): string | null {
+  private async upsertFallbackNode(event: AIREvent): Promise<string | null> {
     try {
       const fingerprint = 'fingerprint' in event ? event.fingerprint : null;
       const snapshotHtml = this.serializeFingerprint(fingerprint);
@@ -116,7 +175,9 @@ export class BaselineHandler {
       const contextTokens = this.stateEngine.extractContextTokens(fingerprint);
       
       const metadata = { stateSource: 'fingerprint' };
-      const existing = this.nodeRepo.findByHash('default', canonicalHash);
+      const existing = await this.nodeRepo.findByHash('default', canonicalHash);
+      const resolvedUrl = event.pageUrl || 'unknown';
+      const normalizedUrl = event.normalizedUrl || normalizeUrl(resolvedUrl);
 
       let viewportWidth: number | null = null;
       let viewportHeight: number | null = null;
@@ -132,19 +193,21 @@ export class BaselineHandler {
         metadata: JSON.stringify(metadata),
         stateSource: 'fingerprint',
         pageUrl: event.pageUrl || null,  // always update pageUrl (even if null)
+        normalizedUrl,
       };
         if (viewportWidth !== null) updates.viewportWidth = viewportWidth;
         if (viewportHeight !== null) updates.viewportHeight = viewportHeight;
-        this.nodeRepo.updateObservation(existing.id, updates);
+        await this.nodeRepo.updateObservation(existing.id, updates);
       return existing.id;
       }
       const nodeId = crypto.randomUUID();
 
-      this.nodeRepo.upsert({
+      await this.nodeRepo.upsert({
         id: nodeId,
         projectId: 'default',
         canonicalHash,
         pageUrl: event.pageUrl || null,
+        normalizedUrl,
         contextTokens: JSON.stringify(contextTokens),
         snapshotHtml,
         anchors: null,
@@ -158,7 +221,7 @@ export class BaselineHandler {
       
       return nodeId;
     } catch (error) {
-      this.logger.log('BaselineHandler', 'error', 'Failed to upsert fallback node', { error: (error as Error).message });
+      await this.logWithContext('error', 'Failed to upsert fallback node', { error: (error as Error).message }, event.sessionId ?? null, event.traceId ?? null);
       return null;
     }
   }
