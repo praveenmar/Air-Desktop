@@ -8,12 +8,17 @@
 ![Playwright](https://img.shields.io/badge/Playwright-Supported-brightgreen)
 ![Selenium](https://img.shields.io/badge/Selenium-Supported-success)
 ![AI Ready](https://img.shields.io/badge/AI-Ready-orange)
+![VirusTotal](https://img.shields.io/badge/VirusTotal-Verified-brightgreen)
+![MetaDefender](https://img.shields.io/badge/MetaDefender-Verified-brightgreen)
+![Hybrid Analysis](https://img.shields.io/badge/Hybrid%20Analysis-Verified-brightgreen)
 
 ---
 
 # Overview
 
 AIR (AI Intent Runtime) is a Visual Studio Code extension that bridges the gap between browser interactions and AI-powered automation development.
+
+AIR releases are verified with VirusTotal, MetaDefender, and Hybrid Analysis, and AIR is designed to work with modern AI coding tools through its VS Code extension and MCP server.
 
 Instead of recording only selectors or generating generic scripts, AIR captures the complete interaction context—including user actions, DOM relationships, semantic information, resilient locators, and metadata—allowing AI coding assistants to generate high-quality automation code that matches your existing project.
 
@@ -406,6 +411,7 @@ Supported AI tools include:
 - Continue
 - Cline
 - Codex
+- AIR MCP
 - Any MCP-compatible AI assistant
 
 ---

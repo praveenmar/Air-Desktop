@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+# AIR v0.1.6 - Session Loading Fixes & Improvements
+
+## Bug Fixes
+
+- Fixed AIR Developer Console session loading so the Inspector no longer remains stuck on "Loading snapshot..." when selecting a recorded session.
+- Improved Developer Console startup behavior by initializing the VS Code message bridge before tab scripts run.
+
+## Improvements
+
+- Updated documentation to highlight VirusTotal verification.
+- Clarified supported AI coding tools and AIR MCP compatibility in the README.
+
+---
+
 # 🚀 AIR v0.1.5 — Bug fixes
 
 # 🐞 Bug Fixes

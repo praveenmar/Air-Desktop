@@ -2,7 +2,7 @@
   "name": "AIRAIInteractionRecorder",
   "displayName": "AIR (AI Intent Runtime)",
   "description": "Playwright test generator for AI coding agents (Cline, Roo Code, Cursor). Captures runtime DOM intent to prevent hallucinations.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "publisher": "TestMasterHubAI",
   "license": "MIT",
   "engines": {

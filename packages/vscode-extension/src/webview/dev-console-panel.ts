@@ -619,7 +619,6 @@ function renderMcpTab(production: McpConfigVariant, development: McpConfigVarian
 function renderShellScript(defaultTab: DevConsoleTab): string {
   return `
     <script>
-      window.__airVscode = acquireVsCodeApi();
       window.addEventListener('message', (event) => {
         const msg = event.data;
         if (!msg || typeof msg.type !== 'string') return;
@@ -679,6 +678,12 @@ function renderShell(tab: DevConsoleTab, parts: {
 <body>
   <h2>AIR Developer Console</h2>
   <p class="subtitle">Inspect sessions, stream events, review logs, and manage MCP configuration.</p>
+  <script>
+    // Each tab's inline script captures this bridge during initialisation. It must
+    // exist before those scripts run or a selection leaves the Inspector stuck on
+    // its loading state after attempting to post its message.
+    window.__airVscode = acquireVsCodeApi();
+  </script>
   ${renderTabBar(tabs, tab)}
   ${parts.inspector}
   ${parts.events}
