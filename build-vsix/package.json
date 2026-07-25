@@ -2,7 +2,7 @@
   "name": "AIRAIIntentRuntime",
   "displayName": "AIR (AI Intent Runtime)",
   "description": "An intelligent DOM interceptor and semantic data layer providing LLMs with deterministic web automation context.",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "air-desktop",
   "repository": {
     "type": "git",

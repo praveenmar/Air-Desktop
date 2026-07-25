@@ -7,6 +7,279 @@ and this project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+# 🚀 AIR v0.1.5 — Bug fixes
+
+# 🐞 Bug Fixes
+
+Fixed all known bugs and improved DOM & Intent capturing
+
+---
+
+# 🚀 AIR v0.1.4 — Major UI Upgrade & Smarter Recording Engine
+
+> **A major release focused on improving the developer experience with a redesigned UI, enhanced session management, a brand-new Developer Console, and significant backend improvements for AI-powered Playwright generation.**
+
+---
+
+## ✨ What's New
+
+### 🎨 Major UI Upgrade
+
+AIR now provides a modern, intuitive workflow directly inside VS Code, replacing the previous command-centric experience with dedicated controls and powerful management tools.
+
+---
+
+## 🚀 New Status Bar Controls
+
+Access AIR without opening the Command Palette.
+
+### Added
+
+- ▶️ **AIR Start** — Start recording instantly.
+- ⏹️ **AIR Stop** — Stop active recording sessions.
+- 🕘 **AIR History** — Open Session History with one click.
+
+**Benefits**
+
+- Faster workflow
+- Less context switching
+- Better VS Code integration
+- Improved developer experience
+
+---
+
+# 📋 Enhanced Session History
+
+The previous Session History displayed only a simple list of Session IDs.
+
+It has now been completely redesigned into a full-featured Session Manager.
+
+### New Features
+
+- 🔍 Search by Session ID
+- 🎯 Filter by Session Status
+- ↕️ Sort sessions (Newest / Oldest)
+- 📄 One-click Copy Session ID
+- 🗑 Delete individual sessions
+- 🔄 Refresh sessions instantly
+- 🟢 Active / Ended status indicators
+- Cleaner and modern UI
+
+### Improvements
+
+- Better session organization
+- Faster navigation
+- Easier session management
+- Simplified cleanup of old recordings
+
+---
+
+# 🛠 New AIR Developer Console
+
+Introducing the **AIR Developer Console** — a dedicated workspace for inspecting recorded sessions and debugging AI workflows.
+
+## Features
+
+### 🔎 Inspector
+
+- Inspect recorded snapshots
+- View captured DOM metadata
+- Explore interaction context
+
+### ⚡ Events
+
+- Stream browser interaction events
+- Review recorded actions
+- Inspect event timelines
+
+### 📜 Logs
+
+- Review recording lifecycle
+- Debug extension behavior
+- Analyze recording execution
+
+### 🤖 MCP
+
+- Inspect MCP configuration
+- Debug MCP communication
+- Validate AI integration
+
+### Additional Tools
+
+- Copy JSON
+- Refresh Sessions
+- Snapshot Search
+- Session Selector
+
+---
+
+# 🤖 AI & MCP Improvements
+
+Significant improvements have been made to AIR's AI communication layer.
+
+### Improvements
+
+- Fixed JSON stream corruption during MCP communication.
+- Eliminated intermittent failures with AI-powered IDEs.
+- Improved communication reliability with Cursor, Windsurf, and other MCP-compatible editors.
+- Enhanced AI context extraction.
+- Improved prompt quality sent to AI models.
+- Increased stability of AI-assisted code generation.
+
+### Result
+
+✅ More reliable
+
+✅ Better AI responses
+
+✅ Stable Playwright generation
+
+---
+
+# 🎯 Smarter Playwright Locator Generation
+
+The selector engine has been completely redesigned.
+
+Instead of relying primarily on brittle selectors, AIR now generates more semantic and resilient Playwright locators.
+
+### Improvements
+
+Prioritizes:
+
+- `getByRole()`
+- `getByText()`
+- `getByLabel()`
+- Semantic accessibility attributes
+
+Reduced reliance on:
+
+- XPath
+- Complex CSS selectors
+- Fragile DOM paths
+
+### Benefits
+
+- Cleaner Playwright scripts
+- Better readability
+- Higher resilience to UI changes
+- Improved long-term maintainability
+
+---
+
+# 🧠 Intelligent Element Resolution
+
+AIR now understands user interactions more accurately.
+
+### Improvements
+
+- Re-engineered canonical element resolution.
+- Automatically maps `<label>` interactions to their associated form controls.
+- Eliminates duplicate interactions in generated scripts.
+- Improved handling of nested containers.
+- Fixed null-reference issues during interaction recording.
+
+### Result
+
+Cleaner generated automation with fewer redundant actions.
+
+---
+
+# ⚙️ Recording Engine Improvements
+
+The recording engine has been enhanced to produce higher-quality snapshots.
+
+### Improvements
+
+- Waits for DOM stability before capturing interactions.
+- Waits for network quiescence.
+- Improved browser lifecycle management.
+- Reduced incomplete or noisy recordings.
+- Improved snapshot timing accuracy.
+
+### Benefits
+
+- More accurate recordings
+- Better replay reliability
+- Improved AI understanding
+
+---
+
+# 🧩 Richer AI Context
+
+AIR now captures significantly more contextual information during recording.
+
+### Enhanced Context Includes
+
+- Rich DOM metadata
+- Accessibility information
+- Interaction hierarchy
+- Element relationships
+- Semantic context
+
+This enables AI models to generate smarter and more context-aware automation scripts.
+
+---
+
+# ⚡ Performance Improvements
+
+- Faster recording workflow
+- Improved session lifecycle management
+- Better internal extraction logic
+- Enhanced user intent tracking
+- Improved extension responsiveness
+- Reduced processing overhead
+
+---
+
+# 🛠 Stability Improvements
+
+- Improved browser lifecycle handling
+- Better error recovery
+- Enhanced extension reliability
+- Improved recording consistency
+- Better session persistence
+
+---
+
+# 🐞 Bug Fixes
+
+- Fixed multiple recording workflow issues.
+- Fixed MCP JSON communication corruption.
+- Fixed session management inconsistencies.
+- Fixed UI consistency issues.
+- Fixed nested container interaction issues.
+- Fixed duplicate `<label>` interaction generation.
+- Fixed AI code generation failures.
+- Resolved several known issues.
+- General bug fixes and performance improvements.
+
+---
+
+# 📈 Release Highlights
+
+| Area | Improvements |
+|-------|--------------|
+| 🎨 UI | Major UI redesign |
+| 📋 Session History | Completely redesigned |
+| 🛠 Developer Console | New feature |
+| 🤖 AI Integration | More reliable |
+| 🎯 Locator Engine | Smarter Playwright locators |
+| 🧠 Context Extraction | Richer DOM metadata |
+| ⚙ Recording Engine | Improved stability |
+| 🚀 Performance | Faster workflow |
+| 🐞 Bug Fixes | Multiple fixes & stability improvements |
+
+---
+
+## ❤️ Thank You
+
+Thank you for using **AIR**!
+
+This release represents a significant step toward making AIR the most intelligent and developer-friendly AI-powered browser automation recorder inside VS Code.
+
+Stay tuned—more exciting AI capabilities and developer productivity features are coming soon! 🚀
+---
+
 ## [0.1.3] - 2026-07-04
 
 ### Fixed

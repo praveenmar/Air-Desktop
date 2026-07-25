@@ -21,6 +21,62 @@ Whether you're using Playwright, Selenium, Cypress, or a custom automation frame
 
 ---
 
+# 🎬 Demo Video
+
+<video src="https://air.testmasterhub.com/Assests/AIR%20Test.mp4" controls muted title="AIR Demo Video" width="100%"></video>
+
+*If the video doesn't play here (e.g. on GitHub's own README view), you can [watch it directly](https://air.testmasterhub.com/Assests/AIR%20Test.mp4) or [watch on YouTube](https://youtu.be/pBQApDFwErc).*
+
+---
+
+# Typical Workflow
+
+```
+Developer
+      │
+      ▼
+Click AIR Start
+      │
+      ▼
+Perform Browser Actions
+      │
+      ▼
+Click AIR Stop
+      │
+      ▼
+Open AIR History
+      │
+      ▼
+Copy Session ID
+      │
+      ▼
+Ask AI Assistant
+      │
+      ▼
+Production-Ready Automation Code
+```
+
+---
+
+---
+
+# Use Cases
+
+AIR is perfect for:
+
+- Creating Playwright tests
+- Creating Selenium scripts
+- Creating Cypress automation
+- Generating Page Objects
+- Building reusable locator methods
+- Improving AI prompts
+- Learning existing automation frameworks
+- Accelerating QA automation development
+
+---
+
+Website - https://air.testmasterhub.com/
+
 # 🔌 MCP Server Setup (AIR MCP)
 
 AIR also ships an MCP (Model Context Protocol) server — **`air-mcp-server`** — so any MCP-compatible AI coding assistant can pull session context directly, without you copy-pasting anything.
@@ -508,34 +564,6 @@ AIR provides the AI with the required interaction context for accurate automatio
 
 ---
 
-# Typical Workflow
-
-```
-Developer
-      │
-      ▼
-Click AIR Start
-      │
-      ▼
-Perform Browser Actions
-      │
-      ▼
-Click AIR Stop
-      │
-      ▼
-Open AIR History
-      │
-      ▼
-Copy Session ID
-      │
-      ▼
-Ask AI Assistant
-      │
-      ▼
-Production-Ready Automation Code
-```
-
----
 
 # Supported Frameworks
 
@@ -563,22 +591,6 @@ Production-Ready Automation Code
 - Codex
 - AIR MCP
 
----
-
-# Use Cases
-
-AIR is perfect for:
-
-- Creating Playwright tests
-- Creating Selenium scripts
-- Creating Cypress automation
-- Generating Page Objects
-- Building reusable locator methods
-- Improving AI prompts
-- Learning existing automation frameworks
-- Accelerating QA automation development
-
----
 
 # Why Developers Love AIR
 
@@ -646,8 +658,6 @@ AIR is developed by **TestMasterHub**, focused on building AI-powered software t
 Website:
 
 https://testmasterhub.com
-
-https://air.testmasterhub.com/
 
 ---
 

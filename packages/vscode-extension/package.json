@@ -1,21 +1,29 @@
 {
   "name": "AIRAIInteractionRecorder",
   "displayName": "AIR (AI Intent Runtime)",
-  "description": "An intelligent DOM interceptor and semantic data layer providing LLMs with deterministic web automation context.",
-  "version": "0.1.4",
+  "description": "Playwright test generator for AI coding agents (Cline, Roo Code, Cursor). Captures runtime DOM intent to prevent hallucinations.",
+  "version": "0.1.5",
   "publisher": "TestMasterHubAI",
   "license": "MIT",
   "engines": {
     "vscode": "^1.90.0"
   },
   "icon": "icon.png",
-  "keywords": [
-    "air",
-    "mcp",
-    "automation",
-    "testing",
-    "playwright"
-  ],
+"keywords": [
+  "air",
+  "ai",
+  "playwright",
+  "playwright ai",
+  "ai playwright",
+  "ai test generator",
+  "test automation",
+  "browser automation",
+  "e2e testing",
+  "mcp",
+  "codegen",
+  "selenium",
+  "cypress"
+],
   "categories": [
     "Testing",
     "AI",
