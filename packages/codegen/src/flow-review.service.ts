@@ -12,7 +12,7 @@
  *   - FlowReview does not embed the original CodegenSession.
  */
 
-import type { CodegenSession } from './types';
+import type { CodegenSession, GenerationEventMetadata, SelectorResolutionV1 } from './types';
 import type {
   FlowReview,
   FlowReviewPage,
@@ -30,14 +30,24 @@ import {
   getConfidenceLabel,
   maskDisplayValue,
   deriveFlowTitle,
+  getLocatorStatus,
 } from './flow-review.utils';
 
 export class FlowReviewService {
   /**
    * Transforms a CodegenSession into an enriched FlowReview DTO.
    * All computation happens here; no async, no I/O.
+   *
+   * @param session     The raw session from buildSession()
+   * @param eventsById  Optional map of eventId → GenerationEventMetadata.
+   *                    When present, used to populate locatorStatus and outcomeEffect
+   *                    from the live shadow-proof pipeline data.
+   *                    When absent (legacy path), sensible defaults are applied.
    */
-  static build(session: CodegenSession): FlowReview {
+  static build(
+    session: CodegenSession,
+    eventsById?: Map<string, GenerationEventMetadata>,
+  ): FlowReview {
     // ── Accumulators initialized before the loop ─────────────────────────────
     const enrichedSteps: FlowReviewStep[] = [];
     const pages: FlowReviewPage[] = [];
@@ -54,6 +64,7 @@ export class FlowReviewService {
     let fragileSteps       = 0;
     let lowConfidenceSteps = 0;
     let sensitiveDataSteps = 0;
+    let unresolvedSteps    = 0;
 
     // ── Single pass over all steps ────────────────────────────────────────────
     for (const rawStep of session.steps) {
@@ -76,11 +87,26 @@ export class FlowReviewService {
       }
 
       // ── Build the enriched step ────────────────────────────────────────────
-      const selectorQuality  = getSelectorQuality(rawStep.selectorPriority);
+      // Look up per-event metadata (shadow-proof pipeline output) if available
+      const eventMeta: GenerationEventMetadata | undefined =
+        rawStep.eventId && eventsById ? eventsById.get(rawStep.eventId) : undefined;
+
+      const selectorResolution: SelectorResolutionV1 | undefined =
+        eventMeta?.selectorResolution ?? undefined;
+
+      // proofSource lives inside selectorResolution.selected when status = resolved
+      const proofSource: string | null =
+        selectorResolution?.status === 'resolved'
+          ? selectorResolution.selected?.proofSource ?? null
+          : null;
+
+      const selectorQuality  = getSelectorQuality(rawStep.selectorPriority, proofSource);
       const confidenceLabel  = getConfidenceLabel(rawStep.confidence, rawStep.sampleSize);
       const displayValue     = rawStep.value
         ? maskDisplayValue(rawStep.value, rawStep.intent)
         : undefined;
+
+      const locatorStatus = getLocatorStatus(selectorResolution, rawStep.action);
 
       const step: FlowReviewStep = {
         stepNumber:       rawStep.step,
@@ -96,6 +122,8 @@ export class FlowReviewService {
         outcomeType:      rawStep.outcomeType,
         navigatesTo:      rawStep.navigatesTo,
         assertions:       rawStep.assertions,
+        locatorStatus,
+        outcomeEffect:    rawStep.outcomeEffect,
         // userAssertions intentionally excluded — Phase 2 stub, always empty
         confidence:       rawStep.confidence,
         confidenceLabel,
@@ -119,6 +147,10 @@ export class FlowReviewService {
 
       if (selectorQuality === 'fragile' || selectorQuality === 'unknown') {
         fragileSteps++;
+      }
+
+      if (locatorStatus === 'unresolved') {
+        unresolvedSteps++;
       }
 
       // "Genuinely flaky" requires sampleSize > 1 so we know it's been observed
@@ -182,6 +214,17 @@ export class FlowReviewService {
                   + `The test generator will produce mock data instead of the recorded value.`,
         });
       }
+
+      if (locatorStatus === 'unresolved') {
+        warnings.push({
+          type:     'unresolved_selector',
+          severity: 'error',
+          step:     rawStep.step,
+          message:  `Step ${rawStep.step} ("${step.intent}") has no replay-safe selector. `
+                  + `The selector resolver could not find a stable locator. `
+                  + `Manual review required before generating a test.`,
+        });
+      }
     }
     // ── End of single pass ────────────────────────────────────────────────────
 
@@ -218,6 +261,7 @@ export class FlowReviewService {
       fragileSteps,
       lowConfidenceSteps,
       sensitiveDataSteps,
+      unresolvedSteps,
     };
 
     return {

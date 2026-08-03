@@ -45,12 +45,13 @@ import {
   GenerationEventMetadata,
   ListRecordedSessionsOptions,
   ListRecordedSessionsResult,
+  OutcomeEffect,
 } from './types';
 import type { ResolverConfig, SnapshotCache } from './selector-resolver';
 import type { SnapshotHandle, SnapshotInventory, SnapshotSelectionMode, StateBoundary } from './snapshot-selector';
 import { selectSnapshotForStep } from './snapshot-selector';
 import { FlowReviewService } from './flow-review.service';
-import { FlowReviewFormatter } from './flow-review.formatter';
+import { FlowReviewMarkdownFormatter } from './flow-review.formatter';
 import {
   getUserDefinedAssertions,
   hasUserAssertionSupport,
@@ -822,6 +823,15 @@ function extractTabId(payloadJson: string | null): string | null | undefined {
     return typeof payload?.tabId === 'string' && payload.tabId.length > 0
       ? payload.tabId
       : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function extractOutcomeEffect(payloadJson: string | null): OutcomeEffect | undefined {
+  if (!payloadJson) return undefined;
+  try {
+    return JSON.parse(payloadJson).outcomeEffect;
   } catch {
     return undefined;
   }
@@ -1613,6 +1623,7 @@ export class CodegenService {
         normalizedUrl:    extractNormalizedUrl(ev.payload, ev.pageUrl || ''),
         confidence,
         sampleSize:       edge?.sampleSize ?? 1,
+        outcomeEffect:    extractOutcomeEffect(ev.payload),
         assertions:       [],
         userAssertions:   [],
       };
@@ -2547,13 +2558,25 @@ export class CodegenService {
 
   /**
    * PHASE 3E-C: MCP read path
-   * 
-   * Returns a human-readable ASCII/Markdown review of a recorded session.
-   * Driven by the FlowReview layer, avoiding raw DOM/snapshot data.
+   *
+   * Returns a proper Markdown review of a recorded session.
+   * Loads per-event generation metadata (selectorResolution, proofSource)
+   * so the FlowReview layer can accurately classify locatorStatus and
+   * selectorQuality using the shadow-proof pipeline output.
    */
   public getFlowReviewMarkdown(sessionId: string): string {
     const session = this.buildSession(sessionId);
-    const review = FlowReviewService.build(session);
-    return FlowReviewFormatter.formatForConsole(review);
+
+    // Load per-event metadata if any event IDs are present (post-pipeline sessions)
+    const eventIds = session.steps
+      .map(s => s.eventId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+
+    const eventsById = eventIds.length > 0
+      ? this.getGenerationEventMetadataByIds(eventIds)
+      : new Map();
+
+    const review = FlowReviewService.build(session, eventsById);
+    return FlowReviewMarkdownFormatter.format(review);
   }
 }

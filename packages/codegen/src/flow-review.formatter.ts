@@ -18,6 +18,7 @@ import type {
   SelectorQuality,
   WarningSeverity,
 } from './flow-review.types';
+import { formatOutcomeEffect } from './flow-review.utils';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SYMBOL MAPS  (ASCII only — safe in every terminal and CI log)
@@ -220,5 +221,159 @@ export class FlowReviewFormatter {
     } catch {
       return url.length > 45 ? url.slice(0, 42) + '...' : url;
     }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// MARKDOWN FORMATTER
+// Produces real GitHub-flavoured Markdown: headers, tables, alerts.
+// Used by the MCP get_session_flow_review tool and AI consumers.
+// ──────────────────────────────────────────────────────────────────────
+
+export class FlowReviewMarkdownFormatter {
+  /**
+   * Renders the FlowReview as proper GitHub-flavoured Markdown.
+   * Suitable for MCP tool responses, AI context, and Markdown viewers.
+   */
+  static format(review: FlowReview): string {
+    const lines: string[] = [];
+
+    // ── Header ─────────────────────────────────────────────────────────────
+    lines.push(`# AIR Flow Review: ${review.flowTitle}`);
+    lines.push('');
+    lines.push(`**Session:** \`${review.sessionId}\``);
+    lines.push(`**Recorded:** ${review.recordedAt}`);
+    lines.push(`**Start URL:** ${review.startUrl}`);
+    lines.push('');
+
+    // ── Stats table ──────────────────────────────────────────────────────────
+    const { stats } = review;
+    const isFalseConf = review.flowConfidence >= 0.99 && stats.navigationCount === 0;
+    const confDisplay = isFalseConf
+      ? '? (no nav edges)'
+      : `${Math.round(review.flowConfidence * 100)}%`;
+
+    lines.push('## Summary');
+    lines.push('');
+    lines.push('| Metric | Value |');
+    lines.push('|--------|-------|');
+    lines.push(`| Steps | ${stats.totalSteps} |`);
+    lines.push(`| Pages | ${stats.totalPages} |`);
+    lines.push(`| Flow Confidence | ${confDisplay} |`);
+    lines.push(`| Page Navigations | ${stats.navigationCount} |`);
+    lines.push(`| Assertions | ${stats.assertionCount} |`);
+    if (stats.unresolvedSteps > 0) {
+      lines.push(`| **⚠️ Unresolved Steps** | **${stats.unresolvedSteps}** |`);
+    }
+    if (stats.fragileSteps > 0) {
+      lines.push(`| Fragile Selectors | ${stats.fragileSteps} |`);
+    }
+    if (stats.lowConfidenceSteps > 0) {
+      lines.push(`| Flaky Steps | ${stats.lowConfidenceSteps} |`);
+    }
+    lines.push('');
+
+    // ── Critical warnings block at the top (unresolved + flow-level) ─────────
+    const criticalWarnings = review.warnings.filter(w => w.severity === 'error');
+    if (criticalWarnings.length > 0) {
+      lines.push('> [!CAUTION]');
+      for (const w of criticalWarnings) {
+        const stepTag = w.step !== undefined ? `Step ${w.step}: ` : '';
+        lines.push(`> - ${stepTag}${w.message}`);
+      }
+      lines.push('');
+    }
+
+    // ── Flow path ───────────────────────────────────────────────────────────
+    lines.push('## Flow Path');
+    lines.push('');
+    const pageNames = review.pages.map(p => p.pageName);
+    lines.push(pageNames.join(' → '));
+    lines.push('');
+
+    // ── Per-page step blocks ───────────────────────────────────────────────
+    lines.push('## Steps');
+    lines.push('');
+
+    for (const page of review.pages) {
+      lines.push(`### ${page.pageName}`);
+      lines.push(`*${page.urlPathname}*`);
+      lines.push('');
+
+      for (const step of page.steps) {
+        lines.push(...this.formatStepMd(step));
+      }
+    }
+
+    // ── Non-critical warnings ─────────────────────────────────────────────
+    const nonCritical = review.warnings.filter(w => w.severity !== 'error');
+    if (nonCritical.length > 0) {
+      lines.push('## Warnings');
+      lines.push('');
+      for (const w of nonCritical) {
+        const prefix = w.severity === 'warning' ? '> [!WARNING]' : '> [!NOTE]';
+        lines.push(prefix);
+        const stepTag = w.step !== undefined ? `Step ${w.step}: ` : '';
+        lines.push(`> ${stepTag}${w.message}`);
+        lines.push('');
+      }
+    }
+
+    // ── Legend ──────────────────────────────────────────────────────────────
+    lines.push('---');
+    lines.push('**Selector quality:** `[*]` data-testid &nbsp; `[+]` id/attr/ARIA &nbsp; `[!]` fragile &nbsp; `[?]` unknown');
+    lines.push('');
+
+    return lines.join('\n');
+  }
+
+  // ── Step formatter ─────────────────────────────────────────────────────
+
+  private static formatStepMd(step: FlowReviewStep): string[] {
+    const QUALITY_BADGE: Record<SelectorQuality, string> = {
+      best:    '[\u2605]', // star
+      good:    '[+]',
+      fragile: '[!]',
+      unknown: '[?]',
+    };
+
+    const lines: string[] = [];
+    const badge      = QUALITY_BADGE[step.selectorQuality];
+    const num        = String(step.stepNumber).padStart(2, ' ');
+    const statusIcon = step.locatorStatus === 'unresolved' ? ' ⚠️' : '';
+
+    // Primary line
+    let primary = `**${num}. ${step.displayAction}** “${step.intent}”${statusIcon}`;
+    if (step.displayValue) primary += ` = \`${step.displayValue}\``;
+    if (step.outcomeType === 'navigation' && step.navigatesTo) {
+      primary += ` → \`${this.shortenUrl(step.navigatesTo)}\``;
+    }
+    lines.push(`- ${primary}`);
+
+    // Selector line
+    const selectorTrunc = step.selector.length > 60
+      ? step.selector.slice(0, 57) + '...'
+      : step.selector;
+    lines.push(`  ${badge} \`${selectorTrunc}\` &nbsp; *${step.confidenceLabel}*`);
+
+    // Outcome effect line
+    if (step.outcomeEffect) {
+      lines.push(`  **Effect:** ${formatOutcomeEffect(step.outcomeEffect)}`);
+    }
+
+    // Assertion lines
+    for (const assertion of step.assertions) {
+      const target = assertion.selector ?? assertion.value;
+      const trunc  = target.length > 60 ? target.slice(0, 57) + '...' : target;
+      lines.push(`  - ✓ assert ${assertion.type}: \`${trunc}\``);
+    }
+
+    lines.push('');
+    return lines;
+  }
+
+  private static shortenUrl(url: string): string {
+    try { return new URL(url).pathname; }
+    catch { return url.length > 45 ? url.slice(0, 42) + '...' : url; }
   }
 }

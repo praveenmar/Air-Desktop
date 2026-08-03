@@ -20,7 +20,7 @@ export type {
 
 // ── FlowReview layer ─────────────────────────────────────────────────────────
 export { FlowReviewService }   from './flow-review.service';
-export { FlowReviewFormatter } from './flow-review.formatter';
+export { FlowReviewFormatter, FlowReviewMarkdownFormatter } from './flow-review.formatter';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 export type {

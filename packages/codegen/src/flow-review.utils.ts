@@ -6,6 +6,7 @@
  * Every function is independently testable.
  */
 
+import type { OutcomeEffect, SelectorResolutionV1 } from './types';
 import type { SelectorQuality } from './flow-review.types';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -196,12 +197,54 @@ export function normalizeActionVerb(action: string): string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Maps a SelectorPriority string to a SelectorQuality reliability tier.
- * 'unknown' is already returned by normalizeSelectorPriority() for anything
- * unrecognized (including the multi-attribute P8.5 "multi-attribute" priority
- * that doesn't exist in the SelectorPriority enum).
+ * Maps a selectorPriority string AND/OR a proofSource from the new class-based
+ * selector engine to a SelectorQuality reliability tier.
+ *
+ * Priority order:
+ *   1. proofSource (if present) — from the new shadow-proof pipeline
+ *   2. selectorPriority (legacy) — from the old fingerprint-based system
+ *
+ * proofSource class mapping:
+ *   'semantic-identity'          → 'best'    (getByRole / getByPlaceholder / getByText)
+ *   'accessibility-role-name'    → 'best'    (getByRole with accessible name)
+ *   'label-bound-identity'       → 'good'    (getByLabel — stable ARIA contract)
+ *   'direct-identity'            → 'good'    (testid / id / stable attribute)
+ *   'pragmatic-css'              → 'good'    (clean aria-label CSS)
+ *   'semantic-context-filtering' → 'fragile' (filtered by surrounding context)
+ *   'structural-*'               → 'fragile' (positional / nth-child)
+ *   'collection-membership'      → 'fragile' (table row / list item)
+ *   'stateful-lifecycle'         → 'fragile' (option-panel — DOM-state-dependent)
  */
-export function getSelectorQuality(priority: string): SelectorQuality {
+export function getSelectorQuality(
+  priority: string,
+  proofSource?: string | null,
+): SelectorQuality {
+  // ── New class-based system: proofSource wins when present ──────────────────
+  if (proofSource) {
+    const ps = proofSource.toLowerCase();
+    if (
+      ps === 'semantic-identity' ||
+      ps === 'accessibility-role-name'
+    ) return 'best';
+
+    if (
+      ps === 'label-bound-identity' ||
+      ps === 'direct-identity' ||
+      ps === 'pragmatic-css'
+    ) return 'good';
+
+    if (
+      ps.startsWith('structural') ||
+      ps === 'collection-membership' ||
+      ps === 'stateful-lifecycle' ||
+      ps === 'semantic-context-filtering' ||
+      ps === 'hierarchical-navigation'
+    ) return 'fragile';
+
+    // Any other proofSource — defer to legacy priority below
+  }
+
+  // ── Legacy fingerprint-based priority ─────────────────────────────────
   switch (priority) {
     case 'data-testid': return 'best';
     case 'id':
@@ -329,4 +372,70 @@ export function deriveFlowTitle(
 function titleCase(str: string): string {
   if (!str) return '';
   return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LOCATOR STATUS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Maps a SelectorResolutionV1 object to the FlowReviewStep.locatorStatus field.
+ * Falls back to 'not_applicable' when no resolution metadata exists (e.g. navigate steps).
+ */
+export function getLocatorStatus(
+  selectorResolution: SelectorResolutionV1 | undefined | null,
+  action: string,
+): 'resolved' | 'unresolved' | 'not_applicable' {
+  // Navigate steps have no target element — not applicable
+  if (action === 'navigate') return 'not_applicable';
+
+  if (!selectorResolution) {
+    // No resolution metadata — treat as resolved (legacy sessions pre-dating the pipeline)
+    return 'resolved';
+  }
+  return selectorResolution.status === 'resolved' ? 'resolved' : 'unresolved';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OUTCOME EFFECT DISPLAY
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Formats an OutcomeEffect into a concise human-readable string for display.
+ * Used by both the ASCII formatter and the Markdown formatter.
+ *
+ * Examples:
+ *   new_tab         → "New tab → /checkout"
+ *   browser_dialog  → "Alert: \"Are you sure?\""
+ *   modal_appeared  → "Modal: Confirm Delete"
+ *   modal_dismissed → "Modal dismissed (escape)"
+ */
+export function formatOutcomeEffect(effect: OutcomeEffect): string {
+  switch (effect.type) {
+    case 'new_tab': {
+      const url = effect.targetUrl
+        ? ((): string => {
+            try { return new URL(effect.targetUrl!).pathname; } catch { return effect.targetUrl!; }
+          })()
+        : '(unknown)';
+      return `New tab \u2192 ${url}`;
+    }
+    case 'browser_dialog': {
+      const kind = effect.dialogType ?? 'dialog';
+      const msg  = effect.message ? ` \"${effect.message.slice(0, 60)}\"` : '';
+      return `${titleCase(kind)}:${msg}`;
+    }
+    case 'modal_appeared': {
+      const title = effect.modalTitle ?? effect.modalSelector ?? 'modal';
+      return `Modal appeared \u2014 ${title}`;
+    }
+    case 'modal_dismissed': {
+      const how = effect.how ?? 'unknown';
+      return `Modal dismissed (${how})`;
+    }
+    default: {
+      const _exhaustive: never = effect.type;
+      return 'Unknown effect';
+    }
+  }
 }

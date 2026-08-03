@@ -1194,6 +1194,14 @@ class AIRInterceptor {
     this.quiescence = new QuiescenceEngine();
     this.quiescence.monitor();
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // PATCH B: Browser dialog intercept
+    // Patch window.alert / confirm / prompt so AIR can capture any dialog that
+    // fires synchronously as a side-effect of a button click.
+    // The captured effect is attached to the queued click event by handleClick.
+    // ─────────────────────────────────────────────────────────────────────────
+    this._patchBrowserDialogs();
+
     // Recover any events stashed to localStorage during a previous page navigation.
     // MUST run before checkPendingOutcome() to guarantee correct event ordering:
     // stashed click → outcome (from checkPendingOutcome) → edge created correctly.
@@ -5879,7 +5887,171 @@ class AIRInterceptor {
     }
   }
 
-  // ──────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PATCH B: Browser dialog intercept (_patchBrowserDialogs)
+  // Called once from init(). Wraps window.alert / confirm / prompt so that any
+  // synchronous dialog triggered by a button click is captured as an outcomeEffect
+  // on the queued click event. Safe to call multiple times (idempotent guard).
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  _patchBrowserDialogs() {
+    // Idempotent: only patch once per page
+    if (window.__AIR_DIALOGS_PATCHED__) return;
+    window.__AIR_DIALOGS_PATCHED__ = true;
+
+    const self = this;
+
+    const _origAlert = window.alert;
+    window.alert = function(msg) {
+      try {
+        self._pendingDialogEffect = {
+          type: 'browser_dialog',
+          dialogType: 'alert',
+          message: String(msg ?? '').slice(0, 200),
+        };
+      } catch (_) {}
+      return _origAlert.call(this, msg);
+    };
+
+    const _origConfirm = window.confirm;
+    window.confirm = function(msg) {
+      try {
+        self._pendingDialogEffect = {
+          type: 'browser_dialog',
+          dialogType: 'confirm',
+          message: String(msg ?? '').slice(0, 200),
+        };
+      } catch (_) {}
+      return _origConfirm.call(this, msg);
+    };
+
+    const _origPrompt = window.prompt;
+    window.prompt = function(msg, defaultVal) {
+      try {
+        self._pendingDialogEffect = {
+          type: 'browser_dialog',
+          dialogType: 'prompt',
+          message: String(msg ?? '').slice(0, 200),
+        };
+      } catch (_) {}
+      return _origPrompt.call(this, msg, defaultVal);
+    };
+
+    this.log('AIR_DIALOG_PATCH_APPLIED', {});
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PATCH C: Post-click modal detection (_detectModalAppearance)
+  // Called after quiescence settles for non-navigation, non-new-tab clicks.
+  // Uses MutationObserver to detect [role="dialog"] / <dialog> elements that
+  // appear in the DOM within a 350ms window after the click.
+  //
+  // Only strict ARIA-dialog elements qualify to avoid false-positives from
+  // toasts, tooltips, and loading spinners.
+  //
+  // On detection, emits an outcomeEffect back onto the already-queued click
+  // event by looking it up in the event queue by actionEventId.
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  _detectModalAppearance(actionEventId, traceId) {
+    const OBSERVE_MS = 350;
+    let observer = null;
+
+    const _self = this;
+
+    // Snapshot existing dialogs before observation to avoid false positives
+    const existingDialogs = new Set(
+      Array.from(document.querySelectorAll('dialog, [role="dialog"][aria-modal="true"]'))
+    );
+
+    const cleanup = () => {
+      if (observer) {
+        try { observer.disconnect(); } catch (_) {}
+        observer = null;
+      }
+    };
+
+    const _detectNode = (node) => {
+      if (!(node instanceof Element)) return null;
+      const tag  = node.tagName?.toLowerCase();
+      const role = node.getAttribute?.('role');
+      const modal = node.getAttribute?.('aria-modal');
+
+      const isDialog =
+        tag === 'dialog' ||
+        (role === 'dialog' && modal === 'true');
+
+      if (!isDialog) return null;
+      if (existingDialogs.has(node)) return null;
+
+      // Extract the modal title (heading or aria-label)
+      const title =
+        node.getAttribute?.('aria-label') ||
+        node.querySelector?.('h1, h2, h3, h4, [class*="title"], [class*="header"]')?.textContent?.trim().slice(0, 80) ||
+        null;
+
+      // Build the best stable CSS selector for the modal
+      const modalId = node.id ? `#${CSS.escape(node.id)}` : null;
+      const modalAriaLabel = node.getAttribute?.('aria-label')
+        ? `[aria-label="${node.getAttribute('aria-label')}"]`
+        : null;
+      const modalSelector = modalId || modalAriaLabel || (tag === 'dialog' ? 'dialog' : '[role="dialog"]');
+
+      return { modalSelector, modalTitle: title };
+    };
+
+    const _attachEffect = (modalInfo) => {
+      cleanup();
+      const effect = {
+        type: 'modal_appeared',
+        modalSelector: modalInfo.modalSelector,
+        modalTitle: modalInfo.modalTitle,
+      };
+
+      // Retroactively attach to the action event in the queue
+      const ev = _self.eventQueue?.find?.(e => e?.id === actionEventId);
+      if (ev) {
+        ev.outcomeEffect = effect;
+        _self.log('AIR_MODAL_DETECTED', { traceId, ...modalInfo });
+      }
+    };
+
+    try {
+      observer = new MutationObserver((mutations) => {
+        if (!observer) return;
+        for (const mutation of mutations) {
+          for (const node of mutation.addedNodes) {
+            const info = _detectNode(node);
+            if (info) {
+              _attachEffect(info);
+              return; // first modal wins
+            }
+            // Also check subtree additions (e.g. modal rendered inside portal)
+            if (node instanceof Element) {
+              const nested = node.querySelector?.('dialog, [role="dialog"][aria-modal="true"]');
+              if (nested && !existingDialogs.has(nested)) {
+                const nestedInfo = _detectNode(nested) || {
+                  modalSelector: '[role="dialog"]',
+                  modalTitle: null,
+                };
+                _attachEffect(nestedInfo);
+                return;
+              }
+            }
+          }
+        }
+      });
+
+      observer.observe(document.body, { childList: true, subtree: true });
+
+      // Auto-cleanup after OBSERVE_MS regardless of whether a modal appeared
+      setTimeout(cleanup, OBSERVE_MS);
+    } catch (_) {
+      cleanup();
+    }
+  }
+
+
 
   // ─────────────────────────────────────────────────────────────
   // MOUSEDOWN PRE-CAPTURE (DOM detachment race guard)
@@ -6258,9 +6430,6 @@ class AIRInterceptor {
       pageState: initialSnapshot, // Used by DB to identify "From Node"
     };
 
-    this.queueEvent(actionEvent);
-    this.flushQueue();
-
     // Check A: Is it a Submit Button?
     const isSubmit =
       clickTarget.type === "submit" || clickTarget.closest?.('button[type="submit"]');
@@ -6280,9 +6449,36 @@ class AIRInterceptor {
       !anchor.href.includes("#") &&
       anchor.target !== "_blank"; // New tabs don't change current URL
 
+    this.queueEvent(actionEvent);
+
+    // ── PATCH C: Post-click modal detection ──
+    // Start observing immediately so we don't miss the appearance animation
+    if (!isNewTabLink) {
+      this._detectModalAppearance(actionEventId, traceId);
+    }
+
+    // Capture any dialog effect that fired synchronously prior to this click
+    const localDialogEffect = this._pendingDialogEffect;
+    this._pendingDialogEffect = null;
+
+    // ── PATCH A/B: Allow time for effects to attach before flushing ──
+    if (isNewTabLink) {
+      actionEvent.outcomeEffect = { type: 'new_tab', targetUrl: anchor.href };
+      this.flushQueue(); // Flush immediately before tab switch
+    } else {
+      setTimeout(() => {
+        if (localDialogEffect) {
+          const ev = this.eventQueue?.find(e => e?.id === actionEventId);
+          if (ev) ev.outcomeEffect = localDialogEffect;
+        }
+        this.flushQueue();
+      }, 400); // 400ms > 350ms modal observer window
+    }
+
     // Critical: for target="_blank", the outcome snapshot belongs to the new tab.
     // Stash the trace+URL and let checkPendingOutcome() recover on destination tab.
     if (isNewTabLink) {
+
       const saved = this._stashCrossTabPendingTrace(traceId, anchor.href, startUrl);
       if (saved) {
         this.log("↗️ New-tab navigation detected; deferring outcome to destination tab", {
@@ -6449,6 +6645,7 @@ class AIRInterceptor {
       // Normal case: SPA nav (urlChanged=true) or non-navigation click.
       // Outcome URL is correct. Send immediately.
       this.queueEvent(outcomeEvent);
+      // Removed the _detectModalAppearance call from here because we moved it up to run concurrently with quiescence
     }
 
     } catch (err) {

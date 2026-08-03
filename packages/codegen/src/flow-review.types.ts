@@ -15,6 +15,7 @@ import type {
   CodegenAssertion,
   ActionType,
   OutcomeType,
+  OutcomeEffect,
   SelectorPriority,
 } from './types';
 
@@ -42,7 +43,8 @@ export type WarningType =
   | 'flaky_step'             // step.confidence < 0.8 and sampleSize > 1
   | 'fragile_selector'       // selectorQuality === 'fragile' or 'unknown'
   | 'sensitive_data'         // value === '<LLM_GENERATE_MOCK_DATA>'
-  | 'low_sample_size';       // sampleSize === 1 with confidence === 1.0 (ambiguous)
+  | 'low_sample_size'        // sampleSize === 1 with confidence === 1.0 (ambiguous)
+  | 'unresolved_selector';   // locatorStatus === 'unresolved' — step cannot be generated
 
 export interface FlowReviewWarning {
   type: WarningType;
@@ -83,6 +85,20 @@ export interface FlowReviewStep {
   displayValue?: string;
 
   outcomeType?: OutcomeType;
+
+  /**
+   * Whether this step's selector was successfully resolved for code generation.
+   * 'resolved'       — a replay-safe locator was found; code can be generated.
+   * 'unresolved'     — no replay-safe selector found; fallback hints only.
+   * 'not_applicable' — this step type does not require a target locator.
+   */
+  locatorStatus: 'resolved' | 'unresolved' | 'not_applicable';
+
+  /**
+   * Secondary side-effect produced by this action, if any.
+   * e.g. a new tab opened, a browser alert appeared, a modal popped up.
+   */
+  outcomeEffect?: OutcomeEffect;
 
   /** Destination URL — only when outcomeType === 'navigation'. */
   navigatesTo?: string;
@@ -156,6 +172,8 @@ export interface FlowReviewStats {
   lowConfidenceSteps: number;
   /** Steps where value === '<LLM_GENERATE_MOCK_DATA>' (sensitive fields). */
   sensitiveDataSteps: number;
+  /** Steps where locatorStatus === 'unresolved' — cannot be generated without manual fix. */
+  unresolvedSteps: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

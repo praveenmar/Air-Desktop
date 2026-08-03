@@ -43,6 +43,45 @@ export type OutcomeType =
   | 'state_refresh'
   | 'immediate_action';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// OUTCOME EFFECT — side-effect produced by a user action beyond URL navigation
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The type of secondary effect a click/submit produced.
+ * - new_tab         : A new browser tab was opened (target="_blank")
+ * - browser_dialog  : window.alert(), confirm(), or prompt() was invoked
+ * - modal_appeared  : A custom [role="dialog"] / <dialog> element appeared
+ * - modal_dismissed : A modal was closed without the user interacting with it
+ */
+export type OutcomeEffectType =
+  | 'new_tab'
+  | 'browser_dialog'
+  | 'modal_appeared'
+  | 'modal_dismissed';
+
+export interface OutcomeEffect {
+  type: OutcomeEffectType;
+
+  // new_tab
+  /** The URL the new tab was opened to (from anchor.href). */
+  targetUrl?: string;
+
+  // browser_dialog
+  /** The kind of browser dialog — alert / confirm / prompt. */
+  dialogType?: 'alert' | 'confirm' | 'prompt';
+  /** The message string passed to alert/confirm/prompt. */
+  message?: string;
+
+  // modal_appeared / modal_dismissed
+  /** Best CSS selector for the modal container element. */
+  modalSelector?: string;
+  /** Accessible title of the modal (heading or aria-label). */
+  modalTitle?: string;
+  /** How the modal was dismissed (only for modal_dismissed). */
+  how?: 'escape' | 'close_button' | 'outside_click';
+}
+
 export type SelectorPriority =
   | 'data-testid'
   | 'id'
@@ -839,6 +878,13 @@ export interface CodegenStep {
 
   /** How the page responded to this action */
   outcomeType?: OutcomeType;
+
+  /**
+   * Secondary effect produced by this action beyond URL navigation.
+   * e.g. a new tab opened, an alert was shown, or a modal appeared.
+   * Populated by the interceptor at record time.
+   */
+  outcomeEffect?: OutcomeEffect;
 
   /**
    * Destination URL — only present when outcomeType = 'navigation'.
