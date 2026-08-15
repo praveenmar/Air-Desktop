@@ -938,3 +938,67 @@ Building `get_app_graph` MCP tool (Gap #7) and adding `edge.sample_size` to the 
 *Initial analysis: 2026-08-09 | Contract + Graph update: 2026-08-15 | Second-pass verification: 2026-08-16*
 
 *Source files verified (2026-08-16 pass): packages/codegen/src/generation-builder.ts (lines 424-466 guidance rules, 156-172 step mapping, 238-265 noise classifier), packages/codegen/src/codegen.service.ts (lines 1560-1680 step building, 1662/1814/1862/2087/2304 debug logs), packages/mcp-server/src/tools/get-session-generation-context.ts (full 145 lines), packages/mcp-server/src/utils/privacy.ts (full), packages/codegen/package.json, packages/codegen/tsconfig.build.json, packages/codegen/src/runtime-schemas.ts (lines 68-151)*
+
+
+=================================================================================================================
+
+
+
+
+Good catch. Let me check what path I actually used vs what you're pointing to.
+
+Ran command: `Get-Item "e:\Air Desktop\interceptor\interceptor.js" -ErrorAction SilentlyContinue | Select-Object FullName, Length; Get-Item "e:\Air Desktop\packages\vscode-extension\interceptor.js" -ErrorAction SilentlyContinue | Select-Object FullName, Length`
+
+There it is. Two completely different files:
+
+| Path | Size |
+|---|---|
+| `E:\Air Desktop\interceptor\interceptor.js` | **136,843 bytes** (~133 KB) — what I used |
+| `E:\Air Desktop\packages\vscode-extension\interceptor.js` | **442,984 bytes** (~432 KB) — what you're pointing to, **3.2× larger** |
+
+I used the wrong one. The correct file is `packages\vscode-extension\interceptor.js` — it's the actual deployed interceptor. Let me now read the right one and check if any of the gap analysis findings about the interceptor are wrong or need updating.
+
+Ran command: `Select-String -Path "e:\Air Desktop\packages\vscode-extension\interceptor.js" -Pattern "_emitInputEvent|handleInput|postInputMut|followupMut|MutationObserver.*input|input.*MutationObserver" | Select-Object LineNumber, Line | Select-Object -First 25`
+Viewed interceptor.js:4970-5080
+Ran command: `Select-String -Path "e:\Air Desktop\packages\vscode-extension\interceptor.js" -Pattern "followupMutation|postInputMut|list-appeared|autocomplete.*detect|detect.*autocomplete|MutationObserver.*blur|blur.*MutationObserver" | Select-Object LineNumber, Line | Select-Object -First 20`
+Ran command: `Select-String -Path "e:\Air Desktop\packages\vscode-extension\interceptor.js" -Pattern "TRIGGER_CLASS_PATTERNS|_resolveCustomDropdown|aria-haspopup|custom-control-open|_attachHoverDetection" | Select-Object LineNumber, Line | Select-Object -First 20`
+Ran command: `Select-String -Path "e:\Air Desktop\packages\vscode-extension\interceptor.js" -Pattern "QuiescenceEngine|quiescence|NetworkCounter|_attachHoverDetection|nodesAdded|nodesRemoved" | Select-Object LineNumber, Line | Select-Object -First 20`
+Ran command: `Select-String -Path "e:\Air Desktop\packages\vscode-extension\interceptor.js" -Pattern "nodesAdded|nodesRemoved" | Select-Object LineNumber, Line | Select-Object -First 20`
+Viewed interceptor.js:4145-4380
+Ran command: `Select-String -Path "e:\Air Desktop\packages\vscode-extension\interceptor.js" -Pattern "handleInput|handleClick|handleSubmit|handleScroll|handleBlur|handleChange|handleFocus|_emitInputEvent" | Select-Object LineNumber, Line | Select-Object -First 20`
+
+Good. I now have the full picture from the correct file. Let me check one more key thing — the total line count comparison and any additional capabilities in the correct file that the old file didn't have.
+
+Ran command: `Select-String -Path "e:\Air Desktop\packages\vscode-extension\interceptor.js" -Pattern "class AIRInterceptor|VERSION|v7|v6|schemaVersion" | Select-Object LineNumber, Line | Select-Object -First 10`
+
+Now I have everything I need to give you a straight answer.
+
+---
+
+## The Answer
+
+**Yes, I used the wrong interceptor.** The one I analyzed was `E:\Air Desktop\interceptor\interceptor.js` (133KB, ~3,500 lines). The correct deployed one is `E:\Air Desktop\packages\vscode-extension\interceptor.js` (432KB, **11,755 lines** — 3.2× larger).
+
+## What Changed After Reading the Right File
+
+| Topic | What I Said (Based on Wrong File) | What's Actually True (Correct File) |
+|---|---|---|
+| **Line references** | Gaps #1/#2 at "lines 1657-1757" | Wrong. `_emitInputEvent` is at **line 4970**, `handleInput` at **4724** |
+| **`_attachHoverDetection()`** | "Lines 1320-1385" | Actually at **line 4145** — and the implementation is significantly more sophisticated |
+| **Hover architecture** | Simple MutationObserver, 300ms window | Correct in concept, but the real file has a full `_hoverIntentBuffer` system, `_recordHoverIntentBuffer()`, `_findSyntheticHoverCandidate()`, and `_emitSyntheticHover()` — much more than described |
+| **Hover emits `nodesAdded`** | Said "records nodesAdded and nodesRemoved" | Partially true — the real hover at line 4345-4346 does record them, **but `_emitSyntheticHover()` at line 4271-4272 hardcodes `nodesAdded: 0, nodesRemoved: 0`** — so synthetic hovers lose this data |
+| **Custom dropdown engine** | "Lines 1758-2132" | Actually at **line 5118+** (TRIGGER_CLASS_PATTERNS), **5357** (_resolveCustomDropdownTrigger) |
+| **Gap #1/#2 root cause** | Correct in substance | Correct — no `followupMutation` field, confirmed absent from `_emitInputEvent` at 4970-5038 |
+| **Beacon + stash durability** | "Solid" | The real file has a very detailed 3-strategy system with proper explanations — more thorough than described |
+| **Interceptor total lines** | "3,529 lines" | **11,755 lines** — the document's architecture map is wrong |
+
+## What Stays Correct Despite the Wrong File
+
+The core gap findings are still valid because the logic is the same — just at different line numbers:
+- `_emitInputEvent` (now at 4970) still has no `followupMutation` field ✅
+- Hover `nodesAdded`/`nodesRemoved` exist but **synthetic hovers hardcode them to 0** — this is actually a *worse* finding than previously stated ✅
+- No `followupMutation` anywhere in the file ✅
+
+## What Needs to Be Updated in the Gap Analysis
+
+The **architecture map** and all **line number references** for the interceptor section are wrong. The correct file is `packages/vscode-extension/interceptor.js` at 11,755 lines. I'll correct those references now — or would you like me to do a deeper pass of the correct file first to check if there are any gaps the smaller/wrong file caused me to miss entirely?
