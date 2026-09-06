@@ -65,6 +65,35 @@ export const FallbackHintsSchema = z.object({
 
 export type FallbackHints = z.infer<typeof FallbackHintsSchema>;
 
+/**
+ * Runtime mirror of core/types/events.ts UnresolvedInteractionSchema.
+ * Must stay in sync with that schema. Present when the interceptor detected
+ * an autocomplete option click but could not resolve a stable locator.
+ */
+export const UnresolvedInteractionV1Schema = z.object({
+  classTokens: z.array(z.string()).optional(),
+  textContent: z.string().optional(),
+  role: z.string().optional(),
+  tagName: z.string().optional(),
+  siblings: z.array(z.object({
+    tagName: z.string(),
+    textContent: z.string(),
+  })).optional(),
+  ancestors: z.array(z.object({
+    tagName: z.string(),
+    classTokens: z.array(z.string()).optional(),
+    role: z.string().optional(),
+  })).optional(),
+  detectionFailureReason: z.enum([
+    'no_aria_role',
+    'no_class_match',
+    'container_not_found',
+    'no_input_context',
+  ]).optional(),
+}).strip();
+
+export type UnresolvedInteractionV1 = z.infer<typeof UnresolvedInteractionV1Schema>;
+
 export const GenerationStepSchemaV1 = z.object({
   stepIndex: z.number(),
   eventId: z.string().optional(),
@@ -81,6 +110,8 @@ export const GenerationStepSchemaV1 = z.object({
   normalizedUrl: z.string().optional(),
   outcomeType: z.string().optional(),
   confidence: z.number().optional(),
+  /** Present when option detection failed with active input session. Capped at 2 KB by emitter. */
+  unresolvedInteraction: UnresolvedInteractionV1Schema.optional(),
 });
 
 export type GenerationStepV1 = z.infer<typeof GenerationStepSchemaV1>;

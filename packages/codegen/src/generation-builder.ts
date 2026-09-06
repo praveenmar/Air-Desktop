@@ -1,4 +1,4 @@
-import {
+﻿import {
   GenerationContextSchemaV1,
   type GenerationAssertion,
   type GenerationContextV1,
@@ -169,6 +169,8 @@ export function deriveGenerationContext(input: {
       normalizedUrl: step.normalizedUrl,
       outcomeType: step.outcomeType,
       confidence: step.confidence,
+      // Additive: pass through DOM evidence from interceptor when detection failed
+      ...(step.unresolvedInteraction ? { unresolvedInteraction: step.unresolvedInteraction } : {}),
     };
 
     const cleanStep = stripUndefined(mappedStep) as GenerationStepV1;
@@ -242,6 +244,13 @@ function classifyNoiseStep(
 ): NoiseClassification | null {
   // Only 'click' actions can be noise-classified in GC-1A/GC-2
   if (rawStep.action !== 'click') {
+    return null;
+  }
+
+  // Steps with unresolvedInteraction carry DOM diagnostic evidence and must stay in steps
+  // so the LLM can construct a best-effort locator. Noise-classifying them would silently
+  // discard the only evidence available for the failed detection.
+  if (rawStep.unresolvedInteraction != null) {
     return null;
   }
 
@@ -450,6 +459,7 @@ function buildGenerationGuidance(): GenerationGuidanceV1 {
       // ── Action semantics → framework-neutral interaction type ──
       'Map step.action to the semantically correct interaction for the resolved element type, not by action name alone: "input" on a checkbox or radio means toggling its checked state, not typing text; "input" on a <select> or combobox-role element means choosing an option, not typing text; "input" on a text field, textarea, or contenteditable element means entering text; "click" means a click/tap interaction; "hover" means a mouseover/hover interaction; "submit" means triggering form submission via the resolved control. Use whichever API your target test framework provides for each of these interaction types.',
       'If a single traceId spans more than one step remaining in steps (not moved to ignoredSteps), treat them as sequential parts of one user interaction — confirm each represents a distinct required action before emitting multiple calls for it.',
+      'If the MCP response includes spanningTraceIds and a step\'s traceId is in that list, it means the compound gesture (e.g. open dropdown + select option) spans across the current pagination boundary. Do not assume the gesture is incomplete or orphaned just because its partner step is missing from the current page view.',
 
       // ── Values, assertions, warnings ──
       'Replace <LLM_GENERATE_MOCK_DATA> with safe mock data or environment-backed test data.',
@@ -460,6 +470,9 @@ function buildGenerationGuidance(): GenerationGuidanceV1 {
       'Generate code in the current repository\'s test framework style.',
 
       // ── Fundamentals repeated (recency) ──
+      'When a step has an unresolvedInteraction field, the interceptor detected an option click but could not identify a stable locator. Use textContent and classTokens from unresolvedInteraction to construct the most specific locator available. Prefer text-based locators (e.g. getByText or :has-text filter) over positional or class-based ones. Do NOT invent a selector that is not grounded in the provided evidence.',
+
+      // ♥ Fundamentals repeated (recency) ♥
       'Do not invent or guess selectors — this rule is repeated because it is the most common failure mode.',
     ],
   };

@@ -1,5 +1,7 @@
 # AIR LLM Onboarding
 
+//this might be out dated or not strictly followed do not taking this for  granted
+
 This document is the canonical onboarding context for a new LLM reviewing or extending AIR.
 
 It is intentionally opinionated. It describes both the AIR vision and the current implementation phase without blurring future roadmap into present-day truth.

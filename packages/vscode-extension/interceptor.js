@@ -3309,6 +3309,41 @@ class AIRInterceptor {
     };
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // CLASS TOKEN UTILITIES (inlined from selector-engine/utils.js)
+  // These are intentionally NOT re-exported through the selector-engine
+  // api object — they are DOM-layer helpers used only during capture.
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * Return the element's className split into non-empty tokens.
+   * Returns [] for SVG elements (className is an SVGAnimatedString, not a string).
+   */
+  _getSafeClassTokens(element) {
+    if (!element || typeof element.className !== 'string') return [];
+    return element.className.split(/\s+/).map(t => t.trim()).filter(Boolean);
+  }
+
+  /**
+   * Returns true if a class token looks like opaque generated/hashed output
+   * that carries no semantic meaning and should be dropped from diagnostics.
+   *
+   * Targets: CSS-in-JS hashes (css-1x2y3z), BEM modifier chaos (_3xK9m),
+   * numeric-led tokens (123abc), and tokens over 30 chars.
+   * Does NOT flag Tailwind utility names like 'text-neutral-800' or 'col-span-2'
+   * — those are meaningful shorthand and useful for human-readable context.
+   */
+  _isOpaqueClassToken(token) {
+    if (!token || typeof token !== 'string') return true;
+    // Numeric-led (invalid CSS class, but can appear in frameworks)
+    if (/^\d/.test(token)) return true;
+    // CSS-in-JS hash pattern: 5+ consecutive hex chars (css-1a2b3c, sc-abc12)
+    if (/[0-9a-f]{5,}/i.test(token) && /[a-f]/i.test(token) && /[0-9]/.test(token)) return true;
+    // Suspiciously long (hashed or generated identifiers)
+    if (token.length > 30) return true;
+    return false;
+  }
+
   _getPayloadBytes(payloadValue) {
     const normalized =
       typeof payloadValue === "string"
@@ -4682,6 +4717,16 @@ class AIRInterceptor {
     const session = this.activeInputSessions.get(key);
     this.activeInputSessions.delete(key);
 
+    if (session) {
+      this._recentlyBlurredSessions = this._recentlyBlurredSessions || new Map();
+      this._recentlyBlurredSessions.set(key, session);
+      setTimeout(() => {
+        if (this._recentlyBlurredSessions.get(key) === session) {
+          this._recentlyBlurredSessions.delete(key);
+        }
+      }, 500);
+    }
+
     // Only emit if the value actually changed during the session
     const finalValue  = target.value || "";
     const startValue  = session ? session.startValue : "";
@@ -5109,6 +5154,9 @@ class AIRInterceptor {
       "p-dropdown-panel",
       // OrangeHRM
       "oxd-select-dropdown", "oxd-userdropdown", "oxd-autocomplete-dropdown",
+      "auto-complete-list", // AbhiBus
+      // Generic Autocomplete
+      "suggestions", "autocomplete", "typeahead", "tt-menu", "ui-autocomplete",
     ];
   }
 
@@ -5341,6 +5389,34 @@ class AIRInterceptor {
         if (this._findDropdownContainer(cursor)) {
           return this._extractOptionData(cursor);
         }
+      } else {
+        const activeInputSessionCount = this.activeInputSessions.size + (this._recentlyBlurredSessions ? this._recentlyBlurredSessions.size : 0);
+        if (activeInputSessionCount > 0 && cursor.parentElement) {
+          const tag = cursor.tagName.toLowerCase();
+          const parentTag = cursor.parentElement.tagName.toLowerCase();
+          let isStructuralOption = false;
+          if (tag === 'li' && (parentTag === 'ul' || parentTag === 'ol')) {
+            isStructuralOption = true;
+          } else if (!['button', 'a', 'input'].includes(tag)) {
+            if (this._findDropdownContainer(cursor)) {
+              isStructuralOption = true;
+            } else {
+              let sameTagSiblings = 0;
+              const children = cursor.parentElement.children;
+              for (let i = 0; i < children.length; i++) {
+                if (children[i].tagName.toLowerCase() === tag) {
+                  sameTagSiblings++;
+                }
+              }
+              if (sameTagSiblings >= 3) {
+                isStructuralOption = true;
+              }
+            }
+          }
+          if (isStructuralOption && this._findDropdownContainer(cursor)) {
+            return this._extractOptionData(cursor);
+          }
+        }
       }
       cursor = cursor.parentElement;
     }
@@ -5389,10 +5465,29 @@ class AIRInterceptor {
       if (!cursor || cursor === document.body) break;
       const role = (cursor.getAttribute("role") || "").toLowerCase();
       const cls  = (cursor.getAttribute("class") || "").toLowerCase();
+      const tag  = cursor.tagName.toLowerCase();
       if (
         AIRInterceptor.CONTAINER_ROLES.has(role) ||
         AIRInterceptor.CONTAINER_CLASS_PATTERNS.some(p => cls.includes(p))
       ) return cursor;
+      
+      const activeInputSessionCount = this.activeInputSessions.size + (this._recentlyBlurredSessions ? this._recentlyBlurredSessions.size : 0);
+      if (activeInputSessionCount > 0 && (tag === 'ul' || tag === 'ol')) {
+        try {
+          const style = window.getComputedStyle(cursor);
+          if (style.position === 'absolute' || style.position === 'fixed') {
+            return cursor;
+          }
+          if (cursor.parentElement) {
+            const parentStyle = window.getComputedStyle(cursor.parentElement);
+            if (parentStyle.position === 'absolute' || parentStyle.position === 'fixed') {
+              return cursor;
+            }
+          }
+        } catch (e) {
+          // Ignore getComputedStyle errors on detached nodes
+        }
+      }
       cursor = cursor.parentElement;
     }
     return null;
@@ -5419,18 +5514,30 @@ class AIRInterceptor {
       label
     ).slice(0, 200);
 
-    // Determine position among sibling options (0-based)
-    const container = this._findDropdownContainer(el);
+    // Determine position among sibling options (0-based).
+    // We use el.parentElement.children (direct sibling set) filtered to the same
+    // tagName or role so that:
+    //   - Role-bearing options: siblings with the same explicit role are counted.
+    //   - Role-less options: querySelectorAll('*') previously returned ALL descendants
+    //     of the container, giving a wrong index. parentElement.children gives only
+    //     direct siblings, which is the correct ordinal position among options.
+    // Index is computed from the immediate parent regardless of whether
+    // _findDropdownContainer succeeded, so structural fallbacks also get a
+    // correct non-negative index for _buildSelectionPayload.
     let index = -1;
-    if (container) {
       const optionRole = el.getAttribute("role") || "";
-      const optionCls  = el.className || "";
-      // Match siblings that share the same role OR at least one class token
-      const siblings = Array.from(container.querySelectorAll(
-        optionRole ? `[role="${optionRole}"]` : "*",
-      ));
-      index = siblings.indexOf(el);
-    }
+      if (optionRole) {
+        const container = this._findDropdownContainer(el);
+        if (container) {
+          const matchingOptions = Array.from(container.querySelectorAll(`[role="${optionRole}"]`));
+          index = matchingOptions.indexOf(el);
+        }
+      } else if (el.parentElement) {
+        const siblings = Array.from(el.parentElement.children).filter(
+          c => c.tagName === el.tagName
+        );
+        index = siblings.indexOf(el);
+      }
 
     return { el, label, value, index };
   }
@@ -6072,9 +6179,10 @@ class AIRInterceptor {
     const target = this._getComposedEventTarget(e);
     if (!target) return;
 
+    const activeInputSessionCount = this.activeInputSessions.size + (this._recentlyBlurredSessions ? this._recentlyBlurredSessions.size : 0);
     this.log("MOUSEDOWN_OPTION_HANDLER_ENTER", {
       hasOpenDropdown: !!this._openDropdown,
-      activeInputSessionCount: this.activeInputSessions.size,
+      activeInputSessionCount: activeInputSessionCount,
       targetTag: target.tagName || null,
       targetRole: target.getAttribute?.('role') || null,
       targetClass: typeof target.className === 'string' ? target.className : null,
@@ -6088,7 +6196,7 @@ class AIRInterceptor {
       let reason = 'no_option_match';
       if (this._openDropdown) {
         reason = 'open_dropdown_but_target_not_option';
-      } else if (this.activeInputSessions.size > 0) {
+      } else if (activeInputSessionCount > 0) {
         reason = 'input_context_but_target_not_option';
       }
       this.log("MOUSEDOWN_OPTION_NOT_DETECTED", {
@@ -6096,9 +6204,82 @@ class AIRInterceptor {
         targetClass: typeof target.className === 'string' ? target.className : null,
         targetText: (this.extractText(target) || '').trim().slice(0, 80) || null,
         hasOpenDropdown: !!this._openDropdown,
-        activeInputSessionCount: this.activeInputSessions.size,
+        activeInputSessionCount: activeInputSessionCount,
         reason,
       });
+
+      // Emit unresolvedInteraction only when an active input session exists and we have
+      // text evidence — this is precisely the AbhiBus / autocomplete-without-ARIA case.
+      // Cap at 25 records per session to prevent unbounded growth on noisy UIs.
+      if (
+        reason === 'input_context_but_target_not_option' &&
+        typeof this._unresolvedInteractionCount !== 'number'
+      ) {
+        this._unresolvedInteractionCount = 0;
+      }
+      if (
+        reason === 'input_context_but_target_not_option' &&
+        this._unresolvedInteractionCount < 25
+      ) {
+        const textContent = (this.extractText(target) || '').trim().slice(0, 120) || undefined;
+        const classTokens = this._getSafeClassTokens(target)
+          .filter(t => !this._isOpaqueClassToken(t));
+        const role = target.getAttribute?.('role') || undefined;
+        const tagName = (target.tagName || '').toLowerCase() || undefined;
+
+        // Up to 5 shape-similar siblings (same tagName, non-empty text)
+        const siblings = target.parentElement
+          ? Array.from(target.parentElement.children)
+              .filter(c => c !== target && c.tagName === target.tagName)
+              .slice(0, 5)
+              .map(c => ({ tagName: (c.tagName || '').toLowerCase(), textContent: (this.extractText(c) || '').trim().slice(0, 80) }))
+              .filter(s => s.textContent.length > 0)
+          : undefined;
+
+        // Up to 3 ancestor levels: tagName + semantic class tokens + role
+        const ancestors = [];
+        let cur = target.parentElement;
+        for (let d = 0; d < 3 && cur && cur !== document.body; d++) {
+          ancestors.push({
+            tagName: (cur.tagName || '').toLowerCase(),
+            classTokens: this._getSafeClassTokens(cur).filter(t => !this._isOpaqueClassToken(t)),
+            role: cur.getAttribute?.('role') || undefined,
+          });
+          cur = cur.parentElement;
+        }
+
+        const unresolvedPayload = {
+          ...(classTokens.length > 0 ? { classTokens } : {}),
+          ...(textContent ? { textContent } : {}),
+          ...(role ? { role } : {}),
+          ...(tagName ? { tagName } : {}),
+          ...(siblings && siblings.length > 0 ? { siblings } : {}),
+          ...(ancestors.length > 0 ? { ancestors } : {}),
+          detectionFailureReason: 'no_aria_role',
+        };
+
+        // Enforce 2 KB cap — drop if oversized rather than truncating structured data
+        const payloadBytes = JSON.stringify(unresolvedPayload).length;
+        if (payloadBytes <= 2048) {
+          this._unresolvedInteractionCount++;
+            const pendingInteraction = { target, payload: unresolvedPayload, timestamp: Date.now() };
+            this._pendingUnresolvedInteraction = pendingInteraction;
+            setTimeout(() => {
+              if (this._pendingUnresolvedInteraction === pendingInteraction) {
+                this._pendingUnresolvedInteraction = null;
+              }
+            }, 5000);
+          this.log("UNRESOLVED_INTERACTION_CAPTURED", {
+            tagName,
+            textContent: textContent?.slice(0, 40) || null,
+            payloadBytes,
+            count: this._unresolvedInteractionCount,
+          });
+        } else {
+          this.log("UNRESOLVED_INTERACTION_SKIPPED", { reason: 'payload_over_2kb', payloadBytes });
+        }
+      }
+
       this._clearPendingOptionSelection();
       return;
     }
@@ -6131,8 +6312,11 @@ class AIRInterceptor {
       controlFamily = this._openDropdown.controlFamily;
       triggerFingerprint = this._openDropdown.triggerFingerprint;
     } else {
-      if (this.activeInputSessions.size > 0) {
-        const sessions = Array.from(this.activeInputSessions.values());
+      if (activeInputSessionCount > 0) {
+        let sessions = Array.from(this.activeInputSessions.values());
+        if (sessions.length === 0 && this._recentlyBlurredSessions) {
+          sessions = Array.from(this._recentlyBlurredSessions.values());
+        }
         traceId = sessions[sessions.length - 1].traceId;
       }
       controlFamily = 'autocomplete';
@@ -6271,7 +6455,7 @@ class AIRInterceptor {
           reason = 'session_invalid';
         } else if (!spatiallyValid) {
           reason = 'spatial_invalid';
-        } else if (pending.hasOpenDropdown && !hasOpenDropdownNow && this.activeInputSessions.size === 0) {
+        } else if (pending.hasOpenDropdown && !hasOpenDropdownNow && activeInputSessionCount === 0) {
           reason = 'missing_open_or_input_context';
         }
         this.log("PENDING_OPTION_DISCARDED", {
@@ -6448,6 +6632,16 @@ class AIRInterceptor {
       !anchor.href.startsWith("javascript:") &&
       !anchor.href.includes("#") &&
       anchor.target !== "_blank"; // New tabs don't change current URL
+
+    // Attach unresolvedInteraction evidence from _handleMousedownForOption when
+    // detection failed with active input session. Cleared after attachment.
+    if (this._pendingUnresolvedInteraction) {
+      const pending = this._pendingUnresolvedInteraction;
+      if (pending.target === clickTarget && (Date.now() - pending.timestamp) < 2000) {
+        actionEvent.unresolvedInteraction = pending.payload;
+      }
+      this._pendingUnresolvedInteraction = null;
+    }
 
     this.queueEvent(actionEvent);
 

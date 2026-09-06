@@ -113,6 +113,55 @@ export const FrameContextSchema = z.object({
 });
 export type FrameContext = z.infer<typeof FrameContextSchema>;
 
+/**
+ * Diagnostic payload attached to events where dropdown option detection failed
+ * and the interceptor could not resolve a stable locator for the clicked element.
+ * Provides the raw DOM evidence the LLM needs to generate a best-effort locator
+ * without inventing selectors it cannot verify.
+ *
+ * Design constraints:
+ *   - Optional on all event types via BaseEventSchema to minimise schema churn.
+ *   - Capped at 2 KB per record (enforced at emit time in interceptor.js).
+ *   - At most 25 records per session (enforced via _unresolvedInteractionCount).
+ *   - Never emitted when detection succeeds (i.e. custom-select with selection field set).
+ */
+export const UnresolvedInteractionSchema = z.object({
+  /** Tailwind / utility class tokens on the clicked element, opaque hashes stripped. */
+  classTokens: z.array(z.string()).optional(),
+  /** Trimmed text content of the clicked element (max 120 chars). */
+  textContent: z.string().optional(),
+  /** Role of the clicked element if present. */
+  role: z.string().optional(),
+  /** Tag name of the clicked element (lowercase). */
+  tagName: z.string().optional(),
+  /**
+   * Shape-similar siblings: each entry is { tagName, textContent } for up to 5
+   * direct siblings sharing the same tagName, giving the LLM population context.
+   */
+  siblings: z.array(z.object({
+    tagName: z.string(),
+    textContent: z.string(),
+  })).optional(),
+  /**
+   * Ancestor chain: up to 3 levels, each { tagName, classTokens, role }. Provides
+   * containment context for selector construction (e.g. parent div with a semantic class).
+   */
+  ancestors: z.array(z.object({
+    tagName: z.string(),
+    classTokens: z.array(z.string()).optional(),
+    role: z.string().optional(),
+  })).optional(),
+  /** Indicates why the normal detection path failed. Observable, not diagnostic-only. */
+  detectionFailureReason: z.enum([
+    'no_aria_role',          // element had no ARIA role matching known patterns
+    'no_class_match',       // element class tokens matched no known library pattern
+    'container_not_found',  // no dropdown container was found walking up 8 levels
+    'no_input_context',     // detection fired outside any active input session
+  ]).optional(),
+});
+
+export type UnresolvedInteraction = z.infer<typeof UnresolvedInteractionSchema>;
+
 /** Base fields shared by all events */
 const BaseEventSchema = z.object({
   id: z.string().uuid(),
@@ -128,6 +177,8 @@ const BaseEventSchema = z.object({
   frameContext: FrameContextSchema.optional(),
   schemaVersion: z.string().optional(),
   selectorResolution: SelectorResolutionSchema.optional(),
+  /** Present when the interceptor detected an autocomplete option click but could not resolve a stable locator. */
+  unresolvedInteraction: UnresolvedInteractionSchema.optional(),
 });
 
 /** Action Event: Click */

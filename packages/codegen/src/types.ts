@@ -947,6 +947,23 @@ export interface CodegenStep {
    * Additive D3.5 resolver diagnostics for sidecar and observability.
    */
   resolverMetadata?: ResolverMetadata;
+
+  /**
+   * Present when the interceptor detected an autocomplete option click but could not
+   * resolve a stable locator. Carries raw DOM evidence (class tokens, text, ancestors,
+   * siblings) so the LLM can construct a best-effort locator without guessing.
+   * Additive-only field. When present and non-empty, the noise-classifier guard
+   * in classifyNoiseStep skips noise classification (the step has diagnostic value).
+   */
+  unresolvedInteraction?: {
+    classTokens?: string[];
+    textContent?: string;
+    role?: string;
+    tagName?: string;
+    siblings?: Array<{ tagName: string; textContent: string }>;
+    ancestors?: Array<{ tagName: string; classTokens?: string[]; role?: string }>;
+    detectionFailureReason?: 'no_aria_role' | 'no_class_match' | 'container_not_found' | 'no_input_context';
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

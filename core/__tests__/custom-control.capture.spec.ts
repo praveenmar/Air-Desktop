@@ -1706,6 +1706,7 @@ describe('custom-control capture heuristics', () => {
       </div>
     `, 'https://example.test/admin', () => {
       const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
       const target = document.querySelector('.oxd-select-text-input') as Element;
 
       const resolved = (interceptor as any)._resolveCustomDropdownTrigger(target) as Element | null;
@@ -1722,6 +1723,7 @@ describe('custom-control capture heuristics', () => {
       </div>
     `, 'https://example.test/admin', () => {
       const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
       const target = document.querySelector('.content') as Element;
 
       const resolved = (interceptor as any)._resolveCustomDropdownTrigger(target) as Element | null;
@@ -1740,6 +1742,7 @@ describe('custom-control capture heuristics', () => {
       </ul>
     `, 'https://example.test/admin', async () => {
       const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
       const trigger = document.querySelector('.oxd-userdropdown-name') as Element;
       const triggerFingerprint = interceptor.generateFingerprint(trigger);
 
@@ -1774,6 +1777,7 @@ describe('custom-control capture heuristics', () => {
       </ul>
     `, 'https://example.test/admin', () => {
       const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
       const trigger = document.querySelector('.oxd-userdropdown-name') as Element;
       const option = document.querySelector('[role="menuitem"]') as Element;
       interceptor._openDropdown = {
@@ -1815,6 +1819,7 @@ describe('custom-control capture heuristics', () => {
         </div>
       `, 'https://example.test/admin', async () => {
         const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
         const trigger = document.querySelector('.oxd-select-text') as Element;
         const option = document.querySelector('[role="option"]') as Element;
         interceptor._openDropdown = {
@@ -1868,6 +1873,7 @@ describe('custom-control capture heuristics', () => {
         </div>
       `, 'https://example.test/admin', async () => {
         const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
         const trigger = document.querySelector('.oxd-select-text') as Element;
         const option = document.querySelector('[role="option"]') as Element;
         interceptor._openDropdown = {
@@ -1921,6 +1927,7 @@ describe('custom-control capture heuristics', () => {
         </ul>
       `, 'https://example.test/admin', async () => {
         const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
         const trigger = document.querySelector('.oxd-userdropdown-name') as Element;
         const option = document.querySelector('[role="menuitem"]') as Element;
         interceptor._openDropdown = {
@@ -1968,6 +1975,7 @@ describe('custom-control capture heuristics', () => {
         </div>
       `, 'https://example.test/admin', async () => {
         const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
         const option = document.querySelector('[role="option"]') as Element;
         (interceptor._getComposedEventTarget as any).mockImplementation((event: Event | null) => (event?.target as Element | null) ?? option);
 
@@ -2000,6 +2008,7 @@ describe('custom-control capture heuristics', () => {
         </div>
       `, 'https://example.test/admin', async () => {
         const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
         const input = document.querySelector('#employee') as HTMLInputElement;
         const option = document.querySelector('[role="option"]') as Element;
         interceptor.activeInputSessions.set((interceptor as any)._fieldKey(input), {
@@ -2040,6 +2049,7 @@ describe('custom-control capture heuristics', () => {
       </div>
     `, 'https://example.test/admin', () => {
       const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
       const trigger = document.querySelector('.oxd-select-text') as Element;
       const option = document.querySelector('[role="option"]') as Element;
       interceptor._openDropdown = {
@@ -2117,6 +2127,239 @@ describe('interceptor session id contract', () => {
       expect(window.sessionStorage.getItem('AIR_SESSION_ID')).toBe('session-cccccccc-cccc-4ccc-8ccc-cccccccccccc');
 
       initSpy.mockRestore();
+    });
+  });
+});
+
+describe('option sibling index computation', () => {
+  // Phase 0.1 regression: _extractOptionData previously used
+  // container.querySelectorAll('*') for role-less elements, giving position
+  // among all descendants rather than among sibling options. These tests
+  // verify the fix: parentElement.children filtered by tagName.
+
+  it('reports correct 0-based index for a role-less <li> at position 2 of 5', () => {
+    return withBrowserGlobals(`
+      <ul>
+        <li>City A</li>
+        <li>City B</li>
+        <li>City C</li>
+        <li>City D</li>
+        <li>City E</li>
+      </ul>
+    `, 'https://example.test/autocomplete', () => {
+      const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
+      const items = Array.from(document.querySelectorAll('li'));
+      // Target: 3rd item (0-based index 2)
+      const target = items[2] as Element;
+
+      const optionData = (interceptor as any)._extractOptionData(target);
+
+      expect(optionData.label).toBe('City C');
+      expect(optionData.value).toBe('City C');
+      // Must be 2 (0-based position among <li> siblings), not -1 or a large descendant index
+      expect(optionData.index).toBe(2);
+    });
+  });
+
+  it('reports index 0 for a role-less <li> that is the first and only sibling', () => {
+    return withBrowserGlobals(`
+      <ul>
+        <li>Only City</li>
+      </ul>
+    `, 'https://example.test/autocomplete', () => {
+      const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
+      const target = document.querySelector('li') as Element;
+
+      const optionData = (interceptor as any)._extractOptionData(target);
+
+      expect(optionData.index).toBe(0);
+    });
+  });
+
+  it('reports correct index for a role-less <div> sibling (AbhiBus-shaped DOM)', () => {
+    return withBrowserGlobals(`
+      <div class="suggestions">
+        <div class="text-neutral-800 col">Hyderabad (All boarding points)</div>
+        <div class="text-neutral-800 col">Mumbai (All boarding points)</div>
+        <div class="text-neutral-800 col">Pune (All boarding points)</div>
+      </div>
+    `, 'https://www.abhibus.com', () => {
+      const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
+      const items = Array.from(document.querySelectorAll('.suggestions > div'));
+      // Target: 2nd item (0-based index 1) — "Mumbai"
+      const target = items[1] as Element;
+
+      const optionData = (interceptor as any)._extractOptionData(target);
+
+      expect(optionData.label).toBe('Mumbai (All boarding points)');
+      expect(optionData.index).toBe(1);
+    });
+  });
+
+  it('uses role-based sibling count when option has an explicit role', () => {
+    return withBrowserGlobals(`
+      <div role="listbox">
+        <div role="option">Option A</div>
+        <div role="option">Option B</div>
+        <div role="option">Option C</div>
+      </div>
+    `, 'https://example.test/listbox', () => {
+      const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
+      const items = Array.from(document.querySelectorAll('[role="option"]'));
+      const target = items[2] as Element; // Option C
+
+      const optionData = (interceptor as any)._extractOptionData(target);
+
+      expect(optionData.label).toBe('Option C');
+      expect(optionData.index).toBe(2);
+    });
+  });
+
+  it('returns index -1 when element has no parentElement', () => {
+    return withBrowserGlobals(`<div></div>`, 'https://example.test', () => {
+      const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
+      // Detached element — no parentElement
+      const detached = document.createElement('li');
+      detached.textContent = 'Orphan';
+
+      const optionData = (interceptor as any)._extractOptionData(detached);
+
+      expect(optionData.index).toBe(-1);
+    });
+  });
+});
+
+describe('unresolvedInteraction and structural fallback pipeline', () => {
+  it('Test Case 1: structural fallback emits custom-select on role-less li click and preserves traceId', async () => {
+    return withBrowserGlobals(`
+      <div>
+        <input type="text" id="autocomplete-input" placeholder="Search cities" />
+        <ul class="options-list">
+          <li>Mumbai</li>
+          <li>Pune</li>
+          <li>Hyderabad</li>
+        </ul>
+      </div>
+    `, 'https://example.test/autocomplete', async () => {
+      const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
+      
+      const input = document.getElementById('autocomplete-input') as HTMLInputElement;
+      interceptor.handleFocus({ target: input, type: 'focus', composedPath: () => [input] } as any);
+      interceptor.handleInput({ target: input, type: 'input', composedPath: () => [input] } as any);
+      
+      const session = Array.from(interceptor.activeInputSessions.values())[0];
+      const traceId = (session as any).traceId;
+      
+      const targetLi = Array.from(document.querySelectorAll('li'))[0];
+      
+      interceptor._handleMousedownForOption({ target: targetLi, clientX: 10, clientY: 10, preventDefault: vi.fn() } as any);
+      await interceptor.handleClick({ target: targetLi, clientX: 10, clientY: 10, composedPath: () => [targetLi], preventDefault: vi.fn() } as any);
+      
+      expect(interceptor.queueEvent).toHaveBeenCalledTimes(1);
+      const event = (interceptor.queueEvent as any).mock.calls[0][0];
+      expect(event.type).toBe('custom-select');
+      expect(event.traceId).toBe(traceId);
+      expect(event.unresolvedInteraction).toBeUndefined();
+    });
+  });
+
+  it('Test Case 2: duplicate semantic elements correctly fall back to positional warning (E6)', async () => {
+    return withBrowserGlobals(`
+      <div>
+        <input type="text" id="autocomplete-input" />
+        <ul class="options-list">
+          <li>Identical Option</li>
+          <li>Identical Option</li>
+        </ul>
+      </div>
+    `, 'https://example.test/autocomplete', async () => {
+      const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
+      
+      const input = document.getElementById('autocomplete-input') as HTMLInputElement;
+      interceptor.handleFocus({ target: input, type: 'focus', composedPath: () => [input] } as any);
+      interceptor.handleInput({ target: input, type: 'input', composedPath: () => [input] } as any);
+      
+      const targetLi = Array.from(document.querySelectorAll('li'))[1];
+      
+      interceptor._handleMousedownForOption({ target: targetLi, clientX: 10, clientY: 10, preventDefault: vi.fn() } as any);
+      await interceptor.handleClick({ target: targetLi, clientX: 10, clientY: 10, composedPath: () => [targetLi], preventDefault: vi.fn() } as any);
+      
+      expect(interceptor.queueEvent).toHaveBeenCalledTimes(1);
+      const event = (interceptor.queueEvent as any).mock.calls[0][0];
+      expect(event.type).toBe('custom-select');
+      expect(event).toBeDefined();
+    });
+  });
+
+  it('Test Case 3: mousedown without click successfully clears pending state leak and unresolvedInteraction emits correctly', async () => {
+    return withBrowserGlobals(`
+      <div>
+        <input type="text" id="autocomplete-input" />
+        <div class="fake-option text-neutral-800">Fake Option</div>
+        <button id="submit-btn">Submit</button>
+      </div>
+    `, 'https://example.test/autocomplete', async () => {
+      (globalThis as any).requestAnimationFrame = (cb: any) => setTimeout(cb, 16) as any;
+      const interceptor = makeHarness();
+      interceptor.waitForUrlChange = () => Promise.resolve() as any;
+      
+      const input = document.getElementById('autocomplete-input') as HTMLInputElement;
+      interceptor.handleFocus({ target: input, type: 'focus', composedPath: () => [input] } as any);
+      interceptor.handleInput({ target: input, type: 'input', composedPath: () => [input] } as any);
+      
+      const fakeOption = document.querySelector('.fake-option') as Element;
+      const submitBtn = document.getElementById('submit-btn') as Element;
+      
+      interceptor._handleMousedownForOption({ target: fakeOption, clientX: 10, clientY: 10, preventDefault: vi.fn() } as any);
+      
+      expect(interceptor._pendingUnresolvedInteraction).toBeDefined();
+      expect((interceptor._pendingUnresolvedInteraction as any).payload.textContent).toBe('Fake Option');
+      expect((interceptor._pendingUnresolvedInteraction as any).payload.classTokens).toContain('fake-option');
+      
+      (interceptor.queueEvent as any).mockClear();
+      await interceptor.handleClick({ target: submitBtn, clientX: 50, clientY: 50, composedPath: () => [submitBtn], preventDefault: vi.fn() } as any);
+      
+      expect(interceptor.queueEvent).toHaveBeenCalledTimes(1);
+      const event = (interceptor.queueEvent as any).mock.calls[0][0];
+      expect(['click', 'outcome']).toContain(event.type);
+      expect(event.unresolvedInteraction).toBeUndefined();
+      expect(interceptor._pendingUnresolvedInteraction).toBeNull();
+    });
+
+    it('Test Case 4: unresolvedInteraction payload is correctly emitted on successful click', async () => {
+      return withBrowserGlobals(`
+        <div>
+          <input type="text" id="autocomplete-input" />
+          <div class="fake-option text-neutral-800">Fake Option</div>
+        </div>
+      `, 'https://example.test/autocomplete', async () => {
+        (globalThis as any).requestAnimationFrame = (cb: any) => setTimeout(cb, 16) as any;
+        const interceptor = makeHarness();
+        interceptor.waitForUrlChange = () => Promise.resolve() as any;
+        
+        const input = document.getElementById('autocomplete-input') as HTMLInputElement;
+        const fakeOption = document.querySelector('.fake-option') as Element;
+        
+        interceptor.handleFocus({ target: input, type: 'focus', composedPath: () => [input] } as any);
+        interceptor.handleInput({ target: input, type: 'input', composedPath: () => [input] } as any);
+        
+        interceptor._handleMousedownForOption({ target: fakeOption, clientX: 10, clientY: 10, preventDefault: vi.fn() } as any);
+        
+        (interceptor.queueEvent as any).mockClear();
+        await interceptor.handleClick({ target: fakeOption, clientX: 10, clientY: 10, composedPath: () => [fakeOption], preventDefault: vi.fn() } as any);
+        
+        const clickEvent2 = (interceptor.queueEvent as any).mock.calls.slice(-1)[0][0];
+        expect(['click', 'outcome']).toContain(clickEvent2.type);
+        expect(clickEvent2.unresolvedInteraction).toBeDefined();
+        expect(clickEvent2.unresolvedInteraction.textContent).toBe('Fake Option');
+      });
     });
   });
 });

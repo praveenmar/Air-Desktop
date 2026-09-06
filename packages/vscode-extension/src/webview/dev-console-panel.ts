@@ -619,7 +619,6 @@ function renderMcpTab(production: McpConfigVariant, development: McpConfigVarian
 function renderShellScript(defaultTab: DevConsoleTab): string {
   return `
     <script>
-      window.__airVscode = acquireVsCodeApi();
       window.addEventListener('message', (event) => {
         const msg = event.data;
         if (!msg || typeof msg.type !== 'string') return;
@@ -675,6 +674,9 @@ function renderShell(tab: DevConsoleTab, parts: {
 <head>
 <meta charset="UTF-8">
 <style>${getSharedStyles()}</style>
+<script>
+  window.__airVscode = acquireVsCodeApi();
+</script>
 </head>
 <body>
   <h2>AIR Developer Console</h2>

@@ -71,11 +71,24 @@ export const getSessionGenerationContextTool: AirMcpToolHandler = {
       const steps = generationContext.steps.slice(offset, offset + limit);
       const hasMore = offset + limit < totalSteps;
 
+      const currentTraceIds = new Set(steps.map(s => s.traceId).filter(Boolean));
+      const spanningTraceIdsSet = new Set<string>();
+      for (let i = 0; i < totalSteps; i++) {
+        const step = generationContext.steps[i];
+        if (step.traceId && currentTraceIds.has(step.traceId)) {
+          if (i < offset || i >= offset + limit) {
+            spanningTraceIdsSet.add(step.traceId);
+          }
+        }
+      }
+      const spanningTraceIds = Array.from(spanningTraceIdsSet);
+
       const resolvedSteps = generationContext.steps.filter(s => s.locatorStatus === 'resolved').length;
       const unresolvedSteps = generationContext.steps.filter(s => s.locatorStatus === 'unresolved').length;
       const notApplicableSteps = generationContext.steps.filter(s => s.locatorStatus === 'not_applicable').length;
       const assertionCount = generationContext.steps.reduce((sum, step) => sum + (step.assertions?.length || 0), 0);
       const ignoredStepsCount = generationContext.ignoredSteps?.length ?? 0;
+      const fragileStepCount = generationContext.steps.filter(s => s.selectorResolution?.selected?.warningCodes && s.selectorResolution.selected.warningCodes.length > 0).length;
 
       const response = {
         schemaVersion: 'air:mcp-generation-context-response:v1' as const,
@@ -89,6 +102,7 @@ export const getSessionGenerationContextTool: AirMcpToolHandler = {
         offset,
         limit,
         hasMore,
+        spanningTraceIds,
 
         summary: {
           resolvedSteps,
@@ -96,6 +110,7 @@ export const getSessionGenerationContextTool: AirMcpToolHandler = {
           notApplicableSteps,
           assertionCount,
           ignoredStepsCount,
+          fragileStepCount,
         },
 
         steps,
@@ -105,7 +120,7 @@ export const getSessionGenerationContextTool: AirMcpToolHandler = {
          * The LLM must NOT generate code from these unless explicitly requested.
          * Use for context, diagnostics, and fallback explanation only.
          */
-        ignoredSteps: generationContext.ignoredSteps ?? [],
+        ignoredSteps: offset === 0 ? (generationContext.ignoredSteps ?? []) : [],
 
         /**
          * Typed generation rules for the IDE LLM.

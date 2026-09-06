@@ -59,7 +59,7 @@ import {
 import { buildSelectorSpec } from './selector-spec';
 import { normalizeUrl } from '@air/shared';
 import { openSqliteReadonlyDatabase, SqliteDatabase } from './sqlite-client';
-import { SelectorResolutionSchema, type GenerationContextV1 } from './runtime-schemas';
+import { SelectorResolutionSchema, UnresolvedInteractionV1Schema, type GenerationContextV1 } from './runtime-schemas';
 import { deriveGenerationContext } from './generation-builder';
 
 export const SELECTOR_RANK_MAP: Record<string, number> = {
@@ -855,6 +855,21 @@ function extractNormalizedUrl(payloadJson: string | null, fallbackPageUrl: strin
   return undefined;
 }
 
+function extractUnresolvedInteraction(payloadJson: string | null): CodegenStep['unresolvedInteraction'] | undefined {
+  if (!payloadJson) return undefined;
+  try {
+    const payload = JSON.parse(payloadJson);
+    const ui = payload?.unresolvedInteraction;
+    if (!ui) return undefined;
+    // Strictly validate the payload against the runtime schema to prevent SQLite injection
+    // or corrupted records from crashing the LLM generation phase.
+    const parsed = UnresolvedInteractionV1Schema.safeParse(ui);
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function computeFpHash(fp: FingerprintData | null, eventType: string): string {
   const raw = [
     fp?.selector       || '',
@@ -1629,6 +1644,9 @@ export class CodegenService {
       };
 
       Object.assign(step, extractCustomControlEvidence(ev.payload, ev.eventType as ActionType));
+
+      const unresolvedInteraction = extractUnresolvedInteraction(ev.payload);
+      if (unresolvedInteraction) step.unresolvedInteraction = unresolvedInteraction;
 
       if (sourceNodeId) {
         lastResolvedSourceNodeId = sourceNodeId;

@@ -200,66 +200,135 @@ function scoreProofPacketCandidate(candidate) {
   return { score, tier, reasons, isDynamic: false };
 }
 
-function isProofBackedReplaySafe(candidate) {
-  if (!candidate || typeof candidate.selector !== 'string') return false;
-  if (!candidate.classId) return false;
+/**
+ * Compute a structured uniqueness verdict for a proof-packet candidate.
+ *
+ * Returns: { verdict: 'unique' | 'ambiguous' | 'unknown', method: string, evidence: string | null }
+ *
+ * verdict meanings:
+ *   'unique'    — proof fields confirm this selector identifies exactly one element at record time.
+ *   'ambiguous' — proof fields are present but confirm non-uniqueness (e.g. duplicate label, Shape B).
+ *   'unknown'   — proof fields are missing/undefined; uniqueness cannot be determined.
+ *
+ * This is the canonical source of truth. isProofBackedReplaySafe is derived from it
+ * and must not diverge. Do not add logic to isProofBackedReplaySafe directly.
+ */
+export function computeUniqueness(candidate) {
+  // Guard: missing selector or classId — cannot evaluate
+  if (!candidate || typeof candidate.selector !== 'string') {
+    return { verdict: 'unknown', method: 'no-candidate', evidence: null };
+  }
+  if (!candidate.classId) {
+    return { verdict: 'unknown', method: 'no-class-id', evidence: null };
+  }
 
   const proof = candidate.proof || {};
 
-  // Dynamic values are never safe to replay
-  if (proof.isLikelyDynamic === true || proof.accessibleNameIsDynamic === true) return false;
+  // Dynamic values are inherently ambiguous — they will differ on replay
+  if (proof.isLikelyDynamic === true || proof.accessibleNameIsDynamic === true) {
+    return { verdict: 'ambiguous', method: 'dynamic-value', evidence: 'isLikelyDynamic or accessibleNameIsDynamic' };
+  }
 
   switch (candidate.classId) {
     case 'direct-identity':
-      if (proof.isGloballyUnique === false) return false;
-      return proof.isLikelyDynamic !== true && !!proof.identityType;
+      if (proof.isGloballyUnique === false)
+        return { verdict: 'ambiguous', method: 'proof-binding', evidence: 'isGloballyUnique=false' };
+      if (proof.isLikelyDynamic === true || !proof.identityType)
+        return { verdict: 'unknown', method: 'proof-binding', evidence: 'identityType missing' };
+      return { verdict: 'unique', method: 'proof-binding', evidence: 'identityType' };
 
     case 'semantic-identity':
       // F-S4: Enforce ARIA uniqueness evaluated natively during proof generation.
-      if (proof.uniqueByAriaName === false) return false;
-      return !!proof.accessibleName && proof.accessibleNameIsDynamic !== true;
+      if (proof.uniqueByAriaName === false)
+        return { verdict: 'ambiguous', method: 'proof-binding', evidence: 'uniqueByAriaName=false' };
+      if (!proof.accessibleName || proof.accessibleNameIsDynamic === true)
+        return { verdict: 'unknown', method: 'proof-binding', evidence: 'accessibleName missing or dynamic' };
+      return { verdict: 'unique', method: 'proof-binding', evidence: 'accessibleName' };
 
     case 'label-bound-identity':
       // F-S4: Enforce label uniqueness evaluated natively during proof generation.
-      if (typeof proof.duplicateLabelCount === 'number' && proof.duplicateLabelCount > 0) return false;
-      return !!proof.fieldLabelText &&
-        ['label-for', 'wrapped-label', 'aria-labelledby'].includes(proof.fieldRelation);
+      if (typeof proof.duplicateLabelCount === 'number' && proof.duplicateLabelCount > 0)
+        return { verdict: 'ambiguous', method: 'proof-binding', evidence: 'duplicateLabelCount>0' };
+      if (!proof.fieldLabelText || !['label-for', 'wrapped-label', 'aria-labelledby'].includes(proof.fieldRelation))
+        return { verdict: 'unknown', method: 'proof-binding', evidence: 'fieldLabelText or fieldRelation missing' };
+      return { verdict: 'unique', method: 'proof-binding', evidence: 'fieldLabelText' };
 
     case 'semantic-context-filtering':
-      if (proof.proofType === 'bounded-field')
-        return !!proof.fieldLabelText && (proof.duplicateLabelCount == null || proof.duplicateLabelCount <= 1);
-      if (proof.proofType === 'table-row')
-        return proof.uniqueRowBinding === true && proof.uniqueActionBinding === true;
-      if (proof.proofType === 'generic-container')
-        return !!proof.containerAnchorText && !!proof.actionName;
-      if (proof.proofType === 'repeated-group-action')
-        return proof.repeatedContainer === true && !!proof.actionName && 
-               (!!proof.cardUniqueText || typeof proof.cardPositionalIndex === 'number');
-      return false;
+      if (proof.proofType === 'bounded-field') {
+        if (!proof.fieldLabelText) return { verdict: 'unknown', method: 'proof-binding', evidence: 'fieldLabelText missing' };
+        if (typeof proof.duplicateLabelCount === 'number' && proof.duplicateLabelCount > 1)
+          return { verdict: 'ambiguous', method: 'proof-binding', evidence: 'duplicateLabelCount>1' };
+        return { verdict: 'unique', method: 'proof-binding', evidence: 'bounded-field' };
+      }
+      if (proof.proofType === 'table-row') {
+        if (proof.uniqueRowBinding !== true || proof.uniqueActionBinding !== true)
+          return { verdict: 'ambiguous', method: 'proof-binding', evidence: 'uniqueRowBinding or uniqueActionBinding not confirmed' };
+        return { verdict: 'unique', method: 'proof-binding', evidence: 'table-row' };
+      }
+      if (proof.proofType === 'generic-container') {
+        if (!proof.containerAnchorText || !proof.actionName)
+          return { verdict: 'unknown', method: 'proof-binding', evidence: 'containerAnchorText or actionName missing' };
+        return { verdict: 'unique', method: 'proof-binding', evidence: 'generic-container' };
+      }
+      if (proof.proofType === 'repeated-group-action') {
+        if (!proof.repeatedContainer || !proof.actionName)
+          return { verdict: 'unknown', method: 'proof-binding', evidence: 'repeatedContainer or actionName missing' };
+        if (!proof.cardUniqueText)
+          return { verdict: 'ambiguous', method: 'positional', evidence: 'lacks_unique_text' };
+        return { verdict: 'unique', method: 'proof-binding', evidence: 'repeated-group-action' };
+      }
+      return { verdict: 'unknown', method: 'proof-binding', evidence: 'unrecognised proofType' };
 
     case 'structural-disambiguation':
-      return !!proof.fieldLabelText && typeof proof.targetIndexWithinAmbiguity === 'number';
+      if (!proof.fieldLabelText || typeof proof.targetIndexWithinAmbiguity !== 'number')
+        return { verdict: 'unknown', method: 'proof-binding', evidence: 'fieldLabelText or targetIndexWithinAmbiguity missing' };
+      return { verdict: 'unique', method: 'proof-binding', evidence: 'structural-disambiguation' };
 
     case 'stateful-lifecycle-linkage':
-      if (candidate.metadata?.shape === 'P') return false;
-      return proof.uniquePanelBinding === true && proof.uniqueTargetBinding === true;
+      // Shape P is never unique — it is positional by construction
+      if (candidate.metadata?.shape === 'P')
+        return { verdict: 'ambiguous', method: 'positional', evidence: 'Shape P' };
+      if (proof.uniquePanelBinding !== true || proof.uniqueTargetBinding !== true)
+        return { verdict: 'ambiguous', method: 'proof-binding', evidence: 'uniquePanelBinding or uniqueTargetBinding not confirmed' };
+      return { verdict: 'unique', method: 'proof-binding', evidence: 'stateful-lifecycle-linkage' };
 
     case 'collection-membership':
-      if (candidate.metadata?.shape === 'B') return false;
-      return proof.uniqueRowBinding === true && proof.uniqueActionBinding === true;
+      // Shape B is never unique — position within collection is order-dependent
+      if (candidate.metadata?.shape === 'B')
+        return { verdict: 'ambiguous', method: 'positional', evidence: 'Shape B' };
+      if (proof.uniqueRowBinding !== true || proof.uniqueActionBinding !== true)
+        return { verdict: 'ambiguous', method: 'proof-binding', evidence: 'uniqueRowBinding or uniqueActionBinding not confirmed' };
+      return { verdict: 'unique', method: 'proof-binding', evidence: 'collection-membership' };
 
     case 'hierarchical-navigation':
-      if (candidate.metadata?.shape === 'P-chain') return false;
+      // Shape P-chain is never unique — it encodes a positional path
+      if (candidate.metadata?.shape === 'P-chain')
+        return { verdict: 'ambiguous', method: 'positional', evidence: 'Shape P-chain' };
       // F-S4: Enforce tree-node name uniqueness evaluated natively during proof generation.
-      if (proof.uniqueNodeName === false) return false;
-      return !!proof.nodeName;
+      if (proof.uniqueNodeName === false)
+        return { verdict: 'ambiguous', method: 'proof-binding', evidence: 'uniqueNodeName=false' };
+      if (!proof.nodeName)
+        return { verdict: 'unknown', method: 'proof-binding', evidence: 'nodeName missing' };
+      return { verdict: 'unique', method: 'proof-binding', evidence: 'nodeName' };
 
     case 'boundary-traversal':
-      return proof.isSameOrigin === true && !!proof.frameSelector;
+      // boundary-traversal proves frame reachability, not element uniqueness within the frame.
+      // Treat as unknown rather than unique — the hole is visible but not fixed here.
+      if (proof.isSameOrigin !== true || !proof.frameSelector)
+        return { verdict: 'unknown', method: 'boundary-traversal', evidence: 'isSameOrigin or frameSelector missing' };
+      return { verdict: 'unknown', method: 'boundary-traversal', evidence: 'frame reachable, element uniqueness unproven' };
 
     default:
-      return false;
+      return { verdict: 'unknown', method: 'unrecognised-class', evidence: candidate.classId };
   }
+}
+
+/**
+ * Returns true iff computeUniqueness concludes this candidate is 'unique'.
+ * Derived entirely from computeUniqueness — do not add logic here directly.
+ */
+function isProofBackedReplaySafe(candidate) {
+  return computeUniqueness(candidate).verdict === 'unique';
 }
 
 export function buildSelectorDecision({
